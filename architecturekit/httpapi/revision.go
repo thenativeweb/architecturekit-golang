@@ -68,15 +68,34 @@ func Await(
 	return nil
 }
 
+// Volatile says what an answer depends on besides the revision and the
+// resource, as a string that changes when the answer would.
+//
+// A revision describes the read model and nothing else. That is enough while
+// the answer follows from the stored events alone -- and it stops being
+// enough the moment anything outside them takes part. "Everything due today"
+// is the plain case: the same events mean something different after
+// midnight, without a single event being written. A tag built from the
+// revision alone would then claim that nothing had changed, and the caller
+// would keep yesterday's answer for as long as nothing else happened.
+//
+// Returning the current day is usually all it takes.
+type Volatile func(*http.Request) string
+
 // ServeUnchanged answers 304 when the caller already holds this revision of
 // this resource, and reports whether it did. Use it after Await, because
 // waiting is what changes the answer.
-func ServeUnchanged(w http.ResponseWriter, r *http.Request, revision string) bool {
-	if revision == "" || r.Header.Get("If-None-Match") != etagOf(r, revision) {
+func ServeUnchanged(
+	w http.ResponseWriter,
+	r *http.Request,
+	revision string,
+	varies Volatile,
+) bool {
+	if revision == "" || r.Header.Get("If-None-Match") != etagOf(r, revision, varies) {
 		return false
 	}
 
-	writeRevision(w, r, revision)
+	writeRevision(w, r, revision, varies)
 	w.WriteHeader(http.StatusNotModified)
 
 	return true
@@ -90,9 +109,10 @@ func RespondResultAt[TResult any](
 	revision string,
 	result TResult,
 	err error,
+	varies Volatile,
 ) {
 	if err == nil {
-		writeRevision(w, r, revision)
+		writeRevision(w, r, revision, varies)
 	}
 
 	RespondResult(w, result, err)
@@ -101,6 +121,11 @@ func RespondResultAt[TResult any](
 // QueryRevisioned wires a query that can be asked for a revision. It waits for
 // what the caller asked for, answers 304 when nothing changed, and tags the
 // answer with the revision it served.
+//
+// It assumes the answer follows from the read model alone. When it does not --
+// when the clock or anything else outside the events takes part -- use
+// QueryVarying and say so, or callers will be told that nothing has changed
+// when it has.
 //
 // Use Await, ServeUnchanged and RespondResultAt directly when you need a
 // different shape.
@@ -112,6 +137,21 @@ func QueryRevisioned[TUser any, TQuery any, TResult any](
 	toQuery ToQuery[TUser, TQuery],
 	answer Answer[TQuery, TResult],
 	wait time.Duration,
+) {
+	QueryVarying(api, mux, pattern, view, toQuery, answer, wait, nil)
+}
+
+// QueryVarying is QueryRevisioned for an answer that depends on more than the
+// read model. See Volatile.
+func QueryVarying[TUser any, TQuery any, TResult any](
+	api *API[TUser],
+	mux *http.ServeMux,
+	pattern string,
+	view architecturekit.Revisioned,
+	toQuery ToQuery[TUser, TQuery],
+	answer Answer[TQuery, TResult],
+	wait time.Duration,
+	varies Volatile,
 ) {
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The caller is determined before anything waits, so that nobody can
@@ -130,21 +170,25 @@ func QueryRevisioned[TUser any, TQuery any, TResult any](
 		// tag describe the same state even if the projection moves on.
 		revision := view.Revision()
 
-		if ServeUnchanged(w, r, revision) {
+		if ServeUnchanged(w, r, revision, varies) {
 			return
 		}
 
 		result, err := Ask(r, api, toQuery, answer)
-		RespondResultAt(w, r, revision, result, err)
+		RespondResultAt(w, r, revision, result, err, varies)
 	}))
 }
 
-func writeRevision(w http.ResponseWriter, r *http.Request, revision string) {
+func writeRevision(w http.ResponseWriter, r *http.Request, revision string, varies Volatile) {
 	if revision == "" {
 		return
 	}
 
-	w.Header().Set("ETag", etagOf(r, revision))
+	// Without this a browser is free to decide for itself how long the answer
+	// stays good, and it will not ask again until it has. The tag still saves
+	// the body when nothing has changed; this only insists that it asks.
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("ETag", etagOf(r, revision, varies))
 	w.Header().Set(HeaderRevision, revision)
 }
 
@@ -152,11 +196,16 @@ func writeRevision(w http.ResponseWriter, r *http.Request, revision string) {
 // same view shares a revision, so a tag that held nothing else would match
 // across resources -- and a caller that sent one query's tag to another would
 // be told, wrongly, that nothing had changed.
-func etagOf(r *http.Request, revision string) string {
+func etagOf(r *http.Request, revision string, varies Volatile) string {
 	resource := fnv.New64a()
 	_, _ = io.WriteString(resource, r.URL.Path)
 	_, _ = io.WriteString(resource, "?")
 	_, _ = io.WriteString(resource, r.URL.RawQuery)
+
+	if varies != nil {
+		_, _ = io.WriteString(resource, "\x00")
+		_, _ = io.WriteString(resource, varies(r))
+	}
 
 	return fmt.Sprintf(`"%s-%x"`, revision, resource.Sum64())
 }

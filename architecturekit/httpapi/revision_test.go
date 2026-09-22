@@ -301,3 +301,76 @@ func (refusingView) Revision() string { return "" }
 func (refusingView) WaitFor(context.Context, string) error {
 	return architecturekit.ErrNotARevision
 }
+
+// TestAnAnswerThatDependsOnMoreThanTheRevision covers the case the revision
+// alone cannot describe. An answer such as "everything due today" changes at
+// midnight although no event is written, so the revision stays put -- and a
+// tag built from it alone would tell the caller, wrongly, that nothing had
+// changed. That is exactly how an application can end up showing yesterday's
+// list until something unrelated happens.
+func TestAnAnswerThatDependsOnMoreThanTheRevision(t *testing.T) {
+	view := architecturekit.NewItemView[noteItem]()
+	view.Seen("7")
+
+	day := "2026-09-22"
+
+	mux := http.NewServeMux()
+	api := httpapi.NewAPI(deadStore(t), userFrom)
+
+	httpapi.QueryVarying(api, mux, "GET /notes", view, allNotes, countNotesIn(view),
+		time.Second, func(*http.Request) string { return day })
+
+	first := askNotes(mux, nil)
+	if first.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", first.Code)
+	}
+
+	tag := first.Header().Get("ETag")
+	if tag == "" {
+		t.Fatal("the answer carries no entity tag")
+	}
+
+	// A browser left to itself decides how long an answer stays good and does
+	// not ask again until it has.
+	if cache := first.Header().Get("Cache-Control"); cache != "no-cache" {
+		t.Errorf("got Cache-Control %q, want no-cache", cache)
+	}
+
+	// Same revision, same day: nothing has changed, and saying so is the
+	// whole point of the tag.
+	again := askNotes(mux, map[string]string{"If-None-Match": tag})
+	if again.Code != http.StatusNotModified {
+		t.Errorf("got %d for an unchanged answer, want 304", again.Code)
+	}
+
+	// Same revision, next day: the answer has changed even though no event
+	// was written.
+	day = "2026-09-23"
+
+	tomorrow := askNotes(mux, map[string]string{"If-None-Match": tag})
+	if tomorrow.Code != http.StatusOK {
+		t.Errorf("got %d after the day turned over, want 200", tomorrow.Code)
+	}
+
+	if moved := tomorrow.Header().Get("ETag"); moved == tag {
+		t.Error("the tag is the same on the next day, so the caller keeps yesterday's answer")
+	}
+}
+
+// TestQueryRevisionedIsQueryVaryingWithoutAVariance keeps the plain case
+// honest: an answer that follows from the read model alone needs nothing
+// extra, and its tag still holds across requests.
+func TestQueryRevisionedIsQueryVaryingWithoutAVariance(t *testing.T) {
+	view := architecturekit.NewItemView[noteItem]()
+	view.Seen("3")
+
+	mux := servingNotes(t, view, time.Second)
+
+	first := askNotes(mux, nil)
+	tag := first.Header().Get("ETag")
+
+	again := askNotes(mux, map[string]string{"If-None-Match": tag})
+	if again.Code != http.StatusNotModified {
+		t.Errorf("got %d, want 304 for an unchanged answer", again.Code)
+	}
+}
