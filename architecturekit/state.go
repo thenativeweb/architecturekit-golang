@@ -1,0 +1,181 @@
+// Package architecturekit provides building blocks for CQRS and event-sourced
+// applications on top of the EventSourcingDB.
+package architecturekit
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+)
+
+// Event binds a Go type to an event type of the EventSourcingDB, so that the
+// type string is written exactly once, on the event itself.
+type Event interface {
+	EventType() string
+}
+
+// SchemaProvider is optional. Events that implement it get their schema
+// registered with the EventSourcingDB on startup.
+type SchemaProvider interface {
+	Schema() map[string]any
+}
+
+// Command knows the subject it acts on.
+type Command interface {
+	Subject() string
+}
+
+// Preconditioned is optional. A command that implements it decides under which
+// conditions its events may be appended, and it can build those conditions
+// from its own fields.
+//
+// This is where optimistic concurrency, idempotency and uniqueness live. The
+// kit adds no preconditions of its own.
+type Preconditioned interface {
+	Preconditions() []eventsourcingdb.Precondition
+}
+
+// State is the state a command decides on, together with the rules that build
+// that state from events.
+//
+// Deliberately not called a projection: a projection builds a read model for
+// the query side, whereas this is the write side, holding just enough state
+// for a decision.
+type State[TState any] struct {
+	initial   TState
+	evolve    map[string]func(TState, json.RawMessage) (TState, error)
+	schemas   []EventSchema
+	upcasters upcasters
+}
+
+// EventSchema holds an event schema for registration with the database.
+type EventSchema struct {
+	EventType string
+	Schema    map[string]any
+}
+
+// NewState creates a state that starts out as initial.
+func NewState[TState any](initial TState) *State[TState] {
+	return &State[TState]{
+		initial:   initial,
+		evolve:    map[string]func(TState, json.RawMessage) (TState, error){},
+		upcasters: upcasters{},
+	}
+}
+
+// Evolve defines how an event advances the state. The event type is read from
+// TEvent instead of being passed as a string.
+//
+// Registering the same event type twice is a programming error, so it panics
+// while the state is being built rather than silently overwriting a rule at
+// run time.
+func (s *State[TState]) Evolve[TEvent Event](evolve func(TState, TEvent) TState) *State[TState] {
+	var zero TEvent
+	eventType := zero.EventType()
+
+	if _, exists := s.evolve[eventType]; exists {
+		panic(fmt.Sprintf("architecturekit: event type %q is already registered on this state", eventType))
+	}
+
+	s.evolve[eventType] = func(state TState, data json.RawMessage) (TState, error) {
+		var event TEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return state, fmt.Errorf("%w: decoding %q: %v", ErrPermanent, eventType, err)
+		}
+		return evolve(state, event), nil
+	}
+
+	if provider, ok := any(zero).(SchemaProvider); ok {
+		s.schemas = append(s.schemas, EventSchema{EventType: eventType, Schema: provider.Schema()})
+	}
+
+	return s
+}
+
+// Upcast translates stored events of an older type into a newer shape, before
+// any Evolve rule sees them. The result is never written back.
+//
+// Upcasters are chained: if the result carries a type that has an upcaster of
+// its own, that one runs too, so only one step per version is needed instead
+// of one per pair of versions.
+func (s *State[TState]) Upcast(from string, upcast Upcaster) *State[TState] {
+	if _, exists := s.upcasters[from]; exists {
+		panic(fmt.Sprintf("architecturekit: event type %q already has an upcaster", from))
+	}
+
+	s.upcasters[from] = upcast
+
+	return s
+}
+
+// Schemas returns the event schemas that can be registered.
+func (s *State[TState]) Schemas() []EventSchema {
+	return s.schemas
+}
+
+// Decider connects a state with the decision made on it.
+type Decider[TCommand Command, TState any] struct {
+	State  *State[TState]
+	Decide func(ctx context.Context, cmd TCommand, state TState) ([]Event, error)
+}
+
+// Replay folds a sequence of events into a state. It is meant for tests, where
+// the history is available as typed events.
+func Replay[TState any](state *State[TState], history ...Event) (TState, error) {
+	current := state.initial
+
+	for _, event := range history {
+		evolve, isKnown := state.evolve[event.EventType()]
+		if !isKnown {
+			return current, fmt.Errorf("%w: no rule for event type %q",
+				ErrPermanent, event.EventType())
+		}
+
+		data, err := json.Marshal(event)
+		if err != nil {
+			return current, fmt.Errorf("%w: encoding %q: %v",
+				ErrPermanent, event.EventType(), err)
+		}
+
+		current, err = evolve(current, data)
+		if err != nil {
+			return current, err
+		}
+	}
+
+	return current, nil
+}
+
+// ReplayStored folds stored events into a state, running the upcasters on the
+// way, exactly as reading from the database would. It is meant for tests of
+// upcasters, which need the raw shape of an older version.
+func ReplayStored[TState any](
+	state *State[TState],
+	history ...eventsourcingdb.Event,
+) (TState, error) {
+	current := state.initial
+
+	for _, stored := range history {
+		upcasted, err := state.upcasters.apply(stored)
+		if err != nil {
+			return current, err
+		}
+
+		for _, event := range upcasted {
+			evolve, isKnown := state.evolve[event.Type]
+			if !isKnown {
+				return current, fmt.Errorf("%w: no rule for event type %q",
+					ErrPermanent, event.Type)
+			}
+
+			current, err = evolve(current, event.Data)
+			if err != nil {
+				return current, err
+			}
+		}
+	}
+
+	return current, nil
+}

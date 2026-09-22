@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - 'main'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - name: Clone repository
+      uses: actions/checkout@v7.0.1
+      with:
+        fetch-depth: '0'
+    - name: Use Go
+      uses: actions/setup-go@v7.0.0
+      with:
+        go-version-file: ./go.mod
+    - name: Run QA
+      run: make qa
+    - name: Get next version
+      id: get_next_version
+      uses: thenativeweb/get-next-version@2.7.4
+    # A Go library is released by tagging it: that is what the module proxy
+    # picks up. There is nothing to build and nothing to upload.
+    - name: Create new version
+      if: ${{ steps.get_next_version.outputs.hasNextVersion == 'true' }}
+      run: |
+        git tag v${{steps.get_next_version.outputs.version}}
+        git push origin v${{steps.get_next_version.outputs.version}}
