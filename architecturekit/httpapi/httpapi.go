@@ -17,8 +17,8 @@ import (
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// MaxRequestBody is the largest request body that is read. It matches the
-// limit of the EventSourcingDB itself.
+// MaxRequestBody is the largest request body that is read. The body is read
+// into memory in full before it is decoded, so it needs an upper bound.
 const MaxRequestBody = 1 << 20
 
 var (
