@@ -324,7 +324,8 @@ Three rules that are not negotiable in this package, each for a reason:
 - **`application/json` is required**, parsed rather than matched as a substring.
   Only urlencoded, multipart and `text/plain` are simple requests, so demanding
   JSON shuts out cross-origin writes whatever you use to authenticate.
-- **One mebibyte**, then 413. The same limit the database has.
+- **One mebibyte**, then 413. The body is read into memory before it is decoded,
+  so it needs an upper bound.
 
 ## Requirements
 
