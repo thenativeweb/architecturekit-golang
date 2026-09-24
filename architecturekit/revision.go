@@ -54,19 +54,61 @@ type RevisionSink interface {
 // waiting for exactly that event's ID. A view whose revision only counted the
 // events it applied would leave such a reader waiting forever.
 //
+// The wrapped projection keeps its mode: a resumable one stays resumable, and
+// its batch sizes are kept too. A wrapper that dropped them would turn it into
+// a projection that is rebuilt on every start, and nothing would notice.
+//
 // Use it with a view that keeps no transaction. Where data and revision have
 // to become durable together, the revision belongs inside the transaction, and
-// the projection has to write it itself.
+// the projection has to write it itself. That is why a transactional
+// projection cannot be tracked: it has no Apply to wrap, and a projection that
+// is transactional as well is a programming error and panics.
 func Tracking(sink RevisionSink, projection Projection) Projection {
-	return ProjectionFunc(func(ctx context.Context, event eventsourcingdb.Event) error {
-		if err := projection.Apply(ctx, event); err != nil {
-			return err
-		}
+	refuseTransactional(projection)
 
-		sink.Seen(event.ID)
+	tracked := &trackedProjection{sink: sink, projection: projection}
 
-		return nil
-	})
+	if resumable, ok := projection.(Resumable); ok {
+		return &trackedResumable{trackedProjection: tracked, resumable: resumable}
+	}
+
+	return tracked
+}
+
+// trackedProjection records every event once the projection has applied it.
+type trackedProjection struct {
+	sink       RevisionSink
+	projection Projection
+}
+
+func (p *trackedProjection) Apply(ctx context.Context, event eventsourcingdb.Event) error {
+	if err := p.projection.Apply(ctx, event); err != nil {
+		return err
+	}
+
+	p.sink.Seen(event.ID)
+
+	return nil
+}
+
+// BatchSizes passes on what the wrapped projection says, so that tracking does
+// not change how often a checkpoint is written.
+func (p *trackedProjection) BatchSizes() (catchUp, live int) {
+	return batchSizesOf(p.projection)
+}
+
+// trackedResumable is a tracked projection that keeps its checkpoint.
+type trackedResumable struct {
+	*trackedProjection
+	resumable Resumable
+}
+
+func (p *trackedResumable) Checkpoint(ctx context.Context) (string, error) {
+	return p.resumable.Checkpoint(ctx)
+}
+
+func (p *trackedResumable) SaveCheckpoint(ctx context.Context, eventID string) error {
+	return p.resumable.SaveCheckpoint(ctx, eventID)
 }
 
 // CompareRevisions orders two revisions the way cmp.Compare orders numbers.
