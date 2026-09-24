@@ -624,9 +624,9 @@ if err != nil {
 
 ### Resuming Projections
 
-By default, a projection starts from the first event every time it runs, which fits a view held in memory. For a view that keeps its data, implement one of two optional interfaces, so that the projection resumes where it stopped.
+By default, a projection starts from the first event every time it runs, which fits a view held in memory. For a view that keeps its data, the projection can resume where it stopped instead.
 
-If the view can store a checkpoint, but not together with the data, implement the `Resumable` interface. `Checkpoint` returns the ID of the last event saved, or an empty string if there is none, and `SaveCheckpoint` saves it:
+If the view can store a checkpoint, but not together with the data, additionally implement the `Resumable` interface. `Checkpoint` returns the ID of the last event saved, or an empty string if there is none, and `SaveCheckpoint` saves it:
 
 ```go
 type BookTableProjection struct {
@@ -648,14 +648,19 @@ func (p *BookTableProjection) SaveCheckpoint(ctx context.Context, eventID string
 
 *Note that the checkpoint is saved after the events have been applied. After a crash, events may therefore be applied a second time, so `Apply` must be idempotent.*
 
-If the view can store the data and the checkpoint together, as a relational database can, implement the `Transactional` interface instead. `Begin` starts a transaction and returns a `Tx`, which applies the events, and commits them together with the ID of the last event, or rolls them back:
+To find out how a projection will be run, call the `ModeOf` function. It returns a `Mode`, which is `ModeRebuild` or `ModeResumable`:
+
+```go
+mode := architecturekit.ModeOf(catalogProjection)
+// architecturekit.ModeRebuild
+```
+
+*Note that the mode depends on which interfaces a projection implements. If a function's signature does not match, the projection silently runs in `ModeRebuild`. To catch that, check the mode in a test (see [Testing Projections](#testing-projections)).*
+
+If the view can store the data and the checkpoint together, as a relational database can, implement the `Transactional` interface instead of `Projection`. A transactional projection applies events only within a transaction, so it has no `Apply` function of its own. `Begin` starts a transaction and returns a `Tx`, which applies the events, and commits them together with the ID of the last event, or rolls them back:
 
 ```go
 type TransactionalBookTableProjection struct {
-  // ...
-}
-
-func (p *TransactionalBookTableProjection) Apply(ctx context.Context, event eventsourcingdb.Event) error {
   // ...
 }
 
@@ -684,20 +689,20 @@ func (tx *bookTableTx) Rollback(ctx context.Context) error {
 }
 ```
 
-*Note that `RunProjection` accepts only a `Projection`, so a transactional projection needs an `Apply` function as well. It is not called, because events are applied through the transaction.*
-
-To find out how a projection will be run, call the `ModeOf` function. It returns a `Mode`, which is `ModeRebuild`, `ModeResumable`, or `ModeTransactional`:
+To run a transactional projection, call the `RunTransactionalProjection` or the `CatchUpTransactionalProjection` function instead of `RunProjection` or `CatchUpProjection`. They take the same arguments:
 
 ```go
-mode := architecturekit.ModeOf(catalogProjection)
-// architecturekit.ModeRebuild
+err := architecturekit.RunTransactionalProjection(ctx, store, "/books", true, &TransactionalBookTableProjection{})
+if err != nil {
+  // ...
+}
 ```
 
-*Note that the mode depends on which interfaces a projection implements. If a function's signature does not match, the projection silently runs in `ModeRebuild`. To catch that, check the mode in a test (see [Testing Projections](#testing-projections)).*
+*Note that `RunProjection`, `CatchUpProjection`, and `Tracking` panic for a projection that implements `Transactional` in addition to `Apply`, since calling `Apply` would bypass the transactions.*
 
 ### Batching Events
 
-By default, the checkpoint is saved, or the transaction is committed, after every event. To do so less often, implement the `Batched` interface and return how many events to apply at once, separately for catching up and for observing:
+By default, the checkpoint is saved, or the transaction is committed, after every event. To do so less often, implement the `Batched` interface on a resumable or transactional projection, and return how many events to apply at once, separately for catching up and for observing:
 
 ```go
 func (p *BookTableProjection) BatchSizes() (catchUp, live int) {
@@ -859,7 +864,7 @@ Then run `trackedProjection` instead of `catalogProjection` (see [Running Projec
 
 `Tracking` accepts every view that implements the `RevisionSink` interface, which consists of the `Seen` function. `ItemView` implements it.
 
-*Note that `Tracking` returns a projection that runs in `ModeRebuild`. A resumable or transactional projection has to record its revision itself.*
+The tracked projection keeps the mode and the batch sizes of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
 
 To get the revision your own write has produced, call the `RevisionOf` function with the written events. It returns the highest event ID, or an empty string if no events were written:
 
@@ -1430,6 +1435,22 @@ To check how a projection will be run, call the `ExpectMode` function:
 ```go
 architecturekittest.ExpectMode(t, catalogProjection, architecturekit.ModeRebuild)
 ```
+
+To test a transactional projection, call the `ProjectTransactional` function instead of `Project`. It begins a transaction, applies the events, and commits the transaction with the ID of the last event. If an event is refused, it rolls the transaction back:
+
+```go
+architecturekittest.ProjectTransactional(t, &TransactionalBookTableProjection{},
+  architecturekittest.StoredEvents("/books/42",
+    BookAcquired{
+      Title:  "2001 – A Space Odyssey",
+      Author: "Arthur C. Clarke",
+      ISBN:   "978-0756906788",
+    },
+  )...,
+)
+```
+
+*Note that `Project` fails the test for a projection that implements `Transactional` in addition to `Apply`.*
 
 ### Testing Queries
 

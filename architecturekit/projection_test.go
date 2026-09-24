@@ -236,6 +236,170 @@ func TestCatchUpProjectionStopsWhenTheCheckpointCannotBeRead(t *testing.T) {
 	}
 }
 
+// transactionalCollector applies events only within a transaction, and makes
+// them visible together with the checkpoint on commit.
+type transactionalCollector struct {
+	mutex      sync.Mutex
+	seen       []string
+	checkpoint string
+	commits    int
+}
+
+func (c *transactionalCollector) Checkpoint(context.Context) (string, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	return c.checkpoint, nil
+}
+
+func (c *transactionalCollector) Begin(context.Context) (architecturekit.Tx, error) {
+	return &collectingTx{owner: c}, nil
+}
+
+func (c *transactionalCollector) IDs() []string {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	ids := make([]string, len(c.seen))
+	copy(ids, c.seen)
+
+	return ids
+}
+
+type collectingTx struct {
+	owner   *transactionalCollector
+	pending []string
+}
+
+func (tx *collectingTx) Apply(_ context.Context, event eventsourcingdb.Event) error {
+	tx.pending = append(tx.pending, event.ID)
+	return nil
+}
+
+func (tx *collectingTx) Commit(_ context.Context, lastEventID string) error {
+	tx.owner.mutex.Lock()
+	defer tx.owner.mutex.Unlock()
+
+	tx.owner.seen = append(tx.owner.seen, tx.pending...)
+	tx.owner.checkpoint = lastEventID
+	tx.owner.commits++
+
+	return nil
+}
+
+func (tx *collectingTx) Rollback(context.Context) error {
+	tx.pending = nil
+	return nil
+}
+
+// batchedTransactionalCollector commits after every second event.
+type batchedTransactionalCollector struct {
+	transactionalCollector
+}
+
+func (c *batchedTransactionalCollector) BatchSizes() (int, int) { return 2, 1 }
+
+// transactionalWithApply is transactional, but has an Apply as well, which
+// RunProjection would call instead of going through a transaction.
+type transactionalWithApply struct {
+	collector
+	transactionalCollector
+}
+
+func TestCatchUpTransactionalProjectionCommitsWithTheLastEventID(t *testing.T) {
+	store := requireStore(t)
+	subject := subjectFor(t)
+	seed(t, subject, 3)
+
+	target := &batchedTransactionalCollector{}
+	if err := architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ids := target.IDs()
+	if len(ids) != 3 {
+		t.Fatalf("got %d events, want 3: %v", len(ids), ids)
+	}
+	if target.checkpoint != ids[2] {
+		t.Errorf("got checkpoint %q, want the last event %q", target.checkpoint, ids[2])
+	}
+	// Two events, then the incomplete final batch.
+	if target.commits != 2 {
+		t.Errorf("got %d commits, want 2", target.commits)
+	}
+}
+
+func TestCatchUpTransactionalProjectionResumesFromItsCheckpoint(t *testing.T) {
+	store := requireStore(t)
+	subject := subjectFor(t)
+	seed(t, subject, 2)
+
+	target := &transactionalCollector{}
+	if err := architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	seed(t, subject, 1)
+
+	if err := architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := len(target.IDs()); got != 3 {
+		t.Fatalf("a resumed run must only add the new event, got %d: %v", got, target.IDs())
+	}
+}
+
+func TestRunTransactionalProjectionFollowsTheStreamAndEndsWithItsContext(t *testing.T) {
+	store := requireStore(t)
+	subject := subjectFor(t)
+	seed(t, subject, 1)
+
+	target := &transactionalCollector{}
+	ctx, stop := context.WithCancel(t.Context())
+
+	done := make(chan error, 1)
+	go func() { done <- architecturekit.RunTransactionalProjection(ctx, store, subject, false, target) }()
+
+	waitFor(t, func() bool { return len(target.IDs()) == 1 })
+	seed(t, subject, 1)
+	waitFor(t, func() bool { return len(target.IDs()) == 2 })
+
+	stop()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ending through the context is not a failure, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunTransactionalProjection did not return after its context ended")
+	}
+}
+
+func TestRunProjectionRefusesAProjectionThatIsTransactionalAsWell(t *testing.T) {
+	// Driving it through Apply would bypass its transactions without anyone
+	// noticing, so both entry points refuse it before reading anything.
+	for name, run := range map[string]func(){
+		"RunProjection": func() {
+			_ = architecturekit.RunProjection(t.Context(), nil, "/", true, &transactionalWithApply{})
+		},
+		"CatchUpProjection": func() {
+			_ = architecturekit.CatchUpProjection(t.Context(), nil, "/", true, &transactionalWithApply{})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected a panic")
+				}
+			}()
+
+			run()
+		})
+	}
+}
+
 // unreadableCheckpoint cannot tell where it stopped, so nothing may be read.
 type unreadableCheckpoint struct{ collector }
 

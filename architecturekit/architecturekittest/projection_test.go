@@ -188,3 +188,122 @@ func TestExpectItemsReportsTheWrongContent(t *testing.T) {
 
 	recorder.expectFailure(t, "someone-else")
 }
+
+// ownerTable is a transactional projection: it applies events only within a
+// transaction, and the transaction writes down what happens to it.
+type ownerTable struct {
+	log         []string
+	beginErr    error
+	commitErr   error
+	rollbackErr error
+}
+
+func (o *ownerTable) Checkpoint(context.Context) (string, error) { return "", nil }
+
+func (o *ownerTable) Begin(context.Context) (architecturekit.Tx, error) {
+	if o.beginErr != nil {
+		return nil, o.beginErr
+	}
+	o.log = append(o.log, "begin")
+	return &ownerTx{owner: o}, nil
+}
+
+type ownerTx struct{ owner *ownerTable }
+
+func (tx *ownerTx) Apply(_ context.Context, event eventsourcingdb.Event) error {
+	if event.Type != (opened{}).EventType() {
+		return errors.New("only openings, please")
+	}
+	tx.owner.log = append(tx.owner.log, "apply "+event.ID)
+	return nil
+}
+
+func (tx *ownerTx) Commit(_ context.Context, lastEventID string) error {
+	tx.owner.log = append(tx.owner.log, "commit "+lastEventID)
+	return tx.owner.commitErr
+}
+
+func (tx *ownerTx) Rollback(context.Context) error {
+	tx.owner.log = append(tx.owner.log, "rollback")
+	return tx.owner.rollbackErr
+}
+
+// ownerTableWithApply is transactional, but has an Apply as well, which is
+// not what runs in production.
+type ownerTableWithApply struct {
+	ownerTable
+}
+
+func (*ownerTableWithApply) Apply(context.Context, eventsourcingdb.Event) error { return nil }
+
+func expectLog(t *testing.T, got []string, want ...string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("step %d: got %q, want %q (full: %v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestProjectTransactionalAppliesWithinOneTransaction(t *testing.T) {
+	table := &ownerTable{}
+
+	architecturekittest.ProjectTransactional(t, table,
+		architecturekittest.StoredEvents("/account/1",
+			opened{Owner: "golo"}, opened{Owner: "jane"})...)
+
+	expectLog(t, table.log, "begin", "apply 0", "apply 1", "commit 1")
+}
+
+func TestProjectTransactionalBeginsNothingWithoutEvents(t *testing.T) {
+	table := &ownerTable{}
+
+	architecturekittest.ProjectTransactional(t, table)
+
+	expectLog(t, table.log)
+}
+
+func TestProjectTransactionalRollsBackOnARefusal(t *testing.T) {
+	recorder := &spy{}
+	table := &ownerTable{rollbackErr: errors.New("rollback did not work either")}
+
+	architecturekittest.ProjectTransactional(recorder, table,
+		architecturekittest.StoredEvents("/account/1", opened{Owner: "golo"}, closed{})...)
+
+	recorder.expectFailure(t, "projecting event 1")
+	recorder.expectFailure(t, "rollback did not work either")
+	expectLog(t, table.log, "begin", "apply 0", "rollback")
+}
+
+func TestProjectTransactionalReportsAFailingBegin(t *testing.T) {
+	recorder := &spy{}
+
+	architecturekittest.ProjectTransactional(recorder, &ownerTable{beginErr: errors.New("no connection")},
+		architecturekittest.StoredEvent("/account/1", "0", opened{Owner: "golo"}))
+
+	recorder.expectFailure(t, "beginning a transaction: no connection")
+}
+
+func TestProjectTransactionalReportsAFailingCommit(t *testing.T) {
+	recorder := &spy{}
+
+	architecturekittest.ProjectTransactional(recorder, &ownerTable{commitErr: errors.New("disk full")},
+		architecturekittest.StoredEvent("/account/1", "0", opened{Owner: "golo"}))
+
+	recorder.expectFailure(t, "committing the transaction: disk full")
+}
+
+func TestProjectRefusesAProjectionThatIsTransactionalAsWell(t *testing.T) {
+	recorder := &spy{}
+	table := &ownerTableWithApply{}
+
+	architecturekittest.Project(recorder, table,
+		architecturekittest.StoredEvent("/account/1", "0", opened{Owner: "golo"}))
+
+	recorder.expectFailure(t, "is transactional, use ProjectTransactional")
+	expectLog(t, table.log)
+}

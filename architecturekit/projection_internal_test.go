@@ -15,19 +15,25 @@ import (
 // These tests reach into the package, because the batching logic of drive is
 // the part that is hard to hit from the outside and easy to get wrong.
 
-// recorder stands in for a projection target and writes down what happened.
-type recorder struct {
-	log      []string
-	failOn   string
-	beginErr error
+// journal writes down what happened, and refuses the event it was told to.
+type journal struct {
+	log    []string
+	failOn string
 }
 
-func (r *recorder) Apply(_ context.Context, event eventsourcingdb.Event) error {
-	if event.ID == r.failOn {
+func (j *journal) apply(event eventsourcingdb.Event) error {
+	if event.ID == j.failOn {
 		return fmt.Errorf("%w: refusing %s", ErrPermanent, event.ID)
 	}
-	r.log = append(r.log, "apply "+event.ID)
+	j.log = append(j.log, "apply "+event.ID)
 	return nil
+}
+
+// recorder stands in for a projection target.
+type recorder struct{ journal }
+
+func (r *recorder) Apply(_ context.Context, event eventsourcingdb.Event) error {
+	return r.apply(event)
 }
 
 // resumableRecorder keeps a checkpoint, but not together with the data.
@@ -45,11 +51,14 @@ func (r *resumableRecorder) SaveCheckpoint(_ context.Context, eventID string) er
 	return nil
 }
 
-// transactionalRecorder keeps both in step.
+// transactionalRecorder keeps both in step. It has no Apply of its own,
+// because a transactional projection applies events only within a
+// transaction.
 type transactionalRecorder struct {
-	recorder
+	journal
 	start       string
 	committed   []string
+	beginErr    error
 	rollbackErr error
 }
 
@@ -65,8 +74,8 @@ func (r *transactionalRecorder) Begin(context.Context) (Tx, error) {
 
 type recordingTx struct{ owner *transactionalRecorder }
 
-func (t *recordingTx) Apply(ctx context.Context, event eventsourcingdb.Event) error {
-	return t.owner.recorder.Apply(ctx, event)
+func (t *recordingTx) Apply(_ context.Context, event eventsourcingdb.Event) error {
+	return t.owner.apply(event)
 }
 
 func (t *recordingTx) Commit(_ context.Context, lastEventID string) error {
@@ -87,6 +96,11 @@ type batchedRecorder struct {
 }
 
 func (r *batchedRecorder) BatchSizes() (int, int) { return r.catchUp, r.live }
+
+// inTransactions is the writer RunTransactionalProjection uses.
+func inTransactions(projection Transactional) projectionWriter {
+	return &transactionalWriter{projection: projection}
+}
 
 func events(ids ...string) iter.Seq2[eventsourcingdb.Event, error] {
 	return func(yield func(eventsourcingdb.Event, error) bool) {
@@ -116,7 +130,6 @@ func TestModeOfDerivesFromTheInterfaces(t *testing.T) {
 	}{
 		{&recorder{}, ModeRebuild},
 		{&resumableRecorder{}, ModeResumable},
-		{&transactionalRecorder{}, ModeTransactional},
 		{&batchedRecorder{}, ModeResumable},
 	}
 
@@ -199,7 +212,7 @@ func TestDriveCommitsAnIncompleteFinalBatch(t *testing.T) {
 func TestDriveInTransactionalModeBracketsEachBatch(t *testing.T) {
 	target := &transactionalRecorder{}
 
-	if _, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), 2); err != nil {
+	if _, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), 2); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -216,7 +229,7 @@ func TestDriveRollsBackWhenApplyFails(t *testing.T) {
 	target := &transactionalRecorder{}
 	target.failOn = "1"
 
-	_, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), 10)
+	_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), 10)
 
 	if !errors.Is(err, ErrPermanent) {
 		t.Fatalf("got %v", err)
@@ -227,7 +240,7 @@ func TestDriveRollsBackWhenApplyFails(t *testing.T) {
 func TestDriveRollsBackWhenTheStreamFails(t *testing.T) {
 	target := &transactionalRecorder{}
 
-	_, err := drive(context.Background(), writerFor(target),
+	_, err := drive(context.Background(), inTransactions(target),
 		failingEvents(2, errors.New("connection lost")), 10)
 
 	if !errors.Is(err, ErrTransient) {
@@ -240,7 +253,7 @@ func TestDriveReportsAFailingBegin(t *testing.T) {
 	target := &transactionalRecorder{}
 	target.beginErr = errors.New("no connection")
 
-	if _, err := drive(context.Background(), writerFor(target), events("0"), 1); err == nil {
+	if _, err := drive(context.Background(), inTransactions(target), events("0"), 1); err == nil {
 		t.Fatal("expected the error from begin")
 	}
 }
@@ -301,7 +314,7 @@ func TestWritersWithoutTransactionsAreHarmless(t *testing.T) {
 		t.Fatalf("the data is already written, so nothing can fail: %v", err)
 	}
 
-	transactional := writerFor(&transactionalRecorder{start: "9"})
+	transactional := inTransactions(&transactionalRecorder{start: "9"})
 	if checkpoint, err := transactional.checkpoint(ctx); checkpoint != "9" || err != nil {
 		t.Fatalf("got %q, %v", checkpoint, err)
 	}
@@ -503,7 +516,7 @@ func TestDriveReportsAFailingRollbackAlongsideTheCause(t *testing.T) {
 	target.failOn = "1"
 	target.rollbackErr = errors.New("rollback did not work either")
 
-	_, err := drive(context.Background(), writerFor(target), events("0", "1"), 10)
+	_, err := drive(context.Background(), inTransactions(target), events("0", "1"), 10)
 
 	// The failure that caused the rollback has to survive, and the rollback
 	// failure comes with it rather than replacing it.
@@ -519,7 +532,7 @@ func TestDriveReportsAFailingRollbackAfterABrokenStream(t *testing.T) {
 	target := &transactionalRecorder{}
 	target.rollbackErr = errors.New("rollback did not work either")
 
-	_, err := drive(context.Background(), writerFor(target),
+	_, err := drive(context.Background(), inTransactions(target),
 		failingEvents(1, errors.New("connection lost")), 10)
 
 	if !errors.Is(err, ErrTransient) {

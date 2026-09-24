@@ -263,6 +263,85 @@ func TestTrackingDoesNotRecordAFailedEvent(t *testing.T) {
 	}
 }
 
+func TestTrackingKeepsAProjectionThatIsRebuiltAsItIs(t *testing.T) {
+	projection := architecturekit.Tracking(architecturekit.NewItemView[int](), &collector{})
+
+	architecturekittest.ExpectMode(t, projection, architecturekit.ModeRebuild)
+
+	batched, ok := projection.(architecturekit.Batched)
+	if !ok {
+		t.Fatal("a tracked projection passes on its batch sizes")
+	}
+	if catchUp, live := batched.BatchSizes(); catchUp != 1 || live != 1 {
+		t.Errorf("got %d and %d, want the defaults 1 and 1", catchUp, live)
+	}
+}
+
+func TestTrackingKeepsAResumableProjectionResumable(t *testing.T) {
+	// A wrapper that dropped the checkpoint would silently turn this into a
+	// projection that is rebuilt on every start.
+	target := &batchedResumingCollector{resumingCollector: resumingCollector{checkpoint: "7"}}
+	projection := architecturekit.Tracking(architecturekit.NewItemView[int](), target)
+
+	architecturekittest.ExpectMode(t, projection, architecturekit.ModeResumable)
+
+	resumable := projection.(architecturekit.Resumable)
+
+	checkpoint, err := resumable.Checkpoint(t.Context())
+	if err != nil || checkpoint != "7" {
+		t.Fatalf("got %q, %v, want the checkpoint of the wrapped projection", checkpoint, err)
+	}
+
+	if err := resumable.SaveCheckpoint(t.Context(), "8"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if target.checkpoint != "8" {
+		t.Errorf("got %q, the checkpoint has to reach the wrapped projection", target.checkpoint)
+	}
+
+	if catchUp, live := projection.(architecturekit.Batched).BatchSizes(); catchUp != 500 || live != 10 {
+		t.Errorf("got %d and %d, want the batch sizes of the wrapped projection", catchUp, live)
+	}
+}
+
+func TestTrackingRefusesAProjectionThatIsTransactionalAsWell(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected a panic, because tracking would bypass the transactions")
+		}
+	}()
+
+	architecturekit.Tracking(architecturekit.NewItemView[int](), &transactionalWithApply{})
+}
+
+func TestTrackingResumesFromTheCheckpoint(t *testing.T) {
+	store := requireStore(t)
+	subject := subjectFor(t)
+	seed(t, subject, 3)
+
+	view := architecturekit.NewItemView[int]()
+	target := &resumingCollector{}
+
+	if err := architecturekit.CatchUpProjection(t.Context(), store, subject, false,
+		architecturekit.Tracking(view, target)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if target.checkpoint == "" {
+		t.Fatal("a tracked resumable projection has to save its checkpoint")
+	}
+	if got := view.Revision(); got != target.checkpoint {
+		t.Errorf("got revision %q, want %q", got, target.checkpoint)
+	}
+}
+
+// batchedResumingCollector is resumable and announces its own batch sizes.
+type batchedResumingCollector struct {
+	resumingCollector
+}
+
+func (c *batchedResumingCollector) BatchSizes() (int, int) { return 500, 10 }
+
 // --- RevisionOf ---
 
 func TestTheRevisionOfAWriteIsItsHighestEventID(t *testing.T) {

@@ -11,9 +11,10 @@ import (
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// Projection is the minimum every projection fulfils: it applies events. A
-// projection that implements nothing else is rebuilt from the beginning on
-// every start, which is right for a view kept in memory.
+// Projection is what RunProjection drives: it applies events. A projection
+// that implements nothing else is rebuilt from the beginning on every start,
+// which is right for a view kept in memory. A projection that can only apply
+// events within a transaction is a Transactional instead.
 type Projection interface {
 	Apply(ctx context.Context, event eventsourcingdb.Event) error
 }
@@ -26,8 +27,14 @@ type Resumable interface {
 	SaveCheckpoint(ctx context.Context, eventID string) error
 }
 
-// Transactional is optional. A projection implements it when its target can
-// make data and checkpoint durable together, as a relational database can.
+// Transactional is a projection whose target can make data and checkpoint
+// durable together, as a relational database can.
+//
+// It is not an optional addition to Projection, but a kind of its own: it
+// applies events only within a transaction, so it has no Apply outside of one.
+// Run it with RunTransactionalProjection. That way the compiler checks its
+// method set, instead of a mismatch silently turning it into a projection that
+// is rebuilt on every start.
 type Transactional interface {
 	Checkpoint(ctx context.Context) (string, error)
 	Begin(ctx context.Context) (Tx, error)
@@ -41,8 +48,9 @@ type Tx interface {
 	Rollback(ctx context.Context) error
 }
 
-// Batched is optional. It says how many events are applied before the
-// checkpoint is written, separately for catching up and for live operation.
+// Batched is optional, for resumable and transactional projections alike. It
+// says how many events are applied before the checkpoint is written,
+// separately for catching up and for live operation.
 //
 // Both default to one, which is the safe choice and works for projections that
 // are not idempotent. Raising the catch-up size speeds up a rebuild by orders
@@ -52,7 +60,9 @@ type Batched interface {
 	BatchSizes() (catchUp, live int)
 }
 
-// Mode is how a projection is driven, derived from the interfaces it fulfils.
+// Mode is how RunProjection drives a projection, derived from the interfaces
+// it fulfils. A transactional projection has no mode, because it is run by a
+// function of its own.
 type Mode string
 
 const (
@@ -61,25 +71,31 @@ const (
 	// ModeResumable resumes, without a guarantee that the checkpoint and the
 	// data agree after a crash.
 	ModeResumable Mode = "resumable"
-	// ModeTransactional resumes, with data and checkpoint always in step.
-	ModeTransactional Mode = "transactional"
 )
 
 // ModeOf reports how RunProjection will drive this projection. Log it at
 // startup: if a projection is driven in rebuild mode against expectations, a
 // method signature does not match the interface.
 func ModeOf(projection Projection) Mode {
-	switch projection.(type) {
-	case Transactional:
-		return ModeTransactional
-	case Resumable:
+	if _, ok := projection.(Resumable); ok {
 		return ModeResumable
-	default:
-		return ModeRebuild
+	}
+
+	return ModeRebuild
+}
+
+// refuseTransactional panics for a projection that fulfils Transactional as
+// well. Driving it through Apply would bypass its transactions, and nothing
+// would notice, which is why it is refused loudly instead.
+func refuseTransactional(projection Projection) {
+	if _, ok := projection.(Transactional); ok {
+		panic(fmt.Sprintf("architecturekit: %T is transactional, run it with RunTransactionalProjection", projection))
 	}
 }
 
-func batchSizesOf(projection Projection) (catchUp, live int) {
+// batchSizesOf takes any projection, because resumable and transactional ones
+// can both be batched, and they share no interface.
+func batchSizesOf(projection any) (catchUp, live int) {
 	catchUp, live = 1, 1
 
 	if batched, ok := projection.(Batched); ok {
@@ -98,6 +114,9 @@ func batchSizesOf(projection Projection) (catchUp, live int) {
 // CatchUpProjection applies everything that is already stored and returns.
 // Use it to build a read model once, for a batch job or in a test, instead of
 // following the stream.
+//
+// A projection that is transactional as well is a programming error and
+// panics; use CatchUpTransactionalProjection for it.
 func CatchUpProjection(
 	ctx context.Context,
 	store *Store,
@@ -105,7 +124,10 @@ func CatchUpProjection(
 	recursive bool,
 	projection Projection,
 ) error {
-	_, err := catchUp(ctx, store, subject, recursive, projection)
+	refuseTransactional(projection)
+
+	catchUpSize, _ := batchSizesOf(projection)
+	_, err := catchUp(ctx, store, subject, recursive, writerFor(projection), catchUpSize)
 
 	return ignoreContextEnd(err)
 }
@@ -115,6 +137,9 @@ func CatchUpProjection(
 //
 // Ending through the context is how a projection is stopped, so that returns
 // no error.
+//
+// A projection that is transactional as well is a programming error and
+// panics; use RunTransactionalProjection for it.
 func RunProjection(
 	ctx context.Context,
 	store *Store,
@@ -122,14 +147,59 @@ func RunProjection(
 	recursive bool,
 	projection Projection,
 ) error {
-	lastEventID, err := catchUp(ctx, store, subject, recursive, projection)
+	refuseTransactional(projection)
+
+	return run(ctx, store, subject, recursive, writerFor(projection), projection)
+}
+
+// CatchUpTransactionalProjection is CatchUpProjection for a transactional
+// projection.
+func CatchUpTransactionalProjection(
+	ctx context.Context,
+	store *Store,
+	subject string,
+	recursive bool,
+	projection Transactional,
+) error {
+	catchUpSize, _ := batchSizesOf(projection)
+	_, err := catchUp(ctx, store, subject, recursive,
+		&transactionalWriter{projection: projection}, catchUpSize)
+
+	return ignoreContextEnd(err)
+}
+
+// RunTransactionalProjection is RunProjection for a transactional projection.
+// Every batch is applied within one transaction, which is committed together
+// with the ID of its last event.
+func RunTransactionalProjection(
+	ctx context.Context,
+	store *Store,
+	subject string,
+	recursive bool,
+	projection Transactional,
+) error {
+	return run(ctx, store, subject, recursive,
+		&transactionalWriter{projection: projection}, projection)
+}
+
+// run catches up and then follows the stream. The batch sizes are read from
+// the projection behind the writer, which is the one that knows its target.
+func run(
+	ctx context.Context,
+	store *Store,
+	subject string,
+	recursive bool,
+	writer projectionWriter,
+	projection any,
+) error {
+	catchUpSize, live := batchSizesOf(projection)
+
+	lastEventID, err := catchUp(ctx, store, subject, recursive, writer, catchUpSize)
 	if err != nil {
 		return ignoreContextEnd(err)
 	}
 
-	_, live := batchSizesOf(projection)
-
-	_, err = drive(ctx, writerFor(projection),
+	_, err = drive(ctx, writer,
 		store.client.ObserveEvents(ctx, subject, eventsourcingdb.ObserveEventsOptions{
 			Recursive:  recursive,
 			LowerBound: boundAfter(lastEventID),
@@ -144,11 +214,9 @@ func catchUp(
 	store *Store,
 	subject string,
 	recursive bool,
-	projection Projection,
+	writer projectionWriter,
+	catchUpSize int,
 ) (string, error) {
-	catchUpSize, _ := batchSizesOf(projection)
-	writer := writerFor(projection)
-
 	checkpoint, err := writer.checkpoint(ctx)
 	if err != nil {
 		return "", err
@@ -247,8 +315,8 @@ func drive(
 	return lastEventID, ctx.Err()
 }
 
-// projectionWriter hides the three modes behind one shape, so that drive does
-// not have to know them apart.
+// projectionWriter hides the three kinds of projection behind one shape, so
+// that drive does not have to know them apart.
 type projectionWriter interface {
 	checkpoint(ctx context.Context) (string, error)
 	begin(ctx context.Context) error
@@ -257,15 +325,15 @@ type projectionWriter interface {
 	rollback(ctx context.Context) error
 }
 
+// writerFor picks the writer for a projection that RunProjection drives. A
+// transactional projection never gets here, because it is run by functions
+// of its own.
 func writerFor(projection Projection) projectionWriter {
-	switch typed := projection.(type) {
-	case Transactional:
-		return &transactionalWriter{projection: typed}
-	case Resumable:
-		return &resumableWriter{projection: projection, resumable: typed}
-	default:
-		return &rebuildWriter{projection: projection}
+	if resumable, ok := projection.(Resumable); ok {
+		return &resumableWriter{projection: projection, resumable: resumable}
 	}
+
+	return &rebuildWriter{projection: projection}
 }
 
 // rebuildWriter keeps no checkpoint, so every start reads from the beginning.
