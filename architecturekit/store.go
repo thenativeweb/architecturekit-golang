@@ -12,15 +12,55 @@ import (
 type Store struct {
 	client *eventsourcingdb.Client
 	source string
+
+	// states is nil unless the store was created with WithStateCache.
+	states *stateCache
+}
+
+// StoreOption configures a store.
+type StoreOption func(*Store)
+
+// WithStateCache keeps the states of the most recently used subjects in
+// memory, up to the given number, so that the next command on one of them
+// reads only the events written since. Values below 1 count as 1.
+//
+// Only states that consist of values, or that have a Clone function, are
+// cached (see State.Clone). The cache is correct with several processes
+// writing to the same subjects, because every command still reads all events
+// after the ones it has cached.
+func WithStateCache(maxSubjects int) StoreOption {
+	return func(store *Store) {
+		store.states = newStateCache(maxSubjects)
+	}
 }
 
 // NewStore creates a store that writes events with the given source.
-func NewStore(client *eventsourcingdb.Client, source string) *Store {
-	return &Store{client: client, source: source}
+func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOption) *Store {
+	store := &Store{client: client, source: source}
+	for _, option := range options {
+		option(store)
+	}
+
+	return store
+}
+
+// Load reads the state of a subject exactly the way Execute does before it
+// decides, including the state cache of the store. Use it for a query that
+// needs the state of a single subject, rather than a view across many.
+func Load[TState any](
+	ctx context.Context,
+	store *Store,
+	state *State[TState],
+	subject string,
+) (TState, error) {
+	return fold(ctx, store, subject, state)
 }
 
 // fold reads the stream and folds it into a state as it goes. Events are not
 // collected, so even long streams need constant memory only.
+//
+// With a state cache, it continues from the cached state and reads only the
+// events after the one the state was built from.
 func fold[TState any](
 	ctx context.Context,
 	store *Store,
@@ -28,9 +68,22 @@ func fold[TState any](
 	state *State[TState],
 ) (TState, error) {
 	current := state.initial
+	lastEventID := ""
+
+	isCached := store.states != nil && state.isCacheable()
+	key := stateCacheKey{state: state, subject: subject}
 
 	options := eventsourcingdb.ReadEventsOptions{Recursive: false}
-	if state.fromLatest != "" {
+
+	if isCached {
+		if entry, isFound := store.states.get(key); isFound {
+			current = state.copyOf(entry.state.(TState))
+			lastEventID = entry.lastEventID
+			options.LowerBound = boundAfter(lastEventID)
+		}
+	}
+
+	if options.LowerBound == nil && state.fromLatest != "" {
 		options.FromLatestEvent = &eventsourcingdb.ReadFromLatestEvent{
 			Subject:          subject,
 			Type:             state.fromLatest,
@@ -62,6 +115,14 @@ func fold[TState any](
 				return current, err
 			}
 		}
+
+		lastEventID = event.ID
+	}
+
+	// The cache gets a copy, so that the caller can not change what the cache
+	// holds.
+	if isCached && lastEventID != "" {
+		store.states.put(key, state.copyOf(current), lastEventID)
 	}
 
 	return current, nil

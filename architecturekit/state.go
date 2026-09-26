@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"sync"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
@@ -52,6 +54,15 @@ type State[TState any] struct {
 	// fromLatest is the event type from whose latest occurrence the state is
 	// built, or an empty string to build it from the first event.
 	fromLatest string
+
+	// clone copies a state, for a store with a state cache, or is nil if the
+	// state has none.
+	clone func(TState) TState
+
+	// isValue caches whether TState consists of values only, since that is
+	// found by reflection and does not change.
+	isValue     bool
+	isValueOnce sync.Once
 }
 
 // EventSchema holds an event schema for registration with the database.
@@ -145,6 +156,46 @@ func (s *State[TState]) FromLatest[TEvent Event]() *State[TState] {
 	s.fromLatest = eventType
 
 	return s
+}
+
+// Clone lets a store with a state cache cache this state, although it holds
+// slices, maps or pointers. The function must return a copy that shares no
+// data with the original, so that changing one of them never changes the
+// other.
+//
+// Without it, such a state is not cached, and every command reads its events
+// as without a cache, because commands that ran at the same time would
+// otherwise share and change the same data. A state that consists of values
+// only needs no Clone function.
+//
+// Calling Clone twice is a programming error, so it panics while the state is
+// being built.
+func (s *State[TState]) Clone(clone func(TState) TState) *State[TState] {
+	if s.clone != nil {
+		panic("architecturekit: this state already has a clone function")
+	}
+
+	s.clone = clone
+
+	return s
+}
+
+// isCacheable reports whether a store may cache the state.
+func (s *State[TState]) isCacheable() bool {
+	s.isValueOnce.Do(func() {
+		s.isValue = isValueType(reflect.TypeFor[TState]())
+	})
+
+	return s.isValue || s.clone != nil
+}
+
+// copyOf returns a copy of a state that shares no data with it.
+func (s *State[TState]) copyOf(state TState) TState {
+	if s.clone != nil {
+		return s.clone(state)
+	}
+
+	return state
 }
 
 // Schemas returns the event schemas that can be registered.
