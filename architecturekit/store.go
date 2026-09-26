@@ -29,7 +29,16 @@ func fold[TState any](
 ) (TState, error) {
 	current := state.initial
 
-	for event, err := range store.client.ReadEvents(ctx, subject, eventsourcingdb.ReadEventsOptions{Recursive: false}) {
+	options := eventsourcingdb.ReadEventsOptions{Recursive: false}
+	if state.fromLatest != "" {
+		options.FromLatestEvent = &eventsourcingdb.ReadFromLatestEvent{
+			Subject:          subject,
+			Type:             state.fromLatest,
+			IfEventIsMissing: eventsourcingdb.ReadEverythingIfEventIsMissing,
+		}
+	}
+
+	for event, err := range store.client.ReadEvents(ctx, subject, options) {
 		if err != nil {
 			return current, fmt.Errorf("%w: reading %q: %v", ErrTransient, subject, err)
 		}

@@ -405,6 +405,44 @@ The function has the type `Upcaster`. Upcasters run before the `Evolve` rules, a
 
 *Note that upcasters only apply to the state. Projections receive events as they are stored.*
 
+### Reading Long Streams
+
+By default, `Execute` reads all events of a subject every time it runs a command. For a subject that collects many events over time, this gets slower with every event. If an event of one type carries everything the state needs from the events before it, the state can start from the latest event of that type instead.
+
+Suppose every book is audited regularly, and every audit records the complete status of the book:
+
+```go
+type BookAudited struct {
+  IsAcquired bool `json:"isAcquired"`
+  IsBorrowed bool `json:"isBorrowed"`
+}
+
+func (BookAudited) EventType() string {
+  return "io.eventsourcingdb.library.book-audited"
+}
+```
+
+Add an `Evolve` rule that sets the state from the event alone, without looking at the state before it. Then call the `FromLatest` function on the state, with the event type as type parameter:
+
+```go
+bookState.
+  Evolve(func(book Book, event BookAudited) Book {
+    return Book{
+      IsAcquired: event.IsAcquired,
+      IsBorrowed: event.IsBorrowed,
+    }
+  }).
+  FromLatest[BookAudited]()
+```
+
+`Execute` then reads the events of a subject from its latest `BookAudited` event onwards. If the subject has no such event yet, it reads all events, as before. `Replay` and `ReplayStored` start from the same event, so tests of a decider see exactly what `Execute` sees (see [Testing Deciders](#testing-deciders)).
+
+*Note that the state is only correct if the `Evolve` rule of that event type does not depend on the state before it. Events before the latest one of that type are never read.*
+
+*Note that the database looks for the type under which an event is stored. If the event type is the result of an upcaster, events stored under the older type are not found, and all events are read.*
+
+*Note that calling `FromLatest` for an event type without an `Evolve` rule, or calling it twice, panics.*
+
 ### Composing Subjects
 
 So far, subjects have been composed by hand. To define their structure once, call the `NewSubjectScheme` function with a pattern, and use placeholders in braces for the variable parts:
