@@ -48,6 +48,10 @@ type State[TState any] struct {
 	evolve    map[string]func(TState, json.RawMessage) (TState, error)
 	schemas   []EventSchema
 	upcasters upcasters
+
+	// fromLatest is the event type from whose latest occurrence the state is
+	// built, or an empty string to build it from the first event.
+	fromLatest string
 }
 
 // EventSchema holds an event schema for registration with the database.
@@ -110,6 +114,39 @@ func (s *State[TState]) Upcast(from string, upcast Upcaster) *State[TState] {
 	return s
 }
 
+// FromLatest builds the state from the latest event of type TEvent in a
+// subject onwards, instead of from the first event, so that deciding on a long
+// stream does not read all of it again every time. If the subject has no event
+// of that type, the state is built from the first event, as usual.
+//
+// This yields the right state only if the Evolve rule for TEvent does not
+// depend on the state before it, that is, if an event of that type carries
+// everything the state needs from the events before it. Replay and
+// ReplayStored start from the same event, so a test of a decider sees exactly
+// what Execute sees.
+//
+// The database looks for the type under which the event is stored. If TEvent
+// is the result of an upcaster, stored events of the older type are not found,
+// and the state is built from the first event.
+//
+// Calling FromLatest for an event type without an Evolve rule, or calling it
+// twice, is a programming error, so it panics while the state is being built.
+func (s *State[TState]) FromLatest[TEvent Event]() *State[TState] {
+	var zero TEvent
+	eventType := zero.EventType()
+
+	if _, isKnown := s.evolve[eventType]; !isKnown {
+		panic(fmt.Sprintf("architecturekit: event type %q has no Evolve rule on this state", eventType))
+	}
+	if s.fromLatest != "" {
+		panic(fmt.Sprintf("architecturekit: this state already starts from the latest %q event", s.fromLatest))
+	}
+
+	s.fromLatest = eventType
+
+	return s
+}
+
 // Schemas returns the event schemas that can be registered.
 func (s *State[TState]) Schemas() []EventSchema {
 	return s.schemas
@@ -125,6 +162,15 @@ type Decider[TCommand Command, TState any] struct {
 // the history is available as typed events.
 func Replay[TState any](state *State[TState], history ...Event) (TState, error) {
 	current := state.initial
+
+	if state.fromLatest != "" {
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].EventType() == state.fromLatest {
+				history = history[i:]
+				break
+			}
+		}
+	}
 
 	for _, event := range history {
 		evolve, isKnown := state.evolve[event.EventType()]
@@ -156,6 +202,15 @@ func ReplayStored[TState any](
 	history ...eventsourcingdb.Event,
 ) (TState, error) {
 	current := state.initial
+
+	if state.fromLatest != "" {
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].Type == state.fromLatest {
+				history = history[i:]
+				break
+			}
+		}
+	}
 
 	for _, stored := range history {
 		upcasted, err := state.upcasters.apply(stored)
