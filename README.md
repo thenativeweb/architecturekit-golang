@@ -443,6 +443,54 @@ bookState.
 
 *Note that calling `FromLatest` for an event type without an `Evolve` rule, or calling it twice, panics.*
 
+### Caching States
+
+If no event carries the whole state, the store can keep the states of the most recently used subjects in memory instead, so that the next command on one of them reads only the events written since. To do so, hand over the `WithStateCache` option with the number of subjects to keep when creating the store:
+
+```go
+store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", architecturekit.WithStateCache(10_000))
+```
+
+Once the cache is full, the least recently used subject makes room. Such a subject is read in full again the next time, or from the latest event of the type given to `FromLatest`, if there is one (see [Reading Long Streams](#reading-long-streams)).
+
+The cache only holds what was read, never what a command has written. Every command reads all events after the ones its state was built from, including those written by other processes, so the cache stays correct if several processes write to the same subjects.
+
+A cached state is handed to several commands, possibly at the same time. That is safe for a state that consists of values only, such as the `Book` state above. A state that holds slices, maps or pointers is only cached if it has a `Clone` function, which returns a copy that shares no data with the original:
+
+```go
+type Shelf struct {
+  BookIDs []string
+}
+
+var shelfState = architecturekit.NewState(Shelf{}).
+  Evolve(func(shelf Shelf, event BookShelved) Shelf {
+    shelf.BookIDs = append(shelf.BookIDs, event.BookID)
+    return shelf
+  }).
+  Clone(func(shelf Shelf) Shelf {
+    return Shelf{BookIDs: slices.Clone(shelf.BookIDs)}
+  })
+```
+
+Without a `Clone` function, such a state is read as without a cache.
+
+*Note that a `time.Time` counts as a value, since its location never changes.*
+
+*Note that values below `1` count as `1`, and that calling `Clone` twice panics.*
+
+### Loading States
+
+To read the state of a single subject without executing a command, for example to answer a query about it, call the `Load` function with a context, the store, the state, and the subject:
+
+```go
+book, err := architecturekit.Load(context.TODO(), store, bookState, "/books/42")
+if err != nil {
+  // ...
+}
+```
+
+`Load` reads the events exactly the way `Execute` does before it decides, including `FromLatest` and the state cache. For a query across many subjects, use a view instead (see [Defining Views](#defining-views)).
+
 ### Composing Subjects
 
 So far, subjects have been composed by hand. To define their structure once, call the `NewSubjectScheme` function with a pattern, and use placeholders in braces for the variable parts:
