@@ -699,6 +699,21 @@ cancel()
 
 Canceling the context is not an error. If `Apply` returns an error, the function stops and returns it.
 
+If reading fails, or if the database ends the stream, for example because it restarts, the function waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again. To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
+
+```go
+store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
+  architecturekit.WithReconnectDelays(500*time.Millisecond, 30*time.Second),
+  architecturekit.WithReconnectObserver(func(err error, delay time.Duration) {
+    log.Println("observing again", err, delay)
+  }),
+)
+```
+
+The observer receives the reason, which is `nil` if the database ended the stream, and the delay before the next attempt.
+
+*Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable.*
+
 To only apply the events that are already stored, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied:
 
 ```go

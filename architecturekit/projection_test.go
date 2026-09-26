@@ -175,16 +175,6 @@ func TestRunProjectionFollowsTheStreamAndEndsWithItsContext(t *testing.T) {
 	}
 }
 
-func TestRunProjectionReportsAnUnreachableDatabase(t *testing.T) {
-	brokenStore := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
-
-	err := architecturekit.RunProjection(context.Background(), brokenStore, "/nowhere", false, &collector{})
-
-	if !errors.Is(err, architecturekit.ErrTransient) {
-		t.Fatalf("an unreachable database is transient, got %v", err)
-	}
-}
-
 func TestCatchUpProjectionReportsAFailingApply(t *testing.T) {
 	store := requireStore(t)
 	subject := subjectFor(t)

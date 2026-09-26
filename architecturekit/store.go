@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
@@ -15,7 +16,20 @@ type Store struct {
 
 	// states is nil unless the store was created with WithStateCache.
 	states *stateCache
+
+	// The reconnect settings apply to RunProjection and
+	// RunTransactionalProjection.
+	reconnectInitialDelay time.Duration
+	reconnectMaxDelay     time.Duration
+	reconnectObserver     func(err error, delay time.Duration)
 }
+
+// The default delays of RunProjection before it observes again, for a store
+// without WithReconnectDelays.
+const (
+	defaultReconnectInitialDelay = 1 * time.Second
+	defaultReconnectMaxDelay     = 1 * time.Minute
+)
 
 // StoreOption configures a store.
 type StoreOption func(*Store)
@@ -34,9 +48,37 @@ func WithStateCache(maxSubjects int) StoreOption {
 	}
 }
 
+// WithReconnectDelays sets how long RunProjection and
+// RunTransactionalProjection wait before they read again after reading failed
+// or the stream ended. The delay starts at initialDelay, doubles with every
+// attempt in a row, and never exceeds maxDelay. It starts over once a
+// projection has made progress. Without this option, the delays are 1 second
+// and 1 minute.
+func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
+	return func(store *Store) {
+		store.reconnectInitialDelay = initialDelay
+		store.reconnectMaxDelay = max(maxDelay, initialDelay)
+	}
+}
+
+// WithReconnectObserver calls observe every time RunProjection or
+// RunTransactionalProjection is about to wait before reading again, with the
+// reason and the delay. The reason is nil if the database ended the stream.
+// Use it to log, since the kit itself does not.
+func WithReconnectObserver(observe func(err error, delay time.Duration)) StoreOption {
+	return func(store *Store) {
+		store.reconnectObserver = observe
+	}
+}
+
 // NewStore creates a store that writes events with the given source.
 func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOption) *Store {
-	store := &Store{client: client, source: source}
+	store := &Store{
+		client:                client,
+		source:                source,
+		reconnectInitialDelay: defaultReconnectInitialDelay,
+		reconnectMaxDelay:     defaultReconnectMaxDelay,
+	}
 	for _, option := range options {
 		option(store)
 	}

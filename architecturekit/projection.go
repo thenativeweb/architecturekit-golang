@@ -7,6 +7,7 @@ import (
 	"iter"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
@@ -135,6 +136,12 @@ func CatchUpProjection(
 // RunProjection drives a projection until the context ends. It first catches
 // up from the checkpoint with a finite read, then follows the stream live.
 //
+// If reading fails, or if the database ends the stream, for example on a
+// restart, it waits and catches up again from where it stopped, with a delay
+// that grows with every attempt in a row (see WithReconnectDelays and
+// WithReconnectObserver). Only a failure that trying again will not fix, such
+// as an error from Apply, ends it with that error.
+//
 // Ending through the context is how a projection is stopped, so that returns
 // no error.
 //
@@ -193,10 +200,56 @@ func run(
 	projection any,
 ) error {
 	catchUpSize, live := batchSizesOf(projection)
+	delay := store.reconnectInitialDelay
 
+	for {
+		checkpointBefore, _ := writer.checkpoint(ctx)
+
+		err := follow(ctx, store, subject, recursive, writer, catchUpSize, live)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil && !errors.Is(err, ErrTransient) {
+			return err
+		}
+
+		// A session that got somewhere was healthy until it ended, so the next
+		// failure is retried quickly again.
+		if checkpointAfter, _ := writer.checkpoint(ctx); checkpointAfter != checkpointBefore {
+			delay = store.reconnectInitialDelay
+		}
+
+		if store.reconnectObserver != nil {
+			store.reconnectObserver(err, delay)
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+
+		delay = min(2*delay, store.reconnectMaxDelay)
+	}
+}
+
+// follow catches up from the checkpoint and then follows the stream live,
+// until reading fails or the stream ends. It returns nil if the database
+// ended the stream.
+func follow(
+	ctx context.Context,
+	store *Store,
+	subject string,
+	recursive bool,
+	writer projectionWriter,
+	catchUpSize int,
+	live int,
+) error {
 	lastEventID, err := catchUp(ctx, store, subject, recursive, writer, catchUpSize)
 	if err != nil {
-		return ignoreContextEnd(err)
+		return err
 	}
 
 	_, err = drive(ctx, writer,
@@ -205,7 +258,7 @@ func run(
 			LowerBound: boundAfter(lastEventID),
 		}), live)
 
-	return ignoreContextEnd(err)
+	return err
 }
 
 // catchUp runs the finite phase and reports where it stopped.
@@ -336,17 +389,29 @@ func writerFor(projection Projection) projectionWriter {
 	return &rebuildWriter{projection: projection}
 }
 
-// rebuildWriter keeps no checkpoint, so every start reads from the beginning.
-type rebuildWriter struct{ projection Projection }
+// rebuildWriter keeps no checkpoint of its own, so every start reads from the
+// beginning. Within a run, it remembers the last event it applied, so that
+// catching up again after a lost stream does not apply any event twice.
+type rebuildWriter struct {
+	projection  Projection
+	lastApplied string
+}
 
-func (w *rebuildWriter) checkpoint(context.Context) (string, error) { return "", nil }
+func (w *rebuildWriter) checkpoint(context.Context) (string, error) { return w.lastApplied, nil }
 func (w *rebuildWriter) begin(context.Context) error                { return nil }
 
 // rollback has nothing to undo, because nothing was begun.
 func (w *rebuildWriter) rollback(context.Context) error { return nil }
 
 func (w *rebuildWriter) apply(ctx context.Context, event eventsourcingdb.Event) error {
-	return w.projection.Apply(ctx, event)
+	err := w.projection.Apply(ctx, event)
+	if err != nil {
+		return err
+	}
+
+	w.lastApplied = event.ID
+
+	return nil
 }
 
 func (w *rebuildWriter) commit(context.Context, string) error { return nil }
