@@ -34,6 +34,10 @@ type note struct {
 
 func (c note) Subject() string { return "/note/" + c.ID }
 
+func (c note) Preconditions() []architecturekit.Precondition {
+	return []architecturekit.Precondition{architecturekit.Unconditionally()}
+}
+
 func noteDecider() architecturekit.Decider[note, notes] {
 	state := architecturekit.NewState(notes{})
 	state.Evolve(func(current notes, event noted) notes {

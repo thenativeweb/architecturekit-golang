@@ -95,7 +95,8 @@ func Load[TState any](
 	state *State[TState],
 	subject string,
 ) (TState, error) {
-	return fold(ctx, store, subject, state)
+	current, _, err := fold(ctx, store, subject, state)
+	return current, err
 }
 
 // fold reads the stream and folds it into a state as it goes. Events are not
@@ -103,12 +104,15 @@ func Load[TState any](
 //
 // With a state cache, it continues from the cached state and reads only the
 // events after the one the state was built from.
+//
+// It also returns the ID of the last event the state was built from, which is
+// empty for a subject without events.
 func fold[TState any](
 	ctx context.Context,
 	store *Store,
 	subject string,
 	state *State[TState],
-) (TState, error) {
+) (TState, string, error) {
 	current := state.initial
 	lastEventID := ""
 
@@ -135,12 +139,12 @@ func fold[TState any](
 
 	for event, err := range store.client.ReadEvents(ctx, subject, options) {
 		if err != nil {
-			return current, fmt.Errorf("%w: reading %q: %v", ErrTransient, subject, err)
+			return current, "", fmt.Errorf("%w: reading %q: %v", ErrTransient, subject, err)
 		}
 
 		upcasted, err := state.upcasters.apply(event)
 		if err != nil {
-			return current, err
+			return current, "", err
 		}
 
 		for _, event := range upcasted {
@@ -148,13 +152,13 @@ func fold[TState any](
 			if !isKnown {
 				// An unexpected event type in an aggregate's stream points to a wrong
 				// subject or a missing rule. Skipping it silently would hide that.
-				return current, fmt.Errorf("%w: no rule for event type %q on subject %q",
+				return current, "", fmt.Errorf("%w: no rule for event type %q on subject %q",
 					ErrPermanent, event.Type, subject)
 			}
 
 			current, err = evolve(current, event.Data)
 			if err != nil {
-				return current, err
+				return current, "", err
 			}
 		}
 
@@ -167,7 +171,7 @@ func fold[TState any](
 		store.states.put(key, state.copyOf(current), lastEventID)
 	}
 
-	return current, nil
+	return current, lastEventID, nil
 }
 
 // write appends the events under the given preconditions and returns them as
@@ -241,9 +245,9 @@ func isAlreadyRegistered(err error) bool {
 // events. It does not retry: a conflict is reported, and the caller decides
 // what to do about it.
 //
-// All preconditions come from the command. The kit adds none of its own, so a
-// command that needs optimistic concurrency has to say so, and the caller has
-// to supply the event ID it read.
+// All preconditions come from the command, which has to declare at least one.
+// OnStateRead is filled in with the last event Execute has read, so that the
+// events are only written if the state they were decided on still holds.
 func Execute[TCommand Command, TState any](
 	ctx context.Context,
 	store *Store,
@@ -252,7 +256,12 @@ func Execute[TCommand Command, TState any](
 ) ([]eventsourcingdb.Event, error) {
 	subject := cmd.Subject()
 
-	state, err := fold(ctx, store, subject, decider.State)
+	declared, err := checkPreconditions(cmd)
+	if err != nil {
+		return nil, err
+	}
+
+	state, lastEventID, err := fold(ctx, store, subject, decider.State)
 	if err != nil {
 		return nil, err
 	}
@@ -265,10 +274,5 @@ func Execute[TCommand Command, TState any](
 		return nil, nil
 	}
 
-	var preconditions []eventsourcingdb.Precondition
-	if preconditioned, ok := any(cmd).(Preconditioned); ok {
-		preconditions = preconditioned.Preconditions()
-	}
-
-	return store.write(subject, events, preconditions)
+	return store.write(subject, events, resolvePreconditions(subject, declared, lastEventID))
 }

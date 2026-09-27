@@ -47,7 +47,7 @@ The `NewStore` function returns a `*Store`, which reads and writes the events of
 
 ### Defining Commands
 
-A command describes what someone wants to do. Define it as a struct and implement the `Subject` function, which returns the subject the command acts on. This makes the struct a `Command`:
+A command describes what someone wants to do. Define it as a struct and implement two functions: `Subject`, which returns the subject the command acts on, and `Preconditions`, which returns the conditions under which its events may be written. This makes the struct a `Command`:
 
 ```go
 type AcquireBook struct {
@@ -61,6 +61,12 @@ func (c AcquireBook) Subject() string {
   return "/books/" + c.BookID
 }
 
+func (c AcquireBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.OnStateRead(),
+  }
+}
+
 type BorrowBook struct {
   BookID        string
   ReaderID      string
@@ -71,6 +77,12 @@ func (c BorrowBook) Subject() string {
   return "/books/" + c.BookID
 }
 
+func (c BorrowBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.OnStateRead(),
+  }
+}
+
 type ReturnBook struct {
   BookID string
 }
@@ -78,7 +90,15 @@ type ReturnBook struct {
 func (c ReturnBook) Subject() string {
   return "/books/" + c.BookID
 }
+
+func (c ReturnBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.OnStateRead(),
+  }
+}
 ```
+
+`OnStateRead` makes sure that the events are only written if the state the command is decided on still holds. For the other preconditions, see [Using Preconditions](#using-preconditions).
 
 ### Defining Events
 
@@ -234,37 +254,31 @@ if err != nil {
 
 ### Using Preconditions
 
-By default, `Execute` writes events without any preconditions. To add some, implement the `Preconditions` function on the command and return the preconditions to use, which makes the command `Preconditioned`. Create the preconditions with the functions of the client SDK.
+Every command declares at least one precondition, so that writing without any check is always a decision, never an oversight. There are three kinds:
 
-If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)).
+- `OnStateRead` guards the state the command is decided on.
+- `Require` turns a precondition of the client SDK into one of the command, for example to check a revision the caller hands over.
+- `Unconditionally` writes without any check.
 
-#### Preventing Duplicates
-
-If a command may only write events in case its subject does not yet have any events, use the `NewIsSubjectPristinePrecondition` function:
-
-```go
-func (c AcquireBook) Preconditions() []eventsourcingdb.Precondition {
-  return []eventsourcingdb.Precondition{
-    eventsourcingdb.NewIsSubjectPristinePrecondition(c.Subject()),
-  }
-}
-```
-
-#### Requiring an Existing Subject
-
-If a command may only write events in case its subject already has at least one event, use the `NewIsSubjectPopulatedPrecondition` function:
-
-```go
-func (c ReturnBook) Preconditions() []eventsourcingdb.Precondition {
-  return []eventsourcingdb.Precondition{
-    eventsourcingdb.NewIsSubjectPopulatedPrecondition(c.Subject()),
-  }
-}
-```
+Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything.
 
 #### Guarding Against Concurrent Changes
 
-If a command may only write events in case its subject has not changed since the caller last read it, use the `NewIsSubjectOnEventIDPrecondition` function. For that, add a field for the ID of the last event the caller has seen:
+If a command may only write events in case nothing has been written to its subject since `Execute` read the state, use the `OnStateRead` function. This fits most commands, since the decider decides on exactly that state:
+
+```go
+func (c ReturnBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.OnStateRead(),
+  }
+}
+```
+
+`Execute` fills in the ID of the last event it has read. For a subject without any events, it requires the subject to still be pristine instead. This also holds with several processes writing to the same subjects, and with a state cache (see [Caching States](#caching-states)).
+
+#### Checking the Revision of the Caller
+
+If a command may only write events in case its subject has not changed since the caller last read it, for example in a user interface, use the `NewIsSubjectOnEventIDPrecondition` function of the client SDK, and wrap it with the `Require` function. For that, add a field for the ID of the last event the caller has seen:
 
 ```go
 type BorrowBook struct {
@@ -274,32 +288,71 @@ type BorrowBook struct {
   ExpectedEventID string
 }
 
-func (c BorrowBook) Preconditions() []eventsourcingdb.Precondition {
-  return []eventsourcingdb.Precondition{
-    eventsourcingdb.NewIsSubjectOnEventIDPrecondition(c.Subject(), c.ExpectedEventID),
+func (c BorrowBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition(c.Subject(), c.ExpectedEventID)),
   }
 }
 ```
 
 *Note that the caller has to provide the event ID. A view can keep it for that purpose (see [Defining Views](#defining-views)).*
 
-#### Enforcing Rules Across Subjects
+#### Preventing Duplicates
 
-If a command may only write events depending on an EventQL query, use the `NewIsEventQLQueryTruePrecondition` function. Preconditions can be combined, and all of them must hold. For example, to acquire every ISBN only once, extend the preconditions of `AcquireBook`:
+If a command may only write events in case its subject does not yet have any events, use the `NewIsSubjectPristinePrecondition` function of the client SDK:
 
 ```go
-func (c AcquireBook) Preconditions() []eventsourcingdb.Precondition {
-  return []eventsourcingdb.Precondition{
-    eventsourcingdb.NewIsSubjectPristinePrecondition(c.Subject()),
-    eventsourcingdb.NewIsEventQLQueryTruePrecondition(fmt.Sprintf(
+func (c AcquireBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition(c.Subject())),
+  }
+}
+```
+
+#### Requiring an Existing Subject
+
+If a command may only write events in case its subject already has at least one event, use the `NewIsSubjectPopulatedPrecondition` function of the client SDK. Combine it with `OnStateRead` to also guard the state:
+
+```go
+func (c ReturnBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition(c.Subject())),
+    architecturekit.OnStateRead(),
+  }
+}
+```
+
+#### Enforcing Rules Across Subjects
+
+If a command may only write events depending on an EventQL query, use the `NewIsEventQLQueryTruePrecondition` function of the client SDK. For example, to acquire every ISBN only once, extend the preconditions of `AcquireBook`:
+
+```go
+func (c AcquireBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition(c.Subject())),
+    architecturekit.Require(eventsourcingdb.NewIsEventQLQueryTruePrecondition(fmt.Sprintf(
       "FROM e IN events WHERE e.type == 'io.eventsourcingdb.library.book-acquired' AND e.data.isbn == '%s' PROJECT INTO COUNT() == 0",
       c.ISBN,
-    )),
+    ))),
   }
 }
 ```
 
 *Note that the query must return a single row with a single value, which is interpreted as a boolean.*
+
+#### Writing Unconditionally
+
+If a command may write its events whatever has been written to its subject in the meantime, for example because it only records a comment that does not depend on the state, use the `Unconditionally` function:
+
+```go
+func (c CommentOnBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.Unconditionally(),
+  }
+}
+```
+
+*Note that `Unconditionally` can not be combined with other preconditions.*
 
 ### Handling Errors
 
@@ -543,7 +596,7 @@ type BookItem struct {
 catalog := architecturekit.NewItemView[BookItem]()
 ```
 
-Keep the ID of the last event in every item, so that a caller can hand it over to a command that uses the `NewIsSubjectOnEventIDPrecondition` function (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
+Keep the ID of the last event in every item, so that a caller can hand it over to a command that uses the `NewIsSubjectOnEventIDPrecondition` function (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)).
 
 To add an item, call the `Insert` function:
 
@@ -1426,7 +1479,7 @@ architecturekittest.Given(t, borrowBook).
 
 #### Expecting Preconditions
 
-To expect exactly the given preconditions, in the given order, call the `ThenPreconditions` function. Describe the preconditions with the `OnSubject`, `OnEventID`, and `OnQuery` functions:
+To expect exactly the given preconditions, in the given order, call the `ThenPreconditions` function. Describe the preconditions of the kit with the `OnStateRead` and `Unconditionally` functions, and those of the client SDK with the `OnSubject`, `OnEventID`, and `OnQuery` functions:
 
 ```go
 architecturekittest.Given(t, borrowBook, BookAcquired{}).
@@ -1434,9 +1487,7 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
   ThenPreconditions(architecturekittest.OnEventID("/books/42", "0"))
 ```
 
-For a command without preconditions, call `ThenPreconditions` without arguments.
-
-To get the preconditions of a command directly, call the `PreconditionsOf` function. It returns a slice of `Precondition`, with the fields `Subject`, `EventID`, and `Query`:
+To get the preconditions of a command directly, call the `PreconditionsOf` function. It returns a slice of `Precondition`, with the fields `Subject`, `EventID`, `Query`, `OnStateRead`, and `Unconditional`:
 
 ```go
 preconditions := architecturekittest.PreconditionsOf(ReturnBook{BookID: "42"})

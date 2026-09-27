@@ -80,18 +80,14 @@ type account struct {
 type open struct {
 	Owner string
 
-	// preconditions is what this command declares; nil means none.
-	preconditions []eventsourcingdb.Precondition
+	// preconditions is what this command declares; nil means none, which
+	// Execute would reject, but which the fixture still has to describe.
+	preconditions []architecturekit.Precondition
 }
 
 func (open) Subject() string { return "/account/1" }
 
-func (c open) Preconditions() []eventsourcingdb.Precondition { return c.preconditions }
-
-// bare declares no preconditions at all, and does not implement the interface.
-type bare struct{}
-
-func (bare) Subject() string { return "/account/1" }
+func (c open) Preconditions() []architecturekit.Precondition { return c.preconditions }
 
 func accountState() *architecturekit.State[account] {
 	state := architecturekit.NewState(account{})
@@ -144,6 +140,10 @@ type emit struct {
 }
 
 func (emit) Subject() string { return "/account/1" }
+
+func (emit) Preconditions() []architecturekit.Precondition {
+	return []architecturekit.Precondition{architecturekit.Unconditionally()}
+}
 
 func emitDecider() architecturekit.Decider[emit, account] {
 	return architecturekit.Decider[emit, account]{
@@ -243,8 +243,8 @@ func TestPreconditionsOfACommand(t *testing.T) {
 	architecturekittest.Given(t, decider()).
 		When(open{
 			Owner: "golo",
-			preconditions: []eventsourcingdb.Precondition{
-				eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/1", "7"),
+			preconditions: []architecturekit.Precondition{
+				architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/1", "7")),
 			},
 		}).
 		ThenPreconditions(architecturekittest.OnEventID("/account/1", "7"))
@@ -253,11 +253,12 @@ func TestPreconditionsOfACommand(t *testing.T) {
 func TestPreconditionsOfEveryKind(t *testing.T) {
 	cmd := open{
 		Owner: "golo",
-		preconditions: []eventsourcingdb.Precondition{
-			eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1"),
-			eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/2"),
-			eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/3", "9"),
-			eventsourcingdb.NewIsEventQLQueryTruePrecondition("FROM e IN events PROJECT INTO true"),
+		preconditions: []architecturekit.Precondition{
+			architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1")),
+			architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/2")),
+			architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/3", "9")),
+			architecturekit.Require(eventsourcingdb.NewIsEventQLQueryTruePrecondition("FROM e IN events PROJECT INTO true")),
+			architecturekit.OnStateRead(),
 		},
 	}
 
@@ -270,24 +271,36 @@ func TestPreconditionsOfEveryKind(t *testing.T) {
 			architecturekittest.OnSubject("/account/2"),
 			architecturekittest.OnEventID("/account/3", "9"),
 			architecturekittest.OnQuery("FROM e IN events PROJECT INTO true"),
+			architecturekittest.OnStateRead(),
 		)
 }
 
-func TestCommandWithoutPreconditionsDeclaresNone(t *testing.T) {
-	if declared := architecturekittest.PreconditionsOf(bare{}); len(declared) != 0 {
-		t.Fatalf("got %v", declared)
-	}
+func TestPreconditionsOfAnUnconditionalCommand(t *testing.T) {
+	architecturekittest.Given(t, decider()).
+		When(open{
+			Owner:         "golo",
+			preconditions: []architecturekit.Precondition{architecturekit.Unconditionally()},
+		}).
+		ThenPreconditions(architecturekittest.Unconditionally())
+}
 
-	// A command that implements the interface but returns nothing counts too.
+func TestCommandWithoutPreconditionsDeclaresNone(t *testing.T) {
+	// Execute rejects such a command, but the fixture reports what it sees.
 	if declared := architecturekittest.PreconditionsOf(open{}); len(declared) != 0 {
 		t.Fatalf("got %v", declared)
 	}
 }
 
-func TestThenPreconditionsAcceptsNone(t *testing.T) {
-	architecturekittest.Given(t, decider()).
-		When(open{Owner: "golo"}).
-		ThenPreconditions()
+func TestPreconditionsOfShowsAnInvalidPrecondition(t *testing.T) {
+	// A zero value or a nil requirement is rejected by Execute, so the fixture
+	// shows it as an empty description instead of dropping it.
+	declared := architecturekittest.PreconditionsOf(open{
+		preconditions: []architecturekit.Precondition{{}, architecturekit.Require(nil)},
+	})
+
+	if len(declared) != 2 || declared[0] != (architecturekittest.Precondition{}) || declared[1] != (architecturekittest.Precondition{}) {
+		t.Fatalf("got %v", declared)
+	}
 }
 
 // --- the fixture's own failure paths ---
@@ -492,8 +505,8 @@ func TestThenPreconditionsFailsOnWrongContent(t *testing.T) {
 	architecturekittest.Given(recorder, decider()).
 		When(open{
 			Owner: "golo",
-			preconditions: []eventsourcingdb.Precondition{
-				eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1"),
+			preconditions: []architecturekit.Precondition{
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1")),
 			},
 		}).
 		ThenPreconditions(architecturekittest.OnSubject("/account/other"))
