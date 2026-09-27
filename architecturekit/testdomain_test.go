@@ -42,32 +42,47 @@ type increment struct {
 	By      int
 	Limit   int
 
-	// preconditions is what the command declares; nil means none, which is the
-	// kit's default because it adds none of its own.
-	preconditions []eventsourcingdb.Precondition
+	// preconditions is what the command declares; nil means Unconditionally,
+	// so that the tests that are not about preconditions need not say so.
+	preconditions []architecturekit.Precondition
 }
 
 func (c increment) Subject() string { return c.subject }
 
 // pristine returns a copy that only writes if the subject is still empty.
 func (c increment) pristine() increment {
-	c.preconditions = []eventsourcingdb.Precondition{
-		eventsourcingdb.NewIsSubjectPristinePrecondition(c.subject),
+	c.preconditions = []architecturekit.Precondition{
+		architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition(c.subject)),
 	}
 	return c
 }
 
 // onEventID returns a copy that only writes if the subject is on that event.
 func (c increment) onEventID(eventID string) increment {
-	c.preconditions = []eventsourcingdb.Precondition{
-		eventsourcingdb.NewIsSubjectOnEventIDPrecondition(c.subject, eventID),
+	c.preconditions = []architecturekit.Precondition{
+		architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition(c.subject, eventID)),
 	}
 	return c
 }
 
-// Preconditions is only reached when the command declares some; a command
-// without any simply has an empty slice here.
-func (c increment) Preconditions() []eventsourcingdb.Precondition {
+// onStateRead returns a copy that only writes if nothing has been written
+// since Execute read the state.
+func (c increment) onStateRead() increment {
+	c.preconditions = []architecturekit.Precondition{architecturekit.OnStateRead()}
+	return c
+}
+
+// declaring returns a copy that declares exactly the given preconditions,
+// which may be none at all.
+func (c increment) declaring(preconditions ...architecturekit.Precondition) increment {
+	c.preconditions = append([]architecturekit.Precondition{}, preconditions...)
+	return c
+}
+
+func (c increment) Preconditions() []architecturekit.Precondition {
+	if c.preconditions == nil {
+		return []architecturekit.Precondition{architecturekit.Unconditionally()}
+	}
 	return c.preconditions
 }
 
@@ -158,6 +173,10 @@ type annotate struct {
 }
 
 func (c annotate) Subject() string { return c.subject }
+
+func (c annotate) Preconditions() []architecturekit.Precondition {
+	return []architecturekit.Precondition{architecturekit.Unconditionally()}
+}
 
 // noteDecider emits exactly the event it was handed.
 func noteDecider() architecturekit.Decider[annotate, note] {

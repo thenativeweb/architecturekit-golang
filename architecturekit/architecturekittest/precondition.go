@@ -11,7 +11,7 @@ import (
 // subject and one for a populated subject both surface as a bare Subject,
 // because the client gives nothing else away to tell them apart.
 type Precondition struct {
-	// Subject is set for every precondition that guards one.
+	// Subject is set for every precondition of the client that guards one.
 	Subject string
 
 	// EventID is set only for a revision check.
@@ -19,6 +19,13 @@ type Precondition struct {
 
 	// Query is set only for an EventQL precondition.
 	Query string
+
+	// OnStateRead is set only for architecturekit.OnStateRead. Which event it
+	// stands for is only known once Execute has read the state.
+	OnStateRead bool
+
+	// Unconditional is set only for architecturekit.Unconditionally.
+	Unconditional bool
 }
 
 // The client's concrete types are unexported, but their methods are not, so a
@@ -37,22 +44,34 @@ type queryPrecondition interface {
 }
 
 // PreconditionsOf reports what a command declared. A command that declares
-// none, which is the default, yields an empty slice.
+// none, which Execute rejects, yields an empty slice.
 func PreconditionsOf(cmd architecturekit.Command) []Precondition {
-	preconditioned, ok := any(cmd).(architecturekit.Preconditioned)
-	if !ok {
-		return nil
-	}
-
-	declared := preconditioned.Preconditions()
+	declared := cmd.Preconditions()
 	described := make([]Precondition, 0, len(declared))
 
-	// The client's Precondition interface is sealed by an unexported method, so
-	// only its own four types can occur here, and the cases below cover all of
-	// them. That is why there is no fallback: an unknown kind cannot exist
-	// without a change to the client itself.
 	for _, precondition := range declared {
-		switch typed := precondition.(type) {
+		switch {
+		case precondition.IsOnStateRead():
+			described = append(described, Precondition{OnStateRead: true})
+			continue
+		case precondition.IsUnconditional():
+			described = append(described, Precondition{Unconditional: true})
+			continue
+		}
+
+		database, ok := precondition.Database()
+		if !ok || database == nil {
+			// Execute rejects such a precondition, so the test should see it
+			// rather than have it silently dropped.
+			described = append(described, Precondition{})
+			continue
+		}
+
+		// The client's Precondition interface is sealed by an unexported
+		// method, so only its own four types can occur here, and the cases
+		// below cover all of them. That is why there is no fallback: an
+		// unknown kind cannot exist without a change to the client itself.
+		switch typed := database.(type) {
 		// The revision check comes first, because it also carries a subject.
 		case revisionPrecondition:
 			described = append(described, Precondition{
@@ -82,4 +101,14 @@ func OnEventID(subject, eventID string) Precondition {
 // OnQuery describes an EventQL precondition.
 func OnQuery(query string) Precondition {
 	return Precondition{Query: query}
+}
+
+// OnStateRead describes architecturekit.OnStateRead.
+func OnStateRead() Precondition {
+	return Precondition{OnStateRead: true}
+}
+
+// Unconditionally describes architecturekit.Unconditionally.
+func Unconditionally() Precondition {
+	return Precondition{Unconditional: true}
 }

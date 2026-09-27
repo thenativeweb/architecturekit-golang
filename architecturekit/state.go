@@ -24,19 +24,15 @@ type SchemaProvider interface {
 	Schema() map[string]any
 }
 
-// Command knows the subject it acts on.
+// Command knows the subject it acts on, and the conditions under which its
+// events may be written.
+//
+// Preconditions is where optimistic concurrency, idempotency and uniqueness
+// live. Every command declares at least one, made with Require, OnStateRead, or
+// Unconditionally, and the kit adds none of its own.
 type Command interface {
 	Subject() string
-}
-
-// Preconditioned is optional. A command that implements it decides under which
-// conditions its events may be appended, and it can build those conditions
-// from its own fields.
-//
-// This is where optimistic concurrency, idempotency and uniqueness live. The
-// kit adds no preconditions of its own.
-type Preconditioned interface {
-	Preconditions() []eventsourcingdb.Precondition
+	Preconditions() []Precondition
 }
 
 // State is the state a command decides on, together with the rules that build

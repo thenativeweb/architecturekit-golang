@@ -94,13 +94,13 @@ func TestExecuteWritesNothingWhenDecideReturnsNoEvents(t *testing.T) {
 	}
 }
 
-func TestExecuteWithoutPreconditionsAppendsBlindly(t *testing.T) {
+func TestExecuteUnconditionallyAppendsBlindly(t *testing.T) {
 	store := requireStore(t)
 	subject := subjectFor(t)
 	ctx := context.Background()
 
-	// The kit adds no preconditions, so concurrent commands that declare none
-	// all succeed. That is the documented consequence, not an accident.
+	// Concurrent commands that write unconditionally all succeed. That is what
+	// Unconditionally is for, not an accident.
 	const concurrent = 4
 	var waitGroup sync.WaitGroup
 	for range concurrent {

@@ -261,7 +261,7 @@ func (o *Outcome[TCommand, TState]) ThenState(
 }
 
 // ThenPreconditions expects the command to declare exactly these, in this
-// order. A command that declares none is checked with no arguments.
+// order.
 func (o *Outcome[TCommand, TState]) ThenPreconditions(
 	expected ...Precondition,
 ) *Outcome[TCommand, TState] {
