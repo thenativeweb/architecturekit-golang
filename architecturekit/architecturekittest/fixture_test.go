@@ -103,12 +103,13 @@ func accountState() *architecturekit.State[account] {
 	})
 
 	// An older type, reachable only through its upcaster.
-	state.Upcast("test.account.opened.v1",
-		func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
-			event.Type = "test.account.opened"
-			event.Data = []byte(`{"owner":"from the old shape"}`)
-			return []eventsourcingdb.Event{event}, nil
-		})
+	state.UpcastWith(architecturekit.NewUpcasters().
+		Upcast("test.account.opened.v1",
+			func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
+				event.Type = "test.account.opened"
+				event.Data = []byte(`{"owner":"from the old shape"}`)
+				return []eventsourcingdb.Event{event}, nil
+			}))
 
 	return state
 }

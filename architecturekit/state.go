@@ -45,7 +45,9 @@ type State[TState any] struct {
 	initial   TState
 	evolve    map[string]func(TState, json.RawMessage) (TState, error)
 	schemas   []EventSchema
-	upcasters upcasters
+
+	// upcasters is the shared set the state refers to, or nil if it has none.
+	upcasters *Upcasters
 
 	// fromLatest is the event type from whose latest occurrence the state is
 	// built, or an empty string to build it from the first event.
@@ -70,9 +72,8 @@ type EventSchema struct {
 // NewState creates a state that starts out as initial.
 func NewState[TState any](initial TState) *State[TState] {
 	return &State[TState]{
-		initial:   initial,
-		evolve:    map[string]func(TState, json.RawMessage) (TState, error){},
-		upcasters: upcasters{},
+		initial: initial,
+		evolve:  map[string]func(TState, json.RawMessage) (TState, error){},
 	}
 }
 
@@ -105,18 +106,21 @@ func (s *State[TState]) Evolve[TEvent Event](evolve func(TState, TEvent) TState)
 	return s
 }
 
-// Upcast translates stored events of an older type into a newer shape, before
-// any Evolve rule sees them. The result is never written back.
+// UpcastWith runs the stored events through the given set of upcasters before
+// any Evolve rule sees them, so that events of an older type arrive in their
+// current shape (see Upcasters).
 //
-// Upcasters are chained: if the result carries a type that has an upcaster of
-// its own, that one runs too, so only one step per version is needed instead
-// of one per pair of versions.
-func (s *State[TState]) Upcast(from string, upcast Upcaster) *State[TState] {
-	if _, exists := s.upcasters[from]; exists {
-		panic(fmt.Sprintf("architecturekit: event type %q already has an upcaster", from))
+// Calling UpcastWith twice, or with nil, is a programming error, so it panics
+// while the state is being built.
+func (s *State[TState]) UpcastWith(upcasters *Upcasters) *State[TState] {
+	if upcasters == nil {
+		panic("architecturekit: UpcastWith needs a set of upcasters, not nil")
+	}
+	if s.upcasters != nil {
+		panic("architecturekit: this state already has a set of upcasters")
 	}
 
-	s.upcasters[from] = upcast
+	s.upcasters = upcasters
 
 	return s
 }
