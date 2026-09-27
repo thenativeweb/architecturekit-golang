@@ -422,41 +422,48 @@ if err != nil {
 
 The database keeps the schema of an event type forever. If the shape of an event changes, introduce a new event type, and translate the stored events of the old type with an upcaster.
 
-Suppose an earlier version of the library wrote events of the type `io.eventsourcingdb.library.book-lent`, with the fields `lentTo` and `until`. To translate them into `BookBorrowed` events, call the `Upcast` function on the state and hand over the old event type and a function that receives the stored event and returns the translated events:
+Suppose an earlier version of the library wrote events of the type `io.eventsourcingdb.library.book-lent`, with the fields `lentTo` and `until`. To translate them into `BookBorrowed` events, create a set of upcasters with the `NewUpcasters` function. Then call the `Upcast` function on the set, and hand over the old event type and a function that receives the stored event and returns the translated events:
 
 ```go
-bookState.Upcast(
-  "io.eventsourcingdb.library.book-lent",
-  func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
-    var old struct {
-      LentTo string `json:"lentTo"`
-      Until  string `json:"until"`
-    }
-    if err := json.Unmarshal(event.Data, &old); err != nil {
-      return nil, err
-    }
+var libraryUpcasters = architecturekit.NewUpcasters().
+  Upcast(
+    "io.eventsourcingdb.library.book-lent",
+    func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
+      var old struct {
+        LentTo string `json:"lentTo"`
+        Until  string `json:"until"`
+      }
+      if err := json.Unmarshal(event.Data, &old); err != nil {
+        return nil, err
+      }
 
-    data, err := json.Marshal(BookBorrowed{
-      BorrowedBy:    old.LentTo,
-      BorrowedUntil: old.Until,
-    })
-    if err != nil {
-      return nil, err
-    }
+      data, err := json.Marshal(BookBorrowed{
+        BorrowedBy:    old.LentTo,
+        BorrowedUntil: old.Until,
+      })
+      if err != nil {
+        return nil, err
+      }
 
-    event.Type = BookBorrowed{}.EventType()
-    event.Data = data
+      event.Type = BookBorrowed{}.EventType()
+      event.Data = data
 
-    return []eventsourcingdb.Event{event}, nil
-  },
-)
+      return []eventsourcingdb.Event{event}, nil
+    },
+  )
 ```
 
-The function has the type `Upcaster`. Upcasters run before the `Evolve` rules, and they may return more than one event. If a returned event has an upcaster of its own, that one runs as well, so every version needs only a single step to the next one. The translated events are never written back.
+The function has the type `Upcaster`. Upcasters may return more than one event. If a returned event has an upcaster of its own, that one runs as well, so every version needs only a single step to the next one. The translated events are never written back.
 
-*Note that calling `Upcast` twice for the same event type panics.*
+To use the upcasters, call the `UpcastWith` function on the state and hand over the set. The upcasters then run before the `Evolve` rules:
 
-*Note that upcasters only apply to the state. Projections receive events as they are stored.*
+```go
+bookState.UpcastWith(libraryUpcasters)
+```
+
+Upcasting belongs to the event types, not to a single state, so register the upcasters once and hand the same set to every state, and to every projection that reads these events (see [Defining Projections](#defining-projections)). That way, the write side and the read side see the same events.
+
+*Note that calling `Upcast` twice for the same event type panics, as does calling `UpcastWith` twice, or with `nil`.*
 
 ### Reading Long Streams
 
@@ -664,62 +671,79 @@ func (t *BookTable) All(ctx context.Context) (iter.Seq[BookItem], error) {
 
 ### Defining Projections
 
-A projection turns events into a view. Define a type and implement the `Apply` function, which receives every event as it is stored. This makes the type a `Projection`:
+A projection turns events into a view. Call the `NewProjection` function, and call the `On` function for every event type the view depends on. Each handler receives an `Envelope`, which holds the metadata of the event, such as its `ID`, `Time`, and `Subject`, and its data, decoded into the Go type of the event:
 
 ```go
-type CatalogProjection struct {
-  catalog *architecturekit.ItemView[BookItem]
+func newCatalogProjection(catalog *architecturekit.ItemView[BookItem]) *architecturekit.TypedProjection {
+  return architecturekit.NewProjection().
+    On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
+      catalog.Insert(BookItem{
+        ID:      bookIDOf(event.Subject),
+        Title:   event.Data.Title,
+        Author:  event.Data.Author,
+        EventID: event.ID,
+      })
+      return nil
+    }).
+    On(func(ctx context.Context, event architecturekit.Envelope[BookBorrowed]) error {
+      catalog.Update(isBook(bookIDOf(event.Subject)), func(item *BookItem) {
+        item.IsBorrowed = true
+        item.BorrowedUntil = event.Data.BorrowedUntil
+        item.EventID = event.ID
+      })
+      return nil
+    }).
+    On(func(ctx context.Context, event architecturekit.Envelope[BookReturned]) error {
+      catalog.Update(isBook(bookIDOf(event.Subject)), func(item *BookItem) {
+        item.IsBorrowed = false
+        item.BorrowedUntil = ""
+        item.EventID = event.ID
+      })
+      return nil
+    })
 }
 
-func (p CatalogProjection) Apply(ctx context.Context, event eventsourcingdb.Event) error {
-  values, ok := bookSubject.Match(event.Subject)
-  if !ok {
-    return nil
-  }
+catalogProjection := newCatalogProjection(catalog)
+```
 
-  bookID := values["book"]
-  isBook := func(item BookItem) bool {
+The event type is taken from the event's `EventType` function, so it does not have to be repeated, and the type of an event and the type its data is decoded into can not drift apart.
+
+Which parts of the subject a view needs is up to the application. In this example, two small functions take the ID of the book out of the subject, and select the item of a book (see [Composing Subjects](#composing-subjects)):
+
+```go
+func bookIDOf(subject string) string {
+  values, _ := bookSubject.Match(subject)
+  return values["book"]
+}
+
+func isBook(bookID string) func(BookItem) bool {
+  return func(item BookItem) bool {
     return item.ID == bookID
   }
+}
+```
 
-  switch event.Type {
-  case BookAcquired{}.EventType():
-    var data BookAcquired
-    if err := json.Unmarshal(event.Data, &data); err != nil {
-      return err
-    }
+`NewProjection` returns a `*TypedProjection`, which is a `Projection` like any other, so you can run, track, and test it as described below. Events without a handler are skipped, since a projection usually reads more events than it depends on. If the data of an event can not be decoded, the projection returns an error of the category `ErrPermanent`. An error returned by a handler is passed on unchanged.
 
-    p.catalog.Insert(BookItem{
-      ID:      bookID,
-      Title:   data.Title,
-      Author:  data.Author,
-      EventID: event.ID,
-    })
+To have the projection see the same events as the state, hand over the same set of upcasters with the `UpcastWith` function (see [Versioning Events](#versioning-events)):
 
-  case BookBorrowed{}.EventType():
-    var data BookBorrowed
-    if err := json.Unmarshal(event.Data, &data); err != nil {
-      return err
-    }
+```go
+catalogProjection.UpcastWith(libraryUpcasters)
+```
 
-    p.catalog.Update(isBook, func(item *BookItem) {
-      item.IsBorrowed = true
-      item.BorrowedUntil = data.BorrowedUntil
-      item.EventID = event.ID
-    })
+*Note that calling `On` twice for the same event type panics.*
 
-  case BookReturned{}.EventType():
-    p.catalog.Update(isBook, func(item *BookItem) {
-      item.IsBorrowed = false
-      item.BorrowedUntil = ""
-      item.EventID = event.ID
-    })
-  }
+#### Handling Every Event
 
+A projection that has to see every event, for example to log it, implements the `Projection` interface directly. Its `Apply` function receives every event as it is stored, without running any upcasters:
+
+```go
+type LogProjection struct{}
+
+func (LogProjection) Apply(ctx context.Context, event eventsourcingdb.Event) error {
+  log.Println(event.Subject, event.Type)
   return nil
 }
-
-catalogProjection := CatalogProjection{catalog: catalog}
 ```
 
 For a projection that needs no type of its own, use `ProjectionFunc`, which turns a function into a projection:
@@ -800,6 +824,23 @@ func (p *BookTableProjection) SaveCheckpoint(ctx context.Context, eventID string
 }
 ```
 
+To make a projection created with `NewProjection` resumable, embed it in a type of your own, and add the two functions there:
+
+```go
+type BookTable struct {
+  *architecturekit.TypedProjection
+  // ...
+}
+
+func (t *BookTable) Checkpoint(ctx context.Context) (string, error) {
+  // ...
+}
+
+func (t *BookTable) SaveCheckpoint(ctx context.Context, eventID string) error {
+  // ...
+}
+```
+
 *Note that the checkpoint is saved after the events have been applied. After a crash, events may therefore be applied a second time, so `Apply` must be idempotent.*
 
 To find out how a projection will be run, call the `ModeOf` function. It returns a `Mode`, which is `ModeRebuild` or `ModeResumable`:
@@ -840,6 +881,31 @@ func (tx *bookTableTx) Commit(ctx context.Context, lastEventID string) error {
 
 func (tx *bookTableTx) Rollback(ctx context.Context) error {
   // ...
+}
+```
+
+Instead of implementing `Apply` on the `Tx` yourself, you can use handlers created with `NewProjection`. Build them in `Begin`, so that they write into the transaction that has just been started, and embed them in the `Tx`, which then only needs `Commit` and `Rollback`:
+
+```go
+func (p *TransactionalBookTableProjection) Begin(ctx context.Context) (architecturekit.Tx, error) {
+  tx, err := p.db.BeginTx(ctx, nil)
+  if err != nil {
+    return nil, err
+  }
+
+  return &bookTableTx{
+    tx: tx,
+    TypedProjection: architecturekit.NewProjection().
+      On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
+        _, err := tx.ExecContext(ctx, "INSERT INTO books ...")
+        return err
+      }),
+  }, nil
+}
+
+type bookTableTx struct {
+  *architecturekit.TypedProjection
+  tx *sql.Tx
 }
 ```
 
@@ -1549,7 +1615,7 @@ To test a projection without a database, call the `Project` function with a `*te
 ```go
 func TestCatalogProjection(t *testing.T) {
   catalog := architecturekit.NewItemView[BookItem]()
-  catalogProjection := CatalogProjection{catalog: catalog}
+  catalogProjection := newCatalogProjection(catalog)
 
   architecturekittest.Project(t, catalogProjection,
     architecturekittest.StoredEvents("/books/42",
@@ -1575,6 +1641,8 @@ func TestCatalogProjection(t *testing.T) {
   })
 }
 ```
+
+`Project` hands over the events as they are stored, so a projection that uses upcasters runs them, just as it does with a database. To test that a projection handles an older event type, hand over an event of that type.
 
 The `ExpectItems` function expects the view to hold exactly the given items, in the given order. It requires an item type that is comparable. To get the items as a slice instead, call the `ItemsOf` function:
 

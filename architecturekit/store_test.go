@@ -337,10 +337,11 @@ func TestExecuteReportsAFailingUpcaster(t *testing.T) {
 
 	state := architecturekit.NewState(counter{})
 	state.Evolve(func(current counter, event incremented) counter { return current })
-	state.Upcast("io.thenativeweb.test.outdated",
-		func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
-			return nil, errors.New("this one cannot be migrated")
-		})
+	state.UpcastWith(architecturekit.NewUpcasters().
+		Upcast("io.thenativeweb.test.outdated",
+			func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
+				return nil, errors.New("this one cannot be migrated")
+			}))
 
 	decider := architecturekit.Decider[increment, counter]{
 		State: state,

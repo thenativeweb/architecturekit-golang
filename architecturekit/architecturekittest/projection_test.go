@@ -307,3 +307,61 @@ func TestProjectRefusesAProjectionThatIsTransactionalAsWell(t *testing.T) {
 	recorder.expectFailure(t, "is transactional, use ProjectTransactional")
 	expectLog(t, table.log)
 }
+
+func TestProjectDrivesATypedProjection(t *testing.T) {
+	view := ownerView()
+
+	projection := architecturekit.NewProjection().
+		On(func(_ context.Context, event architecturekit.Envelope[opened]) error {
+			view.Insert(owner{Name: event.Data.Owner})
+			return nil
+		})
+
+	architecturekittest.Project(t, projection,
+		architecturekittest.StoredEvents("/account/1",
+			opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})...)
+
+	architecturekittest.ExpectItems(t, view, owner{Name: "golo"}, owner{Name: "jane"})
+}
+
+// typedOwnerTable builds the handlers of every transaction anew, so that they
+// write into that transaction.
+type typedOwnerTable struct {
+	committed []string
+}
+
+func (o *typedOwnerTable) Checkpoint(context.Context) (string, error) { return "", nil }
+
+func (o *typedOwnerTable) Begin(context.Context) (architecturekit.Tx, error) {
+	tx := &typedOwnerTx{table: o}
+	tx.TypedProjection = architecturekit.NewProjection().
+		On(func(_ context.Context, event architecturekit.Envelope[opened]) error {
+			tx.pending = append(tx.pending, event.Data.Owner)
+			return nil
+		})
+
+	return tx, nil
+}
+
+type typedOwnerTx struct {
+	*architecturekit.TypedProjection
+	table   *typedOwnerTable
+	pending []string
+}
+
+func (tx *typedOwnerTx) Commit(context.Context, string) error {
+	tx.table.committed = append(tx.table.committed, tx.pending...)
+	return nil
+}
+
+func (tx *typedOwnerTx) Rollback(context.Context) error { return nil }
+
+func TestProjectTransactionalDrivesTypedHandlersBuiltPerTransaction(t *testing.T) {
+	table := &typedOwnerTable{}
+
+	architecturekittest.ProjectTransactional(t, table,
+		architecturekittest.StoredEvents("/account/1",
+			opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})...)
+
+	expectLog(t, table.committed, "golo", "jane")
+}

@@ -31,8 +31,48 @@ func stored(eventType, data string) eventsourcingdb.Event {
 	}
 }
 
+// ledgerUpcasters reaches the current shape from the older ones through a
+// chain of upcasters, one step per version.
+func ledgerUpcasters() *architecturekit.Upcasters {
+	return architecturekit.NewUpcasters().
+		// v1 had no currency at all.
+		Upcast("io.thenativeweb.test.credited.v1",
+			func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
+				var payload struct {
+					Amount int `json:"amount"`
+				}
+				if err := json.Unmarshal(event.Data, &payload); err != nil {
+					return nil, err
+				}
+
+				event.Type = "io.thenativeweb.test.credited.v2"
+				event.Data = json.RawMessage(`{"amount":` + itoa(payload.Amount) + `,"currency":"EUR"}`)
+
+				return []eventsourcingdb.Event{event}, nil
+			}).
+		// v2 spelled the currency in lower case.
+		Upcast("io.thenativeweb.test.credited.v2",
+			func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
+				var payload credited
+				if err := json.Unmarshal(event.Data, &payload); err != nil {
+					return nil, err
+				}
+
+				payload.Currency = strings.ToUpper(payload.Currency)
+				data, err := json.Marshal(payload)
+				if err != nil {
+					return nil, err
+				}
+
+				event.Type = (credited{}).EventType()
+				event.Data = data
+
+				return []eventsourcingdb.Event{event}, nil
+			})
+}
+
 // ledgerState knows only the current shape and reaches the older ones through
-// a chain of upcasters, one step per version.
+// the upcasters.
 func ledgerState() *architecturekit.State[ledger] {
 	state := architecturekit.NewState(ledger{})
 
@@ -43,41 +83,7 @@ func ledgerState() *architecturekit.State[ledger] {
 		return current
 	})
 
-	// v1 had no currency at all.
-	state.Upcast("io.thenativeweb.test.credited.v1",
-		func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
-			var payload struct {
-				Amount int `json:"amount"`
-			}
-			if err := json.Unmarshal(event.Data, &payload); err != nil {
-				return nil, err
-			}
-
-			event.Type = "io.thenativeweb.test.credited.v2"
-			event.Data = json.RawMessage(`{"amount":` + itoa(payload.Amount) + `,"currency":"EUR"}`)
-
-			return []eventsourcingdb.Event{event}, nil
-		})
-
-	// v2 spelled the currency in lower case.
-	state.Upcast("io.thenativeweb.test.credited.v2",
-		func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
-			var payload credited
-			if err := json.Unmarshal(event.Data, &payload); err != nil {
-				return nil, err
-			}
-
-			payload.Currency = strings.ToUpper(payload.Currency)
-			data, err := json.Marshal(payload)
-			if err != nil {
-				return nil, err
-			}
-
-			event.Type = (credited{}).EventType()
-			event.Data = data
-
-			return []eventsourcingdb.Event{event}, nil
-		})
+	state.UpcastWith(ledgerUpcasters())
 
 	return state
 }
@@ -124,15 +130,8 @@ func TestUpcasterCanSplitOneEventIntoTwo(t *testing.T) {
 		current.Entries++
 		return current
 	})
-	state.Upcast("io.thenativeweb.test.credited.batch",
-		func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
-			first, second := event, event
-			first.Type = (credited{}).EventType()
-			first.Data = json.RawMessage(`{"amount":3,"currency":"EUR"}`)
-			second.Type = (credited{}).EventType()
-			second.Data = json.RawMessage(`{"amount":4,"currency":"EUR"}`)
-			return []eventsourcingdb.Event{first, second}, nil
-		})
+	state.UpcastWith(architecturekit.NewUpcasters().
+		Upcast("io.thenativeweb.test.credited.batch", splitIntoTwo))
 
 	current, err := architecturekit.ReplayStored(state,
 		stored("io.thenativeweb.test.credited.batch", `{}`))
@@ -162,10 +161,8 @@ func TestUpcasterErrorIsPermanent(t *testing.T) {
 
 func TestUpcasterThatKeepsItsTypeIsStopped(t *testing.T) {
 	state := architecturekit.NewState(ledger{})
-	state.Upcast("io.thenativeweb.test.loop",
-		func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
-			return []eventsourcingdb.Event{event}, nil
-		})
+	state.UpcastWith(architecturekit.NewUpcasters().
+		Upcast("io.thenativeweb.test.loop", passThrough))
 
 	_, err := architecturekit.ReplayStored(state, stored("io.thenativeweb.test.loop", `{}`))
 
@@ -177,6 +174,21 @@ func TestUpcasterThatKeepsItsTypeIsStopped(t *testing.T) {
 	}
 }
 
+// splitIntoTwo turns one stored event into two credits.
+func splitIntoTwo(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
+	first, second := event, event
+	first.Type = (credited{}).EventType()
+	first.Data = json.RawMessage(`{"amount":3,"currency":"EUR"}`)
+	second.Type = (credited{}).EventType()
+	second.Data = json.RawMessage(`{"amount":4,"currency":"EUR"}`)
+	return []eventsourcingdb.Event{first, second}, nil
+}
+
+// passThrough keeps an event as it is, including its type.
+func passThrough(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
+	return []eventsourcingdb.Event{event}, nil
+}
+
 func TestUpcastPanicsOnDuplicateRegistration(t *testing.T) {
 	defer func() {
 		if recover() == nil {
@@ -184,12 +196,63 @@ func TestUpcastPanicsOnDuplicateRegistration(t *testing.T) {
 		}
 	}()
 
-	state := architecturekit.NewState(ledger{})
-	passThrough := func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
-		return []eventsourcingdb.Event{event}, nil
+	architecturekit.NewUpcasters().
+		Upcast("io.thenativeweb.test.same", passThrough).
+		Upcast("io.thenativeweb.test.same", passThrough)
+}
+
+func TestStateUpcastWithPanicsWhenCalledTwice(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected a panic for a second set of upcasters")
+		}
+	}()
+
+	architecturekit.NewState(ledger{}).
+		UpcastWith(architecturekit.NewUpcasters()).
+		UpcastWith(architecturekit.NewUpcasters())
+}
+
+func TestStateUpcastWithPanicsWithoutASet(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected a panic for a nil set of upcasters")
+		}
+	}()
+
+	architecturekit.NewState(ledger{}).UpcastWith(nil)
+}
+
+func TestSharedUpcastersApplyToEveryStateThatUsesThem(t *testing.T) {
+	upcasters := ledgerUpcasters()
+
+	total := architecturekit.NewState(0).
+		Evolve(func(current int, event credited) int { return current + event.Amount }).
+		UpcastWith(upcasters)
+	currencies := architecturekit.NewState("").
+		Evolve(func(current string, event credited) string { return current + event.Currency }).
+		UpcastWith(upcasters)
+
+	history := []eventsourcingdb.Event{
+		stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
+		stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
 	}
-	state.Upcast("io.thenativeweb.test.same", passThrough)
-	state.Upcast("io.thenativeweb.test.same", passThrough)
+
+	gotTotal, err := architecturekit.ReplayStored(total, history...)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	gotCurrencies, err := architecturekit.ReplayStored(currencies, history...)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotTotal != 15 {
+		t.Fatalf("got %d, want 15", gotTotal)
+	}
+	if gotCurrencies != "EURCHF" {
+		t.Fatalf("got %q, want %q", gotCurrencies, "EURCHF")
+	}
 }
 
 func TestReplayStoredFailsOnEventWithoutRule(t *testing.T) {
