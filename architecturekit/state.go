@@ -42,9 +42,9 @@ type Command interface {
 // the query side, whereas this is the write side, holding just enough state
 // for a decision.
 type State[TState any] struct {
-	initial   TState
-	evolve    map[string]func(TState, json.RawMessage) (TState, error)
-	schemas   []EventSchema
+	initial TState
+	evolve  map[string]func(TState, json.RawMessage) (TState, error)
+	schemas []EventSchema
 
 	// upcasters is the shared set the state refers to, or nil if it has none.
 	upcasters *Upcasters
