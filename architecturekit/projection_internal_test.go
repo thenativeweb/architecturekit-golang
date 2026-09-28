@@ -162,7 +162,7 @@ var unverified = (&Store{}).verify
 func TestDriveInRebuildModeKeepsNoCheckpoint(t *testing.T) {
 	target := &recorder{}
 
-	last, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), unverified, 1)
+	last, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), unverified, nil, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestDriveInRebuildModeKeepsNoCheckpoint(t *testing.T) {
 func TestDriveInResumableModeWritesCheckpointAfterEveryEvent(t *testing.T) {
 	target := &resumableRecorder{}
 
-	if _, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, 1); err != nil {
+	if _, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, nil, 1); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -190,7 +190,7 @@ func TestDriveInResumableModeWritesCheckpointAfterEveryEvent(t *testing.T) {
 func TestDriveHonoursTheBatchSize(t *testing.T) {
 	target := &resumableRecorder{}
 
-	if _, err := drive(context.Background(), writerFor(target), events("0", "1", "2", "3"), unverified, 2); err != nil {
+	if _, err := drive(context.Background(), writerFor(target), events("0", "1", "2", "3"), unverified, nil, 2); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -203,7 +203,7 @@ func TestDriveHonoursTheBatchSize(t *testing.T) {
 func TestDriveCommitsAnIncompleteFinalBatch(t *testing.T) {
 	target := &resumableRecorder{}
 
-	if _, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), unverified, 2); err != nil {
+	if _, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), unverified, nil, 2); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestDriveCommitsAnIncompleteFinalBatch(t *testing.T) {
 func TestDriveInTransactionalModeBracketsEachBatch(t *testing.T) {
 	target := &transactionalRecorder{}
 
-	if _, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), unverified, 2); err != nil {
+	if _, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), unverified, nil, 2); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -233,7 +233,7 @@ func TestDriveRollsBackWhenApplyFails(t *testing.T) {
 	target := &transactionalRecorder{}
 	target.failOn = "1"
 
-	_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), unverified, 10)
+	_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), unverified, nil, 10)
 
 	if !errors.Is(err, ErrPermanent) {
 		t.Fatalf("got %v", err)
@@ -250,7 +250,7 @@ func TestDriveRollsBackWhenAnEventFailsVerification(t *testing.T) {
 		return nil
 	}
 
-	_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), failOnSecond, 10)
+	_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), failOnSecond, nil, 10)
 
 	if !errors.Is(err, ErrUnverified) {
 		t.Fatalf("got %v", err)
@@ -263,7 +263,7 @@ func TestDriveRollsBackWhenTheStreamFails(t *testing.T) {
 	target := &transactionalRecorder{}
 
 	_, err := drive(context.Background(), inTransactions(target),
-		failingEvents(2, errors.New("connection lost")), unverified, 10)
+		failingEvents(2, errors.New("connection lost")), unverified, nil, 10)
 
 	if !errors.Is(err, ErrTransient) {
 		t.Fatalf("a broken stream is transient, got %v", err)
@@ -275,7 +275,7 @@ func TestDriveReportsAFailingBegin(t *testing.T) {
 	target := &transactionalRecorder{}
 	target.beginErr = errors.New("no connection")
 
-	if _, err := drive(context.Background(), inTransactions(target), events("0"), unverified, 1); err == nil {
+	if _, err := drive(context.Background(), inTransactions(target), events("0"), unverified, nil, 1); err == nil {
 		t.Fatal("expected the error from begin")
 	}
 }
@@ -284,7 +284,7 @@ func TestDriveReportsACancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := drive(ctx, writerFor(&recorder{}), events(), unverified, 1)
+	_, err := drive(ctx, writerFor(&recorder{}), events(), unverified, nil, 1)
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
@@ -366,7 +366,7 @@ func TestIgnoreContextEndKeepsRealFailures(t *testing.T) {
 func TestDriveStopsWhenCommitFails(t *testing.T) {
 	target := &failingCommitRecorder{}
 
-	_, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, 1)
+	_, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, nil, 1)
 
 	if err == nil {
 		t.Fatal("expected the error from commit")
@@ -526,7 +526,7 @@ func TestDriveStopsWhenTheFinalCommitFails(t *testing.T) {
 
 	// The batch is larger than the stream, so the only commit is the one after
 	// the loop.
-	_, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, 10)
+	_, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, nil, 10)
 
 	if err == nil {
 		t.Fatal("expected the error from the final commit")
@@ -538,7 +538,7 @@ func TestDriveReportsAFailingRollbackAlongsideTheCause(t *testing.T) {
 	target.failOn = "1"
 	target.rollbackErr = errors.New("rollback did not work either")
 
-	_, err := drive(context.Background(), inTransactions(target), events("0", "1"), unverified, 10)
+	_, err := drive(context.Background(), inTransactions(target), events("0", "1"), unverified, nil, 10)
 
 	// The failure that caused the rollback has to survive, and the rollback
 	// failure comes with it rather than replacing it.
@@ -555,7 +555,7 @@ func TestDriveReportsAFailingRollbackAfterABrokenStream(t *testing.T) {
 	target.rollbackErr = errors.New("rollback did not work either")
 
 	_, err := drive(context.Background(), inTransactions(target),
-		failingEvents(1, errors.New("connection lost")), unverified, 10)
+		failingEvents(1, errors.New("connection lost")), unverified, nil, 10)
 
 	if !errors.Is(err, ErrTransient) {
 		t.Fatalf("the cause must survive, got %v", err)

@@ -850,6 +850,46 @@ if err != nil {
 }
 ```
 
+### Starting Projections
+
+An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly. Calling `CatchUpProjection` first and `RunProjection` afterwards reads the whole history twice, and applies it to the view twice. Call the `StartProjection` function instead. It takes the same arguments as `RunProjection`, runs the projection in the background, and returns a `*ProjectionRun` at once:
+
+```go
+run := architecturekit.StartProjection(ctx, store, "/books", true, catalogProjection)
+
+select {
+case <-run.CaughtUp():
+  // The view holds every event that was stored when the run started.
+case <-run.Done():
+  // The run ended before it caught up.
+  return run.Err()
+}
+
+// Start to answer queries.
+```
+
+`CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix, as with `RunProjection`. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did.
+
+*Note that if the database can not be reached at the start, the run keeps trying, and `CaughtUp` stays open. To wait for a limited time only, add a case with `time.After` to the `select` statement.*
+
+To find out where a run stands, for example for a health check, call the `Status` function. It returns a `ProjectionStatus` with these fields:
+
+- `Phase` is `PhaseCatchingUp`, `PhaseLive`, `PhaseReconnecting`, or `PhaseStopped`.
+- `Since` is when the phase began. For `PhaseReconnecting`, that is when the disruption began, not when the latest attempt did.
+- `Err` is why the run is reconnecting or has stopped. It is `nil` if the database ended the stream, or if the run stopped because its context ended.
+- `Attempts` counts the attempts to read again within the current disruption.
+- `Revision` is the ID of the last event the run has applied and committed.
+
+```go
+status := run.Status()
+
+if status.Phase == architecturekit.PhaseReconnecting && time.Since(status.Since) > 5*time.Minute {
+  // The view has not been up to date for more than five minutes.
+}
+```
+
+For a transactional projection, call the `StartTransactionalProjection` function instead (see [Resuming Projections](#resuming-projections)).
+
 ### Resuming Projections
 
 By default, a projection starts from the first event every time it runs, which fits a view held in memory. For a view that keeps its data, the projection can resume where it stopped instead.
