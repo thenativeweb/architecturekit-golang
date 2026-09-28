@@ -128,7 +128,7 @@ func CatchUpProjection(
 	refuseTransactional(projection)
 
 	catchUpSize, _ := batchSizesOf(projection)
-	_, err := catchUp(ctx, store, subject, recursive, writerFor(projection), catchUpSize)
+	_, err := catchUp(ctx, store, subject, recursive, writerFor(projection), catchUpSize, nil)
 
 	return ignoreContextEnd(err)
 }
@@ -156,7 +156,7 @@ func RunProjection(
 ) error {
 	refuseTransactional(projection)
 
-	return run(ctx, store, subject, recursive, writerFor(projection), projection)
+	return run(ctx, store, subject, recursive, writerFor(projection), projection, nil)
 }
 
 // CatchUpTransactionalProjection is CatchUpProjection for a transactional
@@ -170,7 +170,7 @@ func CatchUpTransactionalProjection(
 ) error {
 	catchUpSize, _ := batchSizesOf(projection)
 	_, err := catchUp(ctx, store, subject, recursive,
-		&transactionalWriter{projection: projection}, catchUpSize)
+		&transactionalWriter{projection: projection}, catchUpSize, nil)
 
 	return ignoreContextEnd(err)
 }
@@ -186,11 +186,12 @@ func RunTransactionalProjection(
 	projection Transactional,
 ) error {
 	return run(ctx, store, subject, recursive,
-		&transactionalWriter{projection: projection}, projection)
+		&transactionalWriter{projection: projection}, projection, nil)
 }
 
 // run catches up and then follows the stream. The batch sizes are read from
 // the projection behind the writer, which is the one that knows its target.
+// Progress is reported to the given run, which is nil for RunProjection.
 func run(
 	ctx context.Context,
 	store *Store,
@@ -198,6 +199,7 @@ func run(
 	recursive bool,
 	writer projectionWriter,
 	projection any,
+	progress *ProjectionRun,
 ) error {
 	catchUpSize, live := batchSizesOf(projection)
 	delay := store.reconnectInitialDelay
@@ -205,13 +207,15 @@ func run(
 	for {
 		checkpointBefore, _ := writer.checkpoint(ctx)
 
-		err := follow(ctx, store, subject, recursive, writer, catchUpSize, live)
+		err := follow(ctx, store, subject, recursive, writer, catchUpSize, live, progress)
 		if ctx.Err() != nil {
 			return nil
 		}
 		if err != nil && !errors.Is(err, ErrTransient) {
 			return err
 		}
+
+		progress.disrupted(err)
 
 		// A session that got somewhere was healthy until it ended, so the next
 		// failure is retried quickly again.
@@ -246,17 +250,20 @@ func follow(
 	writer projectionWriter,
 	catchUpSize int,
 	live int,
+	progress *ProjectionRun,
 ) error {
-	lastEventID, err := catchUp(ctx, store, subject, recursive, writer, catchUpSize)
+	lastEventID, err := catchUp(ctx, store, subject, recursive, writer, catchUpSize, progress)
 	if err != nil {
 		return err
 	}
+
+	progress.caughtUpNow()
 
 	_, err = drive(ctx, writer,
 		store.client.ObserveEvents(ctx, subject, eventsourcingdb.ObserveEventsOptions{
 			Recursive:  recursive,
 			LowerBound: boundAfter(lastEventID),
-		}), store.verify, live)
+		}), store.verify, progress, live)
 
 	return err
 }
@@ -269,6 +276,7 @@ func catchUp(
 	recursive bool,
 	writer projectionWriter,
 	catchUpSize int,
+	progress *ProjectionRun,
 ) (string, error) {
 	checkpoint, err := writer.checkpoint(ctx)
 	if err != nil {
@@ -279,7 +287,7 @@ func catchUp(
 		store.client.ReadEvents(ctx, subject, eventsourcingdb.ReadEventsOptions{
 			Recursive:  recursive,
 			LowerBound: boundAfter(checkpoint),
-		}), store.verify, catchUpSize)
+		}), store.verify, progress, catchUpSize)
 	if err != nil {
 		return lastEventID, err
 	}
@@ -318,6 +326,7 @@ func drive(
 	writer projectionWriter,
 	events iter.Seq2[eventsourcingdb.Event, error],
 	verify func(eventsourcingdb.Event) error,
+	progress *ProjectionRun,
 	batchSize int,
 ) (string, error) {
 	var lastEventID string
@@ -365,6 +374,7 @@ func drive(
 		if err := writer.commit(ctx, lastEventID); err != nil {
 			return lastEventID, err
 		}
+		progress.committed(lastEventID)
 		open = false
 		inBatch = 0
 	}
@@ -373,6 +383,7 @@ func drive(
 		if err := writer.commit(ctx, lastEventID); err != nil {
 			return lastEventID, err
 		}
+		progress.committed(lastEventID)
 	}
 
 	return lastEventID, ctx.Err()
