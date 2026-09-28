@@ -256,7 +256,7 @@ func follow(
 		store.client.ObserveEvents(ctx, subject, eventsourcingdb.ObserveEventsOptions{
 			Recursive:  recursive,
 			LowerBound: boundAfter(lastEventID),
-		}), live)
+		}), store.verify, live)
 
 	return err
 }
@@ -279,7 +279,7 @@ func catchUp(
 		store.client.ReadEvents(ctx, subject, eventsourcingdb.ReadEventsOptions{
 			Recursive:  recursive,
 			LowerBound: boundAfter(checkpoint),
-		}), catchUpSize)
+		}), store.verify, catchUpSize)
 	if err != nil {
 		return lastEventID, err
 	}
@@ -311,11 +311,13 @@ func boundAfter(eventID string) *eventsourcingdb.Bound {
 }
 
 // drive applies the events in batches and returns the ID of the last one it
-// applied.
+// applied. Every event is verified before it is applied, and one that fails
+// ends the batch like an event the projection refuses.
 func drive(
 	ctx context.Context,
 	writer projectionWriter,
 	events iter.Seq2[eventsourcingdb.Event, error],
+	verify func(eventsourcingdb.Event) error,
 	batchSize int,
 ) (string, error) {
 	var lastEventID string
@@ -330,6 +332,14 @@ func drive(
 			}
 
 			return lastEventID, failure
+		}
+
+		if err := verify(event); err != nil {
+			if open {
+				err = errors.Join(err, writer.rollback(ctx))
+			}
+
+			return lastEventID, err
 		}
 
 		if !open {

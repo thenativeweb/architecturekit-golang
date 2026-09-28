@@ -146,6 +146,7 @@ func TestStatusForMapsEveryCategory(t *testing.T) {
 		{"conflict", architecturekit.ErrConflict, http.StatusConflict},
 		{"transient", architecturekit.ErrTransient, http.StatusServiceUnavailable},
 		{"permanent", architecturekit.ErrPermanent, http.StatusInternalServerError},
+		{"unverified", architecturekit.ErrUnverified, http.StatusInternalServerError},
 		{"anything else", errors.New("who knows"), http.StatusInternalServerError},
 	}
 

@@ -2,6 +2,7 @@ package architecturekit
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"strings"
 	"time"
@@ -22,6 +23,11 @@ type Store struct {
 	reconnectInitialDelay time.Duration
 	reconnectMaxDelay     time.Duration
 	reconnectObserver     func(err error, delay time.Duration)
+
+	// verifiesHashes and verificationKey are set by WithHashVerification and
+	// WithSignatureVerification. A verification key implies checking hashes.
+	verifiesHashes  bool
+	verificationKey ed25519.PublicKey
 }
 
 // The default delays of RunProjection before it observes again, for a store
@@ -68,6 +74,40 @@ func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
 func WithReconnectObserver(observe func(err error, delay time.Duration)) StoreOption {
 	return func(store *Store) {
 		store.reconnectObserver = observe
+	}
+}
+
+// WithHashVerification checks the hash of every event the store reads, before
+// any upcaster, Evolve rule, or projection sees it. An event whose hash does
+// not match its content makes reading fail with ErrUnverified.
+//
+// This applies to Execute, Load, and every kind of projection. The events that
+// Execute has just written are not checked, since they are not read.
+func WithHashVerification() StoreOption {
+	return func(store *Store) {
+		store.verifiesHashes = true
+	}
+}
+
+// WithSignatureVerification checks the hash and the signature of every event
+// the store reads, like WithHashVerification, against the verification key of
+// the database. An event without a signature, or with one that does not match
+// the key, makes reading fail with ErrUnverified.
+//
+// The database signs events only if it runs with a signing key, and it signs
+// them when handing them out, with the key it has at that moment. After the key
+// is rotated, hand over the new verification key.
+//
+// A key of the wrong length is a programming error, so it panics.
+func WithSignatureVerification(verificationKey ed25519.PublicKey) StoreOption {
+	if len(verificationKey) != ed25519.PublicKeySize {
+		panic(fmt.Sprintf("architecturekit: a verification key needs %d bytes, not %d",
+			ed25519.PublicKeySize, len(verificationKey)))
+	}
+
+	return func(store *Store) {
+		store.verifiesHashes = true
+		store.verificationKey = verificationKey
 	}
 }
 
@@ -142,6 +182,10 @@ func fold[TState any](
 			return current, "", fmt.Errorf("%w: reading %q: %v", ErrTransient, subject, err)
 		}
 
+		if err := store.verify(event); err != nil {
+			return current, "", err
+		}
+
 		upcasted, err := state.upcasters.apply(event)
 		if err != nil {
 			return current, "", err
@@ -172,6 +216,26 @@ func fold[TState any](
 	}
 
 	return current, lastEventID, nil
+}
+
+// verify checks an event the store has read, as far as the store was told to
+// with WithHashVerification or WithSignatureVerification. It has to run on the
+// event as stored, before any upcaster changes it.
+func (s *Store) verify(event eventsourcingdb.Event) error {
+	var err error
+
+	switch {
+	case s.verificationKey != nil:
+		err = event.VerifySignature(s.verificationKey)
+	case s.verifiesHashes:
+		err = event.VerifyHash()
+	}
+
+	if err != nil {
+		return fmt.Errorf("%w: event %s on %q: %v", ErrUnverified, event.ID, event.Subject, err)
+	}
+
+	return nil
 }
 
 // write appends the events under the given preconditions and returns them as
