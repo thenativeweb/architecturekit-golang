@@ -25,7 +25,7 @@ var ErrNotARevision = errors.New("architecturekit: not a revision")
 
 // Revisioned is optional. A view implements it when it knows how far its
 // projection has come, which lets a reader wait for a revision instead of
-// polling. ItemView does.
+// polling. InMemoryView does.
 type Revisioned interface {
 	// Revision is the last event the view has seen, or the empty string while
 	// it has seen none.
@@ -38,7 +38,7 @@ type Revisioned interface {
 }
 
 // RevisionSink is what a view implements to record how far its projection has
-// come. ItemView does.
+// come. InMemoryView does.
 type RevisionSink interface {
 	// Seen records an event as processed. Events may arrive more than once and
 	// out of order after a restart, so an older ID never moves the revision

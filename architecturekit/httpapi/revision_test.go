@@ -19,7 +19,20 @@ type noteItem struct {
 
 type countNotes struct{}
 
-func countNotesIn(view *architecturekit.ItemView[noteItem]) httpapi.Answer[countNotes, int] {
+// noteView is a view of notes, each keyed by its text.
+func noteView() *architecturekit.InMemoryView[string, noteItem] {
+	return architecturekit.NewInMemoryView(func(item noteItem) string { return item.Text })
+}
+
+func insertNote(t *testing.T, view *architecturekit.InMemoryView[string, noteItem], eventID string, note noteItem) {
+	t.Helper()
+
+	if err := view.Insert(context.Background(), eventID, note); err != nil {
+		t.Fatalf("failed to insert %+v: %v", note, err)
+	}
+}
+
+func countNotesIn(view *architecturekit.InMemoryView[string, noteItem]) httpapi.Answer[countNotes, int] {
 	return func(ctx context.Context, _ countNotes) (int, error) {
 		items, err := view.All(ctx)
 		if err != nil {
@@ -38,7 +51,7 @@ func countNotesIn(view *architecturekit.ItemView[noteItem]) httpapi.Answer[count
 func allNotes(*http.Request, user) (countNotes, error) { return countNotes{}, nil }
 
 // servingNotes wires one revisioned query onto a mux.
-func servingNotes(t *testing.T, view *architecturekit.ItemView[noteItem], wait time.Duration) *http.ServeMux {
+func servingNotes(t *testing.T, view *architecturekit.InMemoryView[string, noteItem], wait time.Duration) *http.ServeMux {
 	t.Helper()
 
 	mux := http.NewServeMux()
@@ -65,8 +78,8 @@ func askNotes(mux *http.ServeMux, headers map[string]string) *httptest.ResponseR
 }
 
 func TestAQueryWithoutAWantedRevisionAnswersAtOnce(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
-	view.Insert(noteItem{Text: "one"})
+	view := noteView()
+	insertNote(t, view, "1", noteItem{Text: "one"})
 	view.Seen("3")
 
 	response := askNotes(servingNotes(t, view, time.Second), nil)
@@ -85,13 +98,13 @@ func TestAQueryWithoutAWantedRevisionAnswersAtOnce(t *testing.T) {
 }
 
 func TestAQueryWaitsForTheRevisionItWasAskedFor(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
+	view := noteView()
 	view.Seen("1")
 
 	// The revision arrives only after the request is already waiting.
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		view.Insert(noteItem{Text: "late"})
+		insertNote(t, view, "2", noteItem{Text: "late"})
 		view.Seen("5")
 	}()
 
@@ -119,8 +132,8 @@ func TestAQueryWaitsForTheRevisionItWasAskedFor(t *testing.T) {
 }
 
 func TestAQueryAnswersWithWhatItHasWhenTheWaitRunsOut(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
-	view.Insert(noteItem{Text: "one"})
+	view := noteView()
+	insertNote(t, view, "3", noteItem{Text: "one"})
 	view.Seen("2")
 
 	response := askNotes(servingNotes(t, view, 50*time.Millisecond), map[string]string{
@@ -139,7 +152,7 @@ func TestAQueryAnswersWithWhatItHasWhenTheWaitRunsOut(t *testing.T) {
 }
 
 func TestAWantedRevisionThatIsNotOneIsRefused(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
+	view := noteView()
 	view.Seen("1")
 
 	response := askNotes(servingNotes(t, view, 10*time.Second), map[string]string{
@@ -152,8 +165,8 @@ func TestAWantedRevisionThatIsNotOneIsRefused(t *testing.T) {
 }
 
 func TestAKnownRevisionIsAnsweredWithNotModified(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
-	view.Insert(noteItem{Text: "one"})
+	view := noteView()
+	insertNote(t, view, "4", noteItem{Text: "one"})
 	view.Seen("4")
 
 	mux := servingNotes(t, view, time.Second)
@@ -172,7 +185,7 @@ func TestAKnownRevisionIsAnsweredWithNotModified(t *testing.T) {
 	}
 
 	// After something changes, the same tag no longer matches.
-	view.Insert(noteItem{Text: "two"})
+	insertNote(t, view, "5", noteItem{Text: "two"})
 	view.Seen("5")
 
 	third := askNotes(mux, map[string]string{"If-None-Match": tag})
@@ -185,7 +198,7 @@ func TestAKnownRevisionIsAnsweredWithNotModified(t *testing.T) {
 func TestOneResourcesTagDoesNotMatchAnother(t *testing.T) {
 	// Every query over the same view shares a revision, so a tag that held
 	// nothing else would wrongly match across resources.
-	view := architecturekit.NewItemView[noteItem]()
+	view := noteView()
 	view.Seen("4")
 
 	mux := http.NewServeMux()
@@ -209,7 +222,7 @@ func TestOneResourcesTagDoesNotMatchAnother(t *testing.T) {
 }
 
 func TestAViewThatHasSeenNothingCarriesNoTag(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
+	view := noteView()
 
 	response := askNotes(servingNotes(t, view, time.Second), nil)
 
@@ -226,7 +239,7 @@ func TestAViewThatHasSeenNothingCarriesNoTag(t *testing.T) {
 }
 
 func TestNobodyCanMakeTheServerWaitWithoutBeingLetIn(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
+	view := noteView()
 	view.Seen("1")
 
 	// No X-User header, so the request never gets as far as waiting.
@@ -247,7 +260,7 @@ func TestNobodyCanMakeTheServerWaitWithoutBeingLetIn(t *testing.T) {
 }
 
 func TestAFailingQueryCarriesNoRevision(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
+	view := noteView()
 	view.Seen("4")
 
 	mux := http.NewServeMux()
@@ -273,7 +286,7 @@ func TestAFailingQueryCarriesNoRevision(t *testing.T) {
 // --- the building blocks on their own ---
 
 func TestAwaitIgnoresARequestThatAsksForNothing(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
+	view := noteView()
 
 	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
 
@@ -309,7 +322,7 @@ func (refusingView) WaitFor(context.Context, string) error {
 // changed. That is exactly how an application can end up showing yesterday's
 // list until something unrelated happens.
 func TestAnAnswerThatDependsOnMoreThanTheRevision(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
+	view := noteView()
 	view.Seen("7")
 
 	day := "2026-09-22"
@@ -361,7 +374,7 @@ func TestAnAnswerThatDependsOnMoreThanTheRevision(t *testing.T) {
 // honest: an answer that follows from the read model alone needs nothing
 // extra, and its tag still holds across requests.
 func TestQueryRevisionedIsQueryVaryingWithoutAVariance(t *testing.T) {
-	view := architecturekit.NewItemView[noteItem]()
+	view := noteView()
 	view.Seen("3")
 
 	mux := servingNotes(t, view, time.Second)

@@ -638,7 +638,7 @@ To get the pattern and the names of the placeholders, call the `Pattern` and the
 
 ### Defining Views
 
-A view holds the data that queries read. Define the shape of an item as a struct, and call the `NewItemView` function to create a view that holds such items in memory:
+A view holds the data that queries read. Define the shape of an item as a struct, and call the `NewInMemoryView` function with a function that returns the key of an item, to create a view that holds such items in memory:
 
 ```go
 type BookItem struct {
@@ -650,54 +650,63 @@ type BookItem struct {
   EventID       string `json:"eventId"`
 }
 
-catalog := architecturekit.NewItemView[BookItem]()
+func newCatalog() *architecturekit.InMemoryView[string, BookItem] {
+  return architecturekit.NewInMemoryView(
+    func(item BookItem) string { return item.ID },
+    architecturekit.RevisionIn(func(item *BookItem) *string { return &item.EventID }),
+  )
+}
+
+catalog := newCatalog()
 ```
 
-Keep the ID of the last event in every item, so that a caller can hand it over to a command that uses the `NewIsSubjectOnEventIDPrecondition` function (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)).
+Every item has a revision of its own, which is the ID of the last event that changed it. The `RevisionIn` option makes the view keep it in a field of the item, so that a caller can hand it over to a command that uses the `NewIsSubjectOnEventIDPrecondition` function (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). The view sets the field whenever it changes an item, so you never set it yourself. Without the option, the view keeps the revisions to itself.
 
-To add an item, call the `Insert` function:
+Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing. All functions take a context and return an error, which the view in memory hardly needs, but a view in a database would. So a view in a database can offer the same functions later on, without the projections that write to it having to change.
+
+*Note that the view as a whole has a revision as well, which is the last event it has seen at all, rather than the last one that changed a particular item (see [Reading Your Own Writes](#reading-your-own-writes)).*
+
+#### Adding Items
+
+To add an item, call the `Insert` function with a context, the ID of the event, and the item:
 
 ```go
-catalog.Insert(BookItem{
+err := catalog.Insert(ctx, event.ID, BookItem{
   ID:     "42",
   Title:  "2001 – A Space Odyssey",
   Author: "Arthur C. Clarke",
 })
-```
-
-To change items, call the `Update` function with a function that selects the items and a function that changes them. It returns the number of changed items:
-
-```go
-isBook42 := func(item BookItem) bool {
-  return item.ID == "42"
+if err != nil {
+  // ...
 }
-
-changed := catalog.Update(isBook42, func(item *BookItem) {
-  item.IsBorrowed = true
-})
 ```
 
-To change items or add an item if none matches, call the `Upsert` function and additionally hand over the item to add. It returns the number of changed items, which is `0` if the item was added:
+If the key of the item is already taken, and the event is newer than the item with that key, `Insert` fails with an error of the category `ErrPermanent`, since two items with the same key point to a mistake in the events or in the key. To add an item or change the existing one, call the `Upsert` function instead, and additionally hand over a function that changes the existing item:
 
 ```go
-changed := catalog.Upsert(isBook42, func(item *BookItem) {
-  item.IsBorrowed = true
-}, BookItem{
+err := catalog.Upsert(ctx, event.ID, BookItem{
   ID:         "42",
   IsBorrowed: true,
+}, func(item *BookItem) {
+  item.IsBorrowed = true
 })
 ```
 
-To remove items, call the `Delete` function. It returns the number of removed items:
+#### Reading Items
+
+To read the item with a given key, call the `Get` function. It returns `false` if there is none:
 
 ```go
-removed := catalog.Delete(isBook42)
+book, isFound, err := catalog.Get(ctx, "42")
+if err != nil {
+  // ...
+}
 ```
 
-To read all items, call the `All` function. It returns an iterator over a copy of the items, which you can use e.g. inside a `for range` loop:
+To read all items, call the `All` function. It returns an iterator over a copy of the items, in the order in which they were added, which you can use e.g. inside a `for range` loop:
 
 ```go
-items, err := catalog.All(context.TODO())
+items, err := catalog.All(ctx)
 if err != nil {
   // ...
 }
@@ -706,6 +715,56 @@ for item := range items {
   // ...
 }
 ```
+
+#### Changing and Removing Items
+
+To change the item with a given key, call the `Update` function with a function that changes it. To remove it, call the `Delete` function. Both report whether they changed anything:
+
+```go
+isChanged, err := catalog.Update(ctx, "42", event.ID, func(item *BookItem) {
+  item.IsBorrowed = true
+})
+
+isRemoved, err := catalog.Delete(ctx, "42", event.ID)
+```
+
+Neither changes anything if there is no such item, or if the event is not newer than the item. Neither is an error, since both happen when events are applied a second time, as a later event may have removed the item already.
+
+*Note that changing the key of an item fails with an error of the category `ErrPermanent`.*
+
+To change or remove several items at once, call the `UpdateWhere` or the `DeleteWhere` function with a function that selects them. Both return the number of items they changed or removed:
+
+```go
+isByClarke := func(item BookItem) bool {
+  return item.Author == "Arthur C. Clarke"
+}
+
+changed, err := catalog.UpdateWhere(ctx, isByClarke, event.ID, func(item *BookItem) {
+  item.Author = "Sir Arthur C. Clarke"
+})
+
+removed, err := catalog.DeleteWhere(ctx, isByClarke, event.ID)
+```
+
+#### Indexing Items
+
+Selecting items with a function reads every item. To find items by a value directly, for example all books by an author, add a secondary index with the `Index` function. It takes a function that returns the value of an item, and returns an index, which offers the `Lookup`, `Update`, and `Delete` functions:
+
+```go
+byAuthor := catalog.Index(func(item BookItem) string { return item.Author })
+
+books, err := byAuthor.Lookup(ctx, "Arthur C. Clarke")
+
+changed, err := byAuthor.Update(ctx, "Arthur C. Clarke", event.ID, func(item *BookItem) {
+  item.IsBorrowed = false
+})
+
+removed, err := byAuthor.Delete(ctx, "Arthur C. Clarke", event.ID)
+```
+
+Several items may share a value. The index follows every change to the view, also when the value of an item changes, and hands out items in the order in which they were added.
+
+*Note that adding an index reads every item, so add indexes before the view is used.*
 
 To keep items somewhere else, for example in a database, implement the `View` interface, which consists of the `All` function:
 
@@ -724,32 +783,28 @@ func (t *BookTable) All(ctx context.Context) (iter.Seq[BookItem], error) {
 A projection turns events into a view. Call the `NewProjection` function, and call the `On` function for every event type the view depends on. Each handler receives an `Envelope`, which holds the metadata of the event, such as its `ID`, `Time`, and `Subject`, and its data, decoded into the Go type of the event:
 
 ```go
-func newCatalogProjection(catalog *architecturekit.ItemView[BookItem]) *architecturekit.TypedProjection {
+func newCatalogProjection(catalog *architecturekit.InMemoryView[string, BookItem]) *architecturekit.TypedProjection {
   return architecturekit.NewProjection().
     On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
-      catalog.Insert(BookItem{
-        ID:      bookIDOf(event.Subject),
-        Title:   event.Data.Title,
-        Author:  event.Data.Author,
-        EventID: event.ID,
+      return catalog.Insert(ctx, event.ID, BookItem{
+        ID:     bookIDOf(event.Subject),
+        Title:  event.Data.Title,
+        Author: event.Data.Author,
       })
-      return nil
     }).
     On(func(ctx context.Context, event architecturekit.Envelope[BookBorrowed]) error {
-      catalog.Update(isBook(bookIDOf(event.Subject)), func(item *BookItem) {
+      _, err := catalog.Update(ctx, bookIDOf(event.Subject), event.ID, func(item *BookItem) {
         item.IsBorrowed = true
         item.BorrowedUntil = event.Data.BorrowedUntil
-        item.EventID = event.ID
       })
-      return nil
+      return err
     }).
     On(func(ctx context.Context, event architecturekit.Envelope[BookReturned]) error {
-      catalog.Update(isBook(bookIDOf(event.Subject)), func(item *BookItem) {
+      _, err := catalog.Update(ctx, bookIDOf(event.Subject), event.ID, func(item *BookItem) {
         item.IsBorrowed = false
         item.BorrowedUntil = ""
-        item.EventID = event.ID
       })
-      return nil
+      return err
     })
 }
 
@@ -758,18 +813,12 @@ catalogProjection := newCatalogProjection(catalog)
 
 The event type is taken from the event's `EventType` function, so it does not have to be repeated, and the type of an event and the type its data is decoded into can not drift apart.
 
-Which parts of the subject a view needs is up to the application. In this example, two small functions take the ID of the book out of the subject, and select the item of a book (see [Composing Subjects](#composing-subjects)):
+Which parts of the subject a view needs is up to the application. In this example, a small function takes the ID of the book out of the subject (see [Composing Subjects](#composing-subjects)):
 
 ```go
 func bookIDOf(subject string) string {
   values, _ := bookSubject.Match(subject)
   return values["book"]
-}
-
-func isBook(bookID string) func(BookItem) bool {
-  return func(item BookItem) bool {
-    return item.ID == bookID
-  }
 }
 ```
 
@@ -1144,6 +1193,8 @@ func getBook(catalog architecturekit.View[BookItem]) func(context.Context, GetBo
 }
 ```
 
+*Note that the query package reads every item it is handed. To get an item by its key, call the `Get` function of the view instead, and to get items by the value of a secondary index, call the `Lookup` function of the index (see [Defining Views](#defining-views)).*
+
 #### Counting Items
 
 To count items, call the `Count` function. To check whether at least one item matches, call the `Any` function, which stops at the first match:
@@ -1172,7 +1223,7 @@ trackedProjection := architecturekit.Tracking(catalog, catalogProjection)
 
 Then run `trackedProjection` instead of `catalogProjection` (see [Running Projections](#running-projections)).
 
-`Tracking` accepts every view that implements the `RevisionSink` interface, which consists of the `Seen` function. `ItemView` implements it.
+`Tracking` accepts every view that implements the `RevisionSink` interface, which consists of the `Seen` function. `InMemoryView` implements it.
 
 The tracked projection keeps the mode and the batch sizes of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
 
@@ -1202,7 +1253,7 @@ To get the current revision of a view, call the `Revision` function. It returns 
 current := catalog.Revision()
 ```
 
-Both functions form the `Revisioned` interface, which `ItemView` implements. To wait for revisions of a view of your own, implement it as well.
+Both functions form the `Revisioned` interface, which `InMemoryView` implements. To wait for revisions of a view of your own, implement it as well.
 
 #### Comparing Revisions
 
@@ -1704,7 +1755,7 @@ To test a projection without a database, call the `Project` function with a `*te
 
 ```go
 func TestCatalogProjection(t *testing.T) {
-  catalog := architecturekit.NewItemView[BookItem]()
+  catalog := newCatalog()
   catalogProjection := newCatalogProjection(catalog)
 
   architecturekittest.Project(t, catalogProjection,
