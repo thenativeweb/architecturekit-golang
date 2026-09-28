@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"slices"
 	"strings"
 	"testing"
 
@@ -398,100 +397,6 @@ func (r *brokenCheckpointRecorder) Checkpoint(context.Context) (string, error) {
 }
 
 func (r *brokenCheckpointRecorder) SaveCheckpoint(context.Context, string) error { return nil }
-
-func TestItemViewInsertsAndHandsOutItems(t *testing.T) {
-	view := NewItemView[string]()
-
-	items, err := view.All(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(slices.Collect(items)) != 0 {
-		t.Fatal("a fresh view is empty")
-	}
-
-	view.Insert("alpha")
-	view.Insert("bravo")
-
-	items, err = view.All(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := slices.Collect(items); len(got) != 2 || got[0] != "alpha" || got[1] != "bravo" {
-		t.Fatalf("got %v", got)
-	}
-}
-
-func TestItemViewUpdatesMatchingItems(t *testing.T) {
-	view := NewItemView[int]()
-	for _, value := range []int{1, 2, 3, 4} {
-		view.Insert(value)
-	}
-
-	changed := view.Update(func(item int) bool { return item%2 == 0 },
-		func(item *int) { *item *= 10 })
-
-	if changed != 2 {
-		t.Fatalf("got %d, want 2", changed)
-	}
-
-	items, _ := view.All(context.Background())
-	if got := slices.Collect(items); !slices.Equal(got, []int{1, 20, 3, 40}) {
-		t.Fatalf("got %v", got)
-	}
-}
-
-func TestItemViewUpsertsWhenNothingMatches(t *testing.T) {
-	view := NewItemView[string]()
-
-	// Nothing matches yet, so the item is inserted and no change is reported.
-	if changed := view.Upsert(func(item string) bool { return item == "alpha" },
-		func(item *string) { *item = "changed" }, "alpha"); changed != 0 {
-		t.Fatalf("got %d, want 0", changed)
-	}
-
-	// Now it matches, so it is changed instead of inserted again.
-	if changed := view.Upsert(func(item string) bool { return item == "alpha" },
-		func(item *string) { *item = "changed" }, "alpha"); changed != 1 {
-		t.Fatalf("got %d, want 1", changed)
-	}
-
-	items, _ := view.All(context.Background())
-	if got := slices.Collect(items); !slices.Equal(got, []string{"changed"}) {
-		t.Fatalf("got %v", got)
-	}
-}
-
-func TestItemViewDeletesMatchingItems(t *testing.T) {
-	view := NewItemView[int]()
-	for _, value := range []int{1, 2, 3, 4, 5} {
-		view.Insert(value)
-	}
-
-	if removed := view.Delete(func(item int) bool { return item > 3 }); removed != 2 {
-		t.Fatalf("got %d, want 2", removed)
-	}
-
-	items, _ := view.All(context.Background())
-	if got := slices.Collect(items); !slices.Equal(got, []int{1, 2, 3}) {
-		t.Fatalf("got %v", got)
-	}
-}
-
-func TestItemViewHandsOutACopy(t *testing.T) {
-	view := NewItemView[int]()
-	view.Insert(1)
-
-	items, _ := view.All(context.Background())
-	collected := slices.Collect(items)
-
-	// Writing while a query holds its result must not change what it holds.
-	view.Insert(2)
-
-	if len(collected) != 1 {
-		t.Fatalf("a query result must not change underneath: %v", collected)
-	}
-}
 
 func TestProjectionFuncSatisfiesProjection(t *testing.T) {
 	seen := 0

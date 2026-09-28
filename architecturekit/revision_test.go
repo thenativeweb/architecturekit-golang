@@ -58,13 +58,13 @@ func TestSomethingThatIsNotARevisionIsRefused(t *testing.T) {
 }
 
 func TestAFreshViewHasSeenNothing(t *testing.T) {
-	if got := architecturekit.NewItemView[int]().Revision(); got != "" {
+	if got := intView().Revision(); got != "" {
 		t.Errorf("got %q, want the empty revision", got)
 	}
 }
 
 func TestSeenMovesTheRevisionForwardOnly(t *testing.T) {
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 
 	view.Seen("5")
 	if got := view.Revision(); got != "5" {
@@ -86,7 +86,7 @@ func TestSeenMovesTheRevisionForwardOnly(t *testing.T) {
 }
 
 func TestSeenIgnoresWhatIsNotARevision(t *testing.T) {
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 	view.Seen("5")
 	view.Seen("nonsense")
 
@@ -96,7 +96,7 @@ func TestSeenIgnoresWhatIsNotARevision(t *testing.T) {
 }
 
 func TestWaitingForARevisionAlreadyReachedReturnsAtOnce(t *testing.T) {
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 	view.Seen("10")
 
 	for _, revision := range []string{"", "9", "10"} {
@@ -111,7 +111,7 @@ func TestWaitingForARevisionAlreadyReachedReturnsAtOnce(t *testing.T) {
 }
 
 func TestWaitingReturnsWhenTheRevisionArrives(t *testing.T) {
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 
 	waited := make(chan error, 1)
 	go func() {
@@ -144,7 +144,7 @@ func TestWaitingReturnsWhenTheRevisionArrives(t *testing.T) {
 }
 
 func TestWaitingEndsWithTheContext(t *testing.T) {
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
@@ -157,7 +157,7 @@ func TestWaitingEndsWithTheContext(t *testing.T) {
 }
 
 func TestWaitingForSomethingThatIsNotARevisionFails(t *testing.T) {
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 
 	if err := view.WaitFor(t.Context(), "soon"); !errors.Is(err, architecturekit.ErrNotARevision) {
 		t.Errorf("got %v, want %v", err, architecturekit.ErrNotARevision)
@@ -165,7 +165,7 @@ func TestWaitingForSomethingThatIsNotARevisionFails(t *testing.T) {
 }
 
 func TestManyWaitersAreAllWokenUp(t *testing.T) {
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 
 	var group sync.WaitGroup
 	failures := make(chan error, 10)
@@ -201,7 +201,7 @@ func TestManyWaitersAreAllWokenUp(t *testing.T) {
 // --- Tracking ---
 
 func TestTrackingRecordsEveryEvent(t *testing.T) {
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 
 	applied := 0
 	projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
@@ -228,7 +228,7 @@ func TestTrackingRecordsEveryEvent(t *testing.T) {
 func TestTrackingAlsoRecordsWhatTheProjectionIgnores(t *testing.T) {
 	// This is the whole reason Tracking exists: a projection skips what does
 	// not concern it, but a reader may be waiting for exactly that event.
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 
 	projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
 		func(context.Context, eventsourcingdb.Event) error { return nil },
@@ -244,7 +244,7 @@ func TestTrackingAlsoRecordsWhatTheProjectionIgnores(t *testing.T) {
 }
 
 func TestTrackingDoesNotRecordAFailedEvent(t *testing.T) {
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 	failed := errors.New("could not apply")
 
 	projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
@@ -264,7 +264,7 @@ func TestTrackingDoesNotRecordAFailedEvent(t *testing.T) {
 }
 
 func TestTrackingKeepsAProjectionThatIsRebuiltAsItIs(t *testing.T) {
-	projection := architecturekit.Tracking(architecturekit.NewItemView[int](), &collector{})
+	projection := architecturekit.Tracking(intView(), &collector{})
 
 	architecturekittest.ExpectMode(t, projection, architecturekit.ModeRebuild)
 
@@ -281,7 +281,7 @@ func TestTrackingKeepsAResumableProjectionResumable(t *testing.T) {
 	// A wrapper that dropped the checkpoint would silently turn this into a
 	// projection that is rebuilt on every start.
 	target := &batchedResumingCollector{resumingCollector: resumingCollector{checkpoint: "7"}}
-	projection := architecturekit.Tracking(architecturekit.NewItemView[int](), target)
+	projection := architecturekit.Tracking(intView(), target)
 
 	architecturekittest.ExpectMode(t, projection, architecturekit.ModeResumable)
 
@@ -311,7 +311,7 @@ func TestTrackingRefusesAProjectionThatIsTransactionalAsWell(t *testing.T) {
 		}
 	}()
 
-	architecturekit.Tracking(architecturekit.NewItemView[int](), &transactionalWithApply{})
+	architecturekit.Tracking(intView(), &transactionalWithApply{})
 }
 
 func TestTrackingResumesFromTheCheckpoint(t *testing.T) {
@@ -319,7 +319,7 @@ func TestTrackingResumesFromTheCheckpoint(t *testing.T) {
 	subject := subjectFor(t)
 	seed(t, subject, 3)
 
-	view := architecturekit.NewItemView[int]()
+	view := intView()
 	target := &resumingCollector{}
 
 	if err := architecturekit.CatchUpProjection(t.Context(), store, subject, false,
@@ -365,4 +365,9 @@ func TestTheRevisionOfAWriteIsItsHighestEventID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// intView is a view of numbers, each its own key.
+func intView() *architecturekit.InMemoryView[int, int] {
+	return architecturekit.NewInMemoryView(func(item int) int { return item })
 }

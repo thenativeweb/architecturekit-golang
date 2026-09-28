@@ -16,12 +16,20 @@ type owner struct {
 	Name string
 }
 
-func ownerView() *architecturekit.ItemView[owner] {
-	return architecturekit.NewItemView[owner]()
+func ownerView() *architecturekit.InMemoryView[string, owner] {
+	return architecturekit.NewInMemoryView(func(item owner) string { return item.Name })
 }
 
-func ownerProjection(view *architecturekit.ItemView[owner]) architecturekit.Projection {
-	return architecturekit.ProjectionFunc(func(_ context.Context, event eventsourcingdb.Event) error {
+func insertOwner(t *testing.T, view *architecturekit.InMemoryView[string, owner], eventID string, name string) {
+	t.Helper()
+
+	if err := view.Insert(context.Background(), eventID, owner{Name: name}); err != nil {
+		t.Fatalf("failed to insert %q: %v", name, err)
+	}
+}
+
+func ownerProjection(view *architecturekit.InMemoryView[string, owner]) architecturekit.Projection {
+	return architecturekit.ProjectionFunc(func(ctx context.Context, event eventsourcingdb.Event) error {
 		if event.Type != (opened{}).EventType() {
 			return nil
 		}
@@ -31,9 +39,7 @@ func ownerProjection(view *architecturekit.ItemView[owner]) architecturekit.Proj
 			return err
 		}
 
-		view.Insert(owner{Name: payload.Owner})
-
-		return nil
+		return view.Insert(ctx, event.ID, owner{Name: payload.Owner})
 	})
 }
 
@@ -130,7 +136,7 @@ func TestProjectReportsARefusal(t *testing.T) {
 
 func TestItemsOfReadsAView(t *testing.T) {
 	view := ownerView()
-	view.Insert(owner{Name: "golo"})
+	insertOwner(t, view, "1", "golo")
 
 	items := architecturekittest.ItemsOf(t, view)
 
@@ -172,7 +178,7 @@ func TestExpectModeReportsTheWrongMode(t *testing.T) {
 func TestExpectItemsReportsTheWrongCount(t *testing.T) {
 	recorder := &spy{}
 	view := ownerView()
-	view.Insert(owner{Name: "golo"})
+	insertOwner(t, view, "2", "golo")
 
 	architecturekittest.ExpectItems(recorder, view, owner{Name: "golo"}, owner{Name: "jane"})
 
@@ -182,7 +188,7 @@ func TestExpectItemsReportsTheWrongCount(t *testing.T) {
 func TestExpectItemsReportsTheWrongContent(t *testing.T) {
 	recorder := &spy{}
 	view := ownerView()
-	view.Insert(owner{Name: "golo"})
+	insertOwner(t, view, "3", "golo")
 
 	architecturekittest.ExpectItems(recorder, view, owner{Name: "someone-else"})
 
@@ -312,9 +318,8 @@ func TestProjectDrivesATypedProjection(t *testing.T) {
 	view := ownerView()
 
 	projection := architecturekit.NewProjection().
-		On(func(_ context.Context, event architecturekit.Envelope[opened]) error {
-			view.Insert(owner{Name: event.Data.Owner})
-			return nil
+		On(func(ctx context.Context, event architecturekit.Envelope[opened]) error {
+			return view.Insert(ctx, event.ID, owner{Name: event.Data.Owner})
 		})
 
 	architecturekittest.Project(t, projection,
