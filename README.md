@@ -382,6 +382,8 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 *Note that `ErrConflict` is a special case of `ErrTransient`, so check for it first.*
 
+*Note that `ErrUnverified` is a special case of `ErrPermanent`, which means that an event failed its verification (see [Verifying Events](#verifying-events)). Since that may point to a security incident rather than a mistake, check for it before `ErrPermanent` if you want to treat it differently, for example to raise an alarm.*
+
 *Note that `Execute` does not retry. To try again, for example after a conflict, call `Execute` again.*
 
 ### Registering Event Schemas
@@ -550,6 +552,54 @@ if err != nil {
 ```
 
 `Load` reads the events exactly the way `Execute` does before it decides, including `FromLatest` and the state cache. For a query across many subjects, use a view instead (see [Defining Views](#defining-views)).
+
+### Verifying Events
+
+EventSourcingDB gives every event a hash, which covers its metadata, its data, and the hash of the event before it. If the database runs with a signing key, it also signs every event it hands out. To have the store check the hash of every event it reads, hand over the `WithHashVerification` option when creating the store:
+
+```go
+store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", architecturekit.WithHashVerification())
+```
+
+To check the signatures as well, hand over the `WithSignatureVerification` option with the verification key of the database instead. It checks the hashes, too:
+
+```go
+store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", architecturekit.WithSignatureVerification(verificationKey))
+```
+
+The verification key is an `ed25519.PublicKey`. To read it from a PEM file, use the `pem` and `x509` packages of the standard library:
+
+```go
+block, _ := pem.Decode(pemBytes)
+if block == nil {
+  // ...
+}
+
+publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+if err != nil {
+  // ...
+}
+
+verificationKey, ok := publicKey.(ed25519.PublicKey)
+if !ok {
+  // ...
+}
+```
+
+The store checks every event it reads, for `Execute` and `Load` as well as for every kind of projection, and it does so before any upcaster sees the event. The events that `Execute` has just written are not checked, since they are not read. If an event fails its verification, reading fails with an error of the category `ErrUnverified`, which is a special case of `ErrPermanent` (see [Handling Errors](#handling-errors)). A projection stops rather than skipping the event.
+
+The two checks prove different things:
+
+- A matching hash proves that an event is what was written. It proves no more than that, since whoever can change the stored data can compute a new hash as well.
+- A matching signature proves that an event comes from a database that holds the signing key. The database signs events when handing them out, so the signature guards the way from the database to your application, but not the stored data itself.
+
+Check the hashes wherever reading is under your control, and the signatures where events cross a trust boundary, for example when reading from a database that another organization runs. For details, see [Verifying Event Signatures](https://www.eventfoundation.io/docs/eventsourcingdb/verifying-event-signatures).
+
+*Note that checking a signature takes some tens of microseconds per event, which adds up when a projection catches up on millions of events.*
+
+*Note that the database signs with the key it has at the moment, so after the signing key is rotated, the store needs the new verification key.*
+
+*Note that neither check detects a history that has been rewritten as a whole. For that, audit the chain of hashes (see [Auditing the Event Store](https://www.eventfoundation.io/docs/eventsourcingdb/auditing-the-event-store)).*
 
 ### Composing Subjects
 

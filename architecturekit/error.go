@@ -30,6 +30,14 @@ var (
 // schema violation therefore also arrives here, although it is permanent.
 var ErrConflict = fmt.Errorf("%w: a precondition did not hold", ErrTransient)
 
+// ErrUnverified means that an event the store has read failed its
+// verification: its hash does not match its content, or its signature is
+// missing or does not match the verification key. It is permanent, because
+// reading the same event again yields the same result, but it may point to a
+// security incident rather than a mistake, which is why it can be told apart
+// (see WithHashVerification and WithSignatureVerification).
+var ErrUnverified = fmt.Errorf("%w: an event could not be verified", ErrPermanent)
+
 // DomainError means that a business rule applies. It is not a failure in the
 // technical sense, but a valid answer.
 type DomainError struct{ message string }

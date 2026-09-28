@@ -2,6 +2,7 @@ package architecturekit_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -14,10 +15,12 @@ import (
 )
 
 // testStore is used by the integration tests and stays nil while they are
-// skipped.
+// skipped. The database signs its events, and testVerificationKey is the key
+// to verify them with.
 var (
-	testStore  *architecturekit.Store
-	testClient *eventsourcingdb.Client
+	testStore           *architecturekit.Store
+	testClient          *eventsourcingdb.Client
+	testVerificationKey ed25519.PublicKey
 )
 
 // TestMain starts the EventSourcingDB once for all integration tests. With
@@ -30,7 +33,7 @@ func TestMain(m *testing.M) {
 	}
 
 	ctx := context.Background()
-	container := eventsourcingdb.NewContainer()
+	container := eventsourcingdb.NewContainer().WithSigningKey()
 
 	if err := container.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start eventsourcingdb: %v\n", err)
@@ -44,7 +47,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	verificationKey, err := container.GetVerificationKey()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to get the verification key: %v\n", err)
+		_ = container.Stop(ctx)
+		os.Exit(1)
+	}
+
 	testClient = client
+	testVerificationKey = *verificationKey
 	testStore = architecturekit.NewStore(client, "https://thenativeweb.io")
 
 	code := m.Run()
