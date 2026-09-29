@@ -158,7 +158,7 @@ func fold[TState any](
 	current := state.initial
 	lastEventID := ""
 
-	isCached := store.states != nil && state.isCacheable()
+	isCached := store.states != nil && state.isCopyable()
 	key := stateCacheKey{state: state, subject: subject}
 
 	options := eventsourcingdb.ReadEventsOptions{Recursive: false}
