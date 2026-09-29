@@ -564,7 +564,7 @@ var shelfState = architecturekit.NewState(Shelf{}).
   })
 ```
 
-Without a `Clone` function, such a state is read as without a cache.
+Without a `Clone` function, such a state is read as without a cache. The same function lets `Step` and `StepStored` leave a state unchanged (see [Stepping Through States](#stepping-through-states)).
 
 *Note that a `time.Time` counts as a value, since its location never changes.*
 
