@@ -10,10 +10,10 @@ architecturekit includes a test package to test deciders, projections, and queri
 
 ## Getting Started
 
-Install the package:
+Install the packages:
 
 ```shell
-go get github.com/thenativeweb/architecturekit-golang
+go get github.com/thenativeweb/architecturekit-golang/architecturekit github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb
 ```
 
 Import the package, create an EventSourcingDB client, and create a store by providing the client and the source to use for all events you write:
