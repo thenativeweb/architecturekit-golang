@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -199,6 +200,18 @@ func TestRespondResultWritesTheResult(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), "only") {
 		t.Fatalf("got %s", recorder.Body)
+	}
+}
+
+func TestRespondResultAnswersAnEmptyResultWithAnEmptyList(t *testing.T) {
+	recorder := httptest.NewRecorder()
+
+	// slices.Collect, which the kit suggests for turning items into a slice,
+	// returns nil when there are no items.
+	httpapi.RespondResult(recorder, slices.Collect(slices.Values([]noteResponse{})), nil)
+
+	if got := strings.TrimSpace(recorder.Body.String()); got != "[]" {
+		t.Fatalf("got %s, want []", got)
 	}
 }
 

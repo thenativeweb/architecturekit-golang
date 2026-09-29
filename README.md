@@ -1472,7 +1472,7 @@ Then call the `Query` function with the API, the mux, a pattern, this function, 
 httpapi.Query(api, mux, "GET /api/books", toListBooks, listBooks(catalog))
 ```
 
-The route answers with `200 OK` and the result as JSON. Errors are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
+The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. Errors are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
 
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the result, and the error.
 
