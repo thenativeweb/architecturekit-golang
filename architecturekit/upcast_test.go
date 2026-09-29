@@ -247,25 +247,3 @@ func TestReplayStored(t *testing.T) {
 		assert.ErrorContains(t, err, "decoding")
 	})
 }
-
-func TestReplayFails(t *testing.T) {
-	t.Run("on an event that cannot be encoded", func(t *testing.T) {
-		_, err := architecturekit.Replay(noteState(), annotatedUnmarshallable{Channel: make(chan int)})
-
-		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
-		assert.ErrorContains(t, err, "encoding")
-	})
-
-	t.Run("on data that does not match the rule", func(t *testing.T) {
-		_, err := architecturekit.Replay(noteState(), annotatedBroken{Note: 42})
-
-		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
-		assert.ErrorContains(t, err, "decoding")
-	})
-
-	t.Run("on event without rule", func(t *testing.T) {
-		_, err := architecturekit.Replay(noteState(), reset{})
-
-		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
-	})
-}

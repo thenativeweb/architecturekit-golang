@@ -123,6 +123,38 @@ func TestQuery(t *testing.T) {
 
 		assert.Equal(t, http.StatusNotFound, response.Code)
 	})
+
+	t.Run("ErrForbidden survives the way out", func(t *testing.T) {
+		// An application that refuses in ToQuery keeps its 403 instead of having
+		// it turned into a 400.
+		api := httpapi.NewAPI(deadStore(t), userFrom)
+		mux := http.NewServeMux()
+
+		httpapi.Query(api, mux, "GET /restricted",
+			func(*http.Request, user) (listNotes, error) {
+				return listNotes{}, errors.Join(httpapi.ErrForbidden, errors.New("not for you"))
+			},
+			answerListNotes)
+
+		response := ask(t, mux, "/restricted", "golo")
+
+		assert.Equal(t, http.StatusForbidden, response.Code)
+	})
+
+	t.Run("domain errors from the query side keep their status", func(t *testing.T) {
+		api := httpapi.NewAPI(deadStore(t), userFrom)
+		mux := http.NewServeMux()
+
+		httpapi.Query(api, mux, "GET /rule",
+			func(*http.Request, user) (listNotes, error) {
+				return listNotes{}, architecturekit.NewDomainError("that combination makes no sense")
+			},
+			answerListNotes)
+
+		response := ask(t, mux, "/rule", "golo")
+
+		assert.Equal(t, http.StatusUnprocessableEntity, response.Code)
+	})
 }
 
 func TestAsk(t *testing.T) {
@@ -223,41 +255,5 @@ func TestRespondResult(t *testing.T) {
 		})
 
 		assert.Empty(t, logs, "a failure the caller can fix must not be logged")
-	})
-}
-
-func TestForbidden(t *testing.T) {
-	t.Run("survives the way out", func(t *testing.T) {
-		// An application that refuses in ToQuery keeps its 403 instead of having
-		// it turned into a 400.
-		api := httpapi.NewAPI(deadStore(t), userFrom)
-		mux := http.NewServeMux()
-
-		httpapi.Query(api, mux, "GET /restricted",
-			func(*http.Request, user) (listNotes, error) {
-				return listNotes{}, errors.Join(httpapi.ErrForbidden, errors.New("not for you"))
-			},
-			answerListNotes)
-
-		response := ask(t, mux, "/restricted", "golo")
-
-		assert.Equal(t, http.StatusForbidden, response.Code)
-	})
-}
-
-func TestDomainErrors(t *testing.T) {
-	t.Run("from the query side keep their status", func(t *testing.T) {
-		api := httpapi.NewAPI(deadStore(t), userFrom)
-		mux := http.NewServeMux()
-
-		httpapi.Query(api, mux, "GET /rule",
-			func(*http.Request, user) (listNotes, error) {
-				return listNotes{}, architecturekit.NewDomainError("that combination makes no sense")
-			},
-			answerListNotes)
-
-		response := ask(t, mux, "/rule", "golo")
-
-		assert.Equal(t, http.StatusUnprocessableEntity, response.Code)
 	})
 }

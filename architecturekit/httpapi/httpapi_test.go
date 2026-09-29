@@ -245,8 +245,8 @@ func logsOf(fn func()) string {
 
 // --- everything that fails before the store is touched ---
 
-func TestRequest(t *testing.T) {
-	t.Run("without a user is unauthorized", func(t *testing.T) {
+func TestRoute(t *testing.T) {
+	t.Run("a request without a user is unauthorized", func(t *testing.T) {
 		response := send(t, muxFor(t, deadStore(t)), request{
 			contentType: "application/json",
 			body:        `{"id":"1"}`,
@@ -254,10 +254,8 @@ func TestRequest(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnauthorized, response.Code)
 	})
-}
 
-func TestContentType(t *testing.T) {
-	t.Run("is required", func(t *testing.T) {
+	t.Run("the content type is required", func(t *testing.T) {
 		mux := muxFor(t, deadStore(t))
 
 		for _, c := range []struct {
@@ -283,7 +281,7 @@ func TestContentType(t *testing.T) {
 		}
 	})
 
-	t.Run("with parameters is accepted", func(t *testing.T) {
+	t.Run("a content type with parameters is accepted", func(t *testing.T) {
 		// The media type is parsed, so a charset does not get in the way. This one
 		// reaches the store and fails there, which is enough to show it passed the
 		// media type check.
@@ -295,10 +293,8 @@ func TestContentType(t *testing.T) {
 
 		assert.NotEqual(t, http.StatusUnsupportedMediaType, response.Code, "a charset must not be rejected")
 	})
-}
 
-func TestMalformedJSON(t *testing.T) {
-	t.Run("is rejected", func(t *testing.T) {
+	t.Run("malformed JSON is rejected", func(t *testing.T) {
 		response := send(t, muxFor(t, deadStore(t)), request{
 			user:        "golo",
 			contentType: "application/json",
@@ -307,10 +303,8 @@ func TestMalformedJSON(t *testing.T) {
 
 		assert.Equal(t, http.StatusBadRequest, response.Code)
 	})
-}
 
-func TestUnknownFields(t *testing.T) {
-	t.Run("are rejected", func(t *testing.T) {
+	t.Run("unknown fields are rejected", func(t *testing.T) {
 		response := send(t, muxFor(t, deadStore(t)), request{
 			user:        "golo",
 			contentType: "application/json",
@@ -321,10 +315,8 @@ func TestUnknownFields(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, response.Code)
 		assert.Contains(t, response.Body.String(), "txt", "the answer should name the unknown field")
 	})
-}
 
-func TestCommand(t *testing.T) {
-	t.Run("that cannot be built is rejected", func(t *testing.T) {
+	t.Run("a command that cannot be built is rejected", func(t *testing.T) {
 		response := send(t, muxFor(t, deadStore(t)), request{
 			user:        "golo",
 			contentType: "application/json",
@@ -334,10 +326,8 @@ func TestCommand(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, response.Code)
 		assert.Contains(t, response.Body.String(), "id must not be empty")
 	})
-}
 
-func TestBody(t *testing.T) {
-	t.Run("over the limit is rejected", func(t *testing.T) {
+	t.Run("a body over the limit is rejected", func(t *testing.T) {
 		padding := strings.Repeat("a", httpapi.MaxRequestBody)
 
 		response := send(t, muxFor(t, deadStore(t)), request{
@@ -349,7 +339,7 @@ func TestBody(t *testing.T) {
 		assert.Equal(t, http.StatusRequestEntityTooLarge, response.Code)
 	})
 
-	t.Run("at the limit is read", func(t *testing.T) {
+	t.Run("a body at the limit is read", func(t *testing.T) {
 		// Exactly at the limit the body is still read, so this fails later, at the
 		// dead store, rather than with 413.
 		prefix := `{"id":"1","text":"`
@@ -364,10 +354,8 @@ func TestBody(t *testing.T) {
 
 		assert.NotEqual(t, http.StatusRequestEntityTooLarge, response.Code, "a body exactly at the limit must still be read")
 	})
-}
 
-func TestUnreadableBody(t *testing.T) {
-	t.Run("is rejected", func(t *testing.T) {
+	t.Run("an unreadable body is rejected", func(t *testing.T) {
 		httpRequest := httptest.NewRequest(http.MethodPost, "/note", failingReader{})
 		httpRequest.Header.Set("X-User", "golo")
 		httpRequest.Header.Set("Content-Type", "application/json")
@@ -377,10 +365,8 @@ func TestUnreadableBody(t *testing.T) {
 
 		assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	})
-}
 
-func TestUnreachableStore(t *testing.T) {
-	t.Run("is an internal failure", func(t *testing.T) {
+	t.Run("an unreachable store is an internal failure", func(t *testing.T) {
 		response := send(t, muxFor(t, deadStore(t)), request{
 			user:        "golo",
 			contentType: "application/json",

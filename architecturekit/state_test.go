@@ -8,7 +8,7 @@ import (
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 )
 
-func TestStateReplay(t *testing.T) {
+func TestReplay(t *testing.T) {
 	t.Run("returns initial state for empty history", func(t *testing.T) {
 		current, err := architecturekit.Replay(counterState())
 		require.NoError(t, err)
@@ -33,6 +33,26 @@ func TestStateReplay(t *testing.T) {
 		_, err := architecturekit.Replay(state, reset{})
 		require.Error(t, err, "expected an error for an event type without a rule")
 		assert.Contains(t, err.Error(), reset{}.EventType(), "error should name the event type")
+	})
+
+	t.Run("fails on an event that cannot be encoded", func(t *testing.T) {
+		_, err := architecturekit.Replay(noteState(), annotatedUnmarshallable{Channel: make(chan int)})
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, "encoding")
+	})
+
+	t.Run("fails on data that does not match the rule", func(t *testing.T) {
+		_, err := architecturekit.Replay(noteState(), annotatedBroken{Note: 42})
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, "decoding")
+	})
+
+	t.Run("fails on event without rule", func(t *testing.T) {
+		_, err := architecturekit.Replay(noteState(), reset{})
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
 	})
 }
 

@@ -78,8 +78,8 @@ func askNotes(mux *http.ServeMux, headers map[string]string) *httptest.ResponseR
 	return recorder
 }
 
-func TestAQuery(t *testing.T) {
-	t.Run("without a wanted revision answers at once", func(t *testing.T) {
+func TestQueryRevisioned(t *testing.T) {
+	t.Run("a query without a wanted revision answers at once", func(t *testing.T) {
 		view := noteView()
 		insertNote(t, view, "1", noteItem{Text: "one"})
 		view.Seen("3")
@@ -93,7 +93,7 @@ func TestAQuery(t *testing.T) {
 		assert.NotEmpty(t, response.Header().Get("ETag"))
 	})
 
-	t.Run("waits for the revision it was asked for", func(t *testing.T) {
+	t.Run("a query waits for the revision it was asked for", func(t *testing.T) {
 		view := noteView()
 		view.Seen("1")
 
@@ -119,7 +119,7 @@ func TestAQuery(t *testing.T) {
 		assert.Equal(t, "1\n", response.Body.String(), "want the late item to be counted")
 	})
 
-	t.Run("answers with what it has when the wait runs out", func(t *testing.T) {
+	t.Run("a query answers with what it has when the wait runs out", func(t *testing.T) {
 		view := noteView()
 		insertNote(t, view, "3", noteItem{Text: "one"})
 		view.Seen("2")
@@ -134,10 +134,8 @@ func TestAQuery(t *testing.T) {
 
 		assert.Equal(t, "2", response.Header().Get(httpapi.HeaderRevision))
 	})
-}
 
-func TestAWantedRevision(t *testing.T) {
-	t.Run("that is not one is refused", func(t *testing.T) {
+	t.Run("a wanted revision that is not one is refused", func(t *testing.T) {
 		view := noteView()
 		view.Seen("1")
 
@@ -147,10 +145,8 @@ func TestAWantedRevision(t *testing.T) {
 
 		assert.Equal(t, http.StatusBadRequest, response.Code)
 	})
-}
 
-func TestAKnownRevision(t *testing.T) {
-	t.Run("is answered with Not Modified", func(t *testing.T) {
+	t.Run("a known revision is answered with Not Modified", func(t *testing.T) {
 		view := noteView()
 		insertNote(t, view, "4", noteItem{Text: "one"})
 		view.Seen("4")
@@ -174,10 +170,8 @@ func TestAKnownRevision(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, third.Code)
 	})
-}
 
-func TestOneResourcesTag(t *testing.T) {
-	t.Run("does not match another", func(t *testing.T) {
+	t.Run("one resource's tag does not match another", func(t *testing.T) {
 		// Every query over the same view shares a revision, so a tag that held
 		// nothing else would wrongly match across resources.
 		view := noteView()
@@ -200,10 +194,8 @@ func TestOneResourcesTag(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, response.Code, "the tag of /notes matched /other")
 	})
-}
 
-func TestAView(t *testing.T) {
-	t.Run("that has seen nothing carries no tag", func(t *testing.T) {
+	t.Run("a view that has seen nothing carries no tag", func(t *testing.T) {
 		view := noteView()
 
 		response := askNotes(servingNotes(t, view, time.Second), nil)
@@ -213,10 +205,8 @@ func TestAView(t *testing.T) {
 		assert.Empty(t, response.Header().Get("ETag"))
 		assert.Empty(t, response.Header().Get(httpapi.HeaderRevision))
 	})
-}
 
-func TestNobody(t *testing.T) {
-	t.Run("can make the server wait without being let in", func(t *testing.T) {
+	t.Run("nobody can make the server wait without being let in", func(t *testing.T) {
 		view := noteView()
 		view.Seen("1")
 
@@ -232,10 +222,8 @@ func TestNobody(t *testing.T) {
 
 		assert.LessOrEqual(t, time.Since(started), time.Second, "waited before refusing")
 	})
-}
 
-func TestAFailingQuery(t *testing.T) {
-	t.Run("carries no revision", func(t *testing.T) {
+	t.Run("a failing query carries no revision", func(t *testing.T) {
 		view := noteView()
 		view.Seen("4")
 
@@ -253,6 +241,21 @@ func TestAFailingQuery(t *testing.T) {
 		assert.Equal(t, http.StatusUnprocessableEntity, response.Code)
 
 		assert.Empty(t, response.Header().Get("ETag"), "a failed answer was tagged")
+	})
+
+	// The plain case stays honest: an answer that follows from the read model
+	// alone needs nothing extra, and its tag still holds across requests.
+	t.Run("is QueryVarying without a variance", func(t *testing.T) {
+		view := noteView()
+		view.Seen("3")
+
+		mux := servingNotes(t, view, time.Second)
+
+		first := askNotes(mux, nil)
+		tag := first.Header().Get("ETag")
+
+		again := askNotes(mux, map[string]string{"If-None-Match": tag})
+		assert.Equal(t, http.StatusNotModified, again.Code, "the answer has not changed")
 	})
 }
 
@@ -286,14 +289,14 @@ func (refusingView) WaitFor(context.Context, string) error {
 	return architecturekit.ErrNotARevision
 }
 
-// TestAnAnswer covers the case the revision alone cannot describe. An answer
+// TestQueryVarying covers the case the revision alone cannot describe. An answer
 // such as "everything due today" changes at midnight although no event is
 // written, so the revision stays put -- and a tag built from it alone would
 // tell the caller, wrongly, that nothing had changed. That is exactly how an
 // application can end up showing yesterday's list until something unrelated
 // happens.
-func TestAnAnswer(t *testing.T) {
-	t.Run("that depends on more than the revision", func(t *testing.T) {
+func TestQueryVarying(t *testing.T) {
+	t.Run("an answer that depends on more than the revision", func(t *testing.T) {
 		view := noteView()
 		view.Seen("7")
 
@@ -328,23 +331,5 @@ func TestAnAnswer(t *testing.T) {
 		assert.Equal(t, http.StatusOK, tomorrow.Code, "the day turned over")
 
 		assert.NotEqual(t, tag, tomorrow.Header().Get("ETag"), "the tag is the same on the next day, so the caller keeps yesterday's answer")
-	})
-}
-
-// TestQueryRevisioned keeps the plain case honest: an answer that follows
-// from the read model alone needs nothing extra, and its tag still holds
-// across requests.
-func TestQueryRevisioned(t *testing.T) {
-	t.Run("is QueryVarying without a variance", func(t *testing.T) {
-		view := noteView()
-		view.Seen("3")
-
-		mux := servingNotes(t, view, time.Second)
-
-		first := askNotes(mux, nil)
-		tag := first.Header().Get("ETag")
-
-		again := askNotes(mux, map[string]string{"If-None-Match": tag})
-		assert.Equal(t, http.StatusNotModified, again.Code, "the answer has not changed")
 	})
 }
