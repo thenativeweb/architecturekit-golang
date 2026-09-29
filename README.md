@@ -1382,7 +1382,7 @@ If this succeeds, it answers with `200 OK` and the IDs of the written events:
 { "eventIds": [ "1" ], "message": "ok" }
 ```
 
-Otherwise, it answers with the status code that matches the error (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)) and the error message. For status codes of `500` and above, the message is `internal server error`.
+Otherwise, it answers with the status code that matches the error (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)) and the error message. For status codes of `500` and above, the message is `internal server error`, and the actual error is logged with the default logger of `log/slog`, so that it does not vanish. To route it into the logs of your application, call `slog.SetDefault` with your logger.
 
 To answer this way in a handler of your own, call the `Respond` function with the response writer, the written events, and the error.
 

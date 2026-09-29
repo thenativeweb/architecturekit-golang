@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 
@@ -211,13 +212,23 @@ func Respond(w http.ResponseWriter, written []eventsourcingdb.Event, err error) 
 	case status < http.StatusInternalServerError:
 		body["message"] = err.Error()
 	default:
-		// Internal failures are not explained to the caller.
+		// Internal failures are not explained to the caller, but logged.
 		body["message"] = "internal server error"
+		logInternalFailure(status, err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// logInternalFailure logs a failure the caller is not told about, so that it
+// does not vanish: the caller only learns that something went wrong, and
+// whoever runs the application has to be able to find out what. It uses the
+// default logger of log/slog, which an application routes into its own logs
+// with slog.SetDefault.
+func logInternalFailure(status int, err error) {
+	slog.Error("httpapi: internal failure", "status", status, "error", err)
 }
 
 func idsOf(events []eventsourcingdb.Event) []string {
