@@ -177,8 +177,10 @@ func (s *State[TState]) Clone(clone func(TState) TState) *State[TState] {
 	return s
 }
 
-// isCacheable reports whether a store may cache the state.
-func (s *State[TState]) isCacheable() bool {
+// isCopyable reports whether copyOf returns a copy that shares no data with
+// the original. Only then may a store cache the state, and only then can Step
+// leave the given state unchanged.
+func (s *State[TState]) isCopyable() bool {
 	s.isValueOnce.Do(func() {
 		s.isValue = isValueType(reflect.TypeFor[TState]())
 	})
@@ -222,19 +224,8 @@ func Replay[TState any](state *State[TState], history ...Event) (TState, error) 
 	}
 
 	for _, event := range history {
-		evolve, isKnown := state.evolve[event.EventType()]
-		if !isKnown {
-			return current, fmt.Errorf("%w: no rule for event type %q",
-				ErrPermanent, event.EventType())
-		}
-
-		data, err := json.Marshal(event)
-		if err != nil {
-			return current, fmt.Errorf("%w: encoding %q: %v",
-				ErrPermanent, event.EventType(), err)
-		}
-
-		current, err = evolve(current, data)
+		var err error
+		current, err = state.evolveBy(current, event)
 		if err != nil {
 			return current, err
 		}
@@ -262,22 +253,105 @@ func ReplayStored[TState any](
 	}
 
 	for _, stored := range history {
-		upcasted, err := state.upcasters.apply(stored)
+		var err error
+		current, err = state.evolveByStored(current, stored)
 		if err != nil {
 			return current, err
 		}
+	}
 
-		for _, event := range upcasted {
-			evolve, isKnown := state.evolve[event.Type]
-			if !isKnown {
-				return current, fmt.Errorf("%w: no rule for event type %q",
-					ErrPermanent, event.Type)
-			}
+	return current, nil
+}
 
-			current, err = evolve(current, event.Data)
-			if err != nil {
-				return current, err
-			}
+// Step advances a state by a single event, by the same rules as Replay. It
+// starts from the given state instead of the initial one, and leaves that
+// unchanged, so that the state before and after the event are both at hand,
+// e.g. for a history that tells what an event changed.
+//
+// So that current stays unchanged, a state that holds slices, maps or
+// pointers needs a Clone function; without one, Step fails permanently. A
+// state that consists of values only needs none. If the event fails, Step
+// returns current.
+func Step[TState any](state *State[TState], current TState, event Event) (TState, error) {
+	if err := state.checkCopyable(); err != nil {
+		return current, err
+	}
+
+	next, err := state.evolveBy(state.copyOf(current), event)
+	if err != nil {
+		return current, err
+	}
+
+	return next, nil
+}
+
+// StepStored advances a state by a single stored event, running the upcasters
+// on the way, exactly as reading from the database would. If the upcasters
+// turn the event into several, all of them are applied. Otherwise, it behaves
+// like Step.
+func StepStored[TState any](
+	state *State[TState],
+	current TState,
+	stored eventsourcingdb.Event,
+) (TState, error) {
+	if err := state.checkCopyable(); err != nil {
+		return current, err
+	}
+
+	next, err := state.evolveByStored(state.copyOf(current), stored)
+	if err != nil {
+		return current, err
+	}
+
+	return next, nil
+}
+
+// checkCopyable fails permanently for a state that Step can not leave
+// unchanged.
+func (s *State[TState]) checkCopyable() error {
+	if s.isCopyable() {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %s holds slices, maps or pointers, so it needs a Clone function "+
+		"to be stepped without changing the given state", ErrPermanent, reflect.TypeFor[TState]())
+}
+
+// evolveBy applies the rule for a typed event.
+func (s *State[TState]) evolveBy(current TState, event Event) (TState, error) {
+	evolve, isKnown := s.evolve[event.EventType()]
+	if !isKnown {
+		return current, fmt.Errorf("%w: no rule for event type %q",
+			ErrPermanent, event.EventType())
+	}
+
+	data, err := json.Marshal(event)
+	if err != nil {
+		return current, fmt.Errorf("%w: encoding %q: %v",
+			ErrPermanent, event.EventType(), err)
+	}
+
+	return evolve(current, data)
+}
+
+// evolveByStored runs the upcasters on a stored event and applies the rules for
+// the events they return.
+func (s *State[TState]) evolveByStored(current TState, stored eventsourcingdb.Event) (TState, error) {
+	upcasted, err := s.upcasters.apply(stored)
+	if err != nil {
+		return current, err
+	}
+
+	for _, event := range upcasted {
+		evolve, isKnown := s.evolve[event.Type]
+		if !isKnown {
+			return current, fmt.Errorf("%w: no rule for event type %q",
+				ErrPermanent, event.Type)
+		}
+
+		current, err = evolve(current, event.Data)
+		if err != nil {
+			return current, err
 		}
 	}
 

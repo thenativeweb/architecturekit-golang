@@ -564,7 +564,7 @@ var shelfState = architecturekit.NewState(Shelf{}).
   })
 ```
 
-Without a `Clone` function, such a state is read as without a cache.
+Without a `Clone` function, such a state is read as without a cache. The same function lets `Step` and `StepStored` leave a state unchanged (see [Stepping Through States](#stepping-through-states)).
 
 *Note that a `time.Time` counts as a value, since its location never changes.*
 
@@ -582,6 +582,36 @@ if err != nil {
 ```
 
 `Load` reads the events exactly the way `Execute` does before it decides, including `FromLatest` and the state cache. For a query across many subjects, use a view instead (see [Defining Views](#defining-views)).
+
+### Stepping Through States
+
+Sometimes the states before and after an event are needed, not only the latest one, for example for a history that tells what each event changed. To advance a state by a single stored event, call the `StepStored` function with the state, the state so far, and the event. It runs the upcasters and the `Evolve` rules exactly as reading from the database does, and returns the next state:
+
+```go
+books := map[string]Book{}
+
+projection := architecturekit.ProjectionFunc(func(ctx context.Context, event eventsourcingdb.Event) error {
+  before := books[event.Subject]
+
+  after, err := architecturekit.StepStored(bookState, before, event)
+  if err != nil {
+    return err
+  }
+
+  if !before.IsBorrowed && after.IsBorrowed {
+    // The book was borrowed by this event.
+  }
+
+  books[event.Subject] = after
+  return nil
+})
+```
+
+For typed events, for example in a test, call the `Step` function instead.
+
+The given state stays unchanged, so both states are at hand afterwards. For a state that holds slices, maps or pointers, that takes a `Clone` function (see [Caching States](#caching-states)). Without one, `Step` and `StepStored` return an error of the category `ErrPermanent`, rather than a next state that may share data with the one before. A state that consists of values only needs no `Clone` function.
+
+*Note that a stored event that the upcasters turn into several events is applied in full, and that `FromLatest` has no effect on a single step.*
 
 ### Verifying Events
 
@@ -1787,7 +1817,7 @@ architecturekittest.GivenStored(t, borrowBook,
 
 #### Replaying Events Directly
 
-To evolve a state from events without a decider, call the `Replay` function with the state and typed events, or the `ReplayStored` function with the state and stored events:
+To evolve a state from events without a decider, call the `Replay` function with the state and typed events, or the `ReplayStored` function with the state and stored events. To check the state after each event, advance it one event at a time with the `Step` function (see [Stepping Through States](#stepping-through-states)):
 
 ```go
 book, err := architecturekit.Replay(bookState, BookAcquired{}, BookBorrowed{})
