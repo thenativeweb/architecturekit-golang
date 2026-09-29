@@ -73,11 +73,12 @@ func (s *SubjectScheme) Placeholders() []string {
 
 // Build composes a subject. The values fill the placeholders in the order they
 // appear in the pattern. A wrong number of values, or one that is empty or
-// contains a slash, is a programming error and panics.
+// contains a slash, is a programming error and panics. Values that come from
+// outside, such as an ID in a request, may well be like that, so check them
+// with Check first.
 func (s *SubjectScheme) Build(values ...string) string {
-	if len(values) != len(s.placeholders) {
-		panic(fmt.Sprintf("architecturekit: pattern %q needs %d value(s), got %d",
-			s.pattern, len(s.placeholders), len(values)))
+	if err := s.Check(values...); err != nil {
+		panic(err.Error())
 	}
 
 	var builder strings.Builder
@@ -91,21 +92,34 @@ func (s *SubjectScheme) Build(values ...string) string {
 			continue
 		}
 
-		value := values[next]
-		if value == "" {
-			panic(fmt.Sprintf("architecturekit: value for %q in %q must not be empty",
-				s.placeholders[next], s.pattern))
-		}
-		if strings.Contains(value, "/") {
-			panic(fmt.Sprintf("architecturekit: value %q for %q in %q must not contain a slash",
-				value, s.placeholders[next], s.pattern))
-		}
-
-		builder.WriteString(value)
+		builder.WriteString(values[next])
 		next++
 	}
 
 	return builder.String()
+}
+
+// Check tells whether the values can compose a subject: one per placeholder,
+// none of them empty, and none containing a slash. It is what Build insists
+// on, as an error rather than a panic, for values that come from outside.
+func (s *SubjectScheme) Check(values ...string) error {
+	if len(values) != len(s.placeholders) {
+		return fmt.Errorf("architecturekit: pattern %q needs %d value(s), got %d",
+			s.pattern, len(s.placeholders), len(values))
+	}
+
+	for i, value := range values {
+		if value == "" {
+			return fmt.Errorf("architecturekit: value for %q in %q must not be empty",
+				s.placeholders[i], s.pattern)
+		}
+		if strings.Contains(value, "/") {
+			return fmt.Errorf("architecturekit: value %q for %q in %q must not contain a slash",
+				value, s.placeholders[i], s.pattern)
+		}
+	}
+
+	return nil
 }
 
 // Match takes a subject apart. It reports false if the subject does not follow

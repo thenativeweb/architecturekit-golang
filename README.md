@@ -666,6 +666,14 @@ To get the pattern and the names of the placeholders, call the `Pattern` and the
 
 *Note that a malformed pattern panics, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains a slash.*
 
+Values that come from outside, such as an ID in a request, may well be empty or contain a slash, and that is not a programming error. To check them before building a subject, call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, instead of panicking:
+
+```go
+if err := bookSubject.Check(bookID); err != nil {
+  // ...
+}
+```
+
 ### Defining Views
 
 A view holds the data that queries read. Define the shape of an item as a struct, and call the `NewInMemoryView` function with a function that returns the key of an item, to create a view that holds such items in memory:
@@ -1353,6 +1361,13 @@ type borrowBookRequest struct {
 }
 
 func (r borrowBookRequest) ToCommand(user User) (BorrowBook, error) {
+  if err := bookSubject.Check(r.BookID); err != nil {
+    return BorrowBook{}, err
+  }
+  if _, err := time.Parse(time.DateOnly, r.BorrowedUntil); err != nil {
+    return BorrowBook{}, errors.New("borrowedUntil must be a date")
+  }
+
   return BorrowBook{
     BookID:          r.BookID,
     ReaderID:        user.ID,
@@ -1361,6 +1376,8 @@ func (r borrowBookRequest) ToCommand(user User) (BorrowBook, error) {
   }, nil
 }
 ```
+
+`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`. Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a slash (see [Composing Subjects](#composing-subjects)). And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
 
 Then call the `Route` function with the request type, the API, the mux, a pattern, and the decider:
 
