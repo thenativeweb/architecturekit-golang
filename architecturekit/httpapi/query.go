@@ -71,8 +71,9 @@ func RespondResult[TResult any](w http.ResponseWriter, result TResult, err error
 	status := StatusFor(err)
 	message := err.Error()
 	if status >= http.StatusInternalServerError {
-		// Internal failures are not explained to the caller.
+		// Internal failures are not explained to the caller, but logged.
 		message = "internal server error"
+		logInternalFailure(status, err)
 	}
 
 	w.WriteHeader(status)
