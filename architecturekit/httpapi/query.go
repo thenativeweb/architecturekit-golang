@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 )
 
 // ErrNotFound means the query asked for something that does not exist.
@@ -64,17 +65,30 @@ func RespondResult[TResult any](w http.ResponseWriter, result TResult, err error
 
 	if err == nil {
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(result)
+		_ = json.NewEncoder(w).Encode(listOf(result))
 		return
 	}
 
 	status := StatusFor(err)
 	message := err.Error()
 	if status >= http.StatusInternalServerError {
-		// Internal failures are not explained to the caller.
+		// Internal failures are not explained to the caller, but logged.
 		message = "internal server error"
+		logInternalFailure(status, err)
 	}
 
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": message})
+}
+
+// listOf turns a nil slice into an empty one, so that a query that finds
+// nothing answers with [] rather than null. slices.Collect, which the kit
+// suggests for turning items into a slice, returns nil when there are none.
+func listOf(result any) any {
+	value := reflect.ValueOf(result)
+	if value.Kind() == reflect.Slice && value.IsNil() {
+		return []any{}
+	}
+
+	return result
 }

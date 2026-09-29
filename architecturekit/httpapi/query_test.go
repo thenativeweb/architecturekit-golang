@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -202,6 +203,18 @@ func TestRespondResultWritesTheResult(t *testing.T) {
 	}
 }
 
+func TestRespondResultAnswersAnEmptyResultWithAnEmptyList(t *testing.T) {
+	recorder := httptest.NewRecorder()
+
+	// slices.Collect, which the kit suggests for turning items into a slice,
+	// returns nil when there are no items.
+	httpapi.RespondResult(recorder, slices.Collect(slices.Values([]noteResponse{})), nil)
+
+	if got := strings.TrimSpace(recorder.Body.String()); got != "[]" {
+		t.Fatalf("got %s, want []", got)
+	}
+}
+
 func TestRespondResultExplainsFailuresTheCallerCanFix(t *testing.T) {
 	recorder := httptest.NewRecorder()
 
@@ -226,6 +239,26 @@ func TestRespondResultKeepsInternalFailuresToItself(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), "hunter2") {
 		t.Fatalf("an internal failure must not be explained: %s", recorder.Body)
+	}
+}
+
+func TestRespondResultLogsInternalFailures(t *testing.T) {
+	logs := logsOf(func() {
+		httpapi.RespondResult(httptest.NewRecorder(), []noteResponse(nil), errors.New("the view is gone"))
+	})
+
+	if !strings.Contains(logs, "the view is gone") {
+		t.Fatalf("an internal failure must be logged, got %q", logs)
+	}
+}
+
+func TestRespondResultDoesNotLogFailuresTheCallerCanFix(t *testing.T) {
+	logs := logsOf(func() {
+		httpapi.RespondResult(httptest.NewRecorder(), []noteResponse(nil), httpapi.ErrNotFound)
+	})
+
+	if logs != "" {
+		t.Fatalf("a failure the caller can fix must not be logged, got %q", logs)
 	}
 }
 

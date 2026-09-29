@@ -1,9 +1,11 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -216,6 +218,40 @@ func TestRespondKeepsInternalFailuresToItself(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), "hunter2") {
 		t.Fatalf("an internal failure must not be explained: %s", recorder.Body)
 	}
+}
+
+func TestRespondLogsInternalFailures(t *testing.T) {
+	logs := logsOf(func() {
+		httpapi.Respond(httptest.NewRecorder(), nil, errors.New("the database is gone"))
+	})
+
+	if !strings.Contains(logs, "the database is gone") {
+		t.Fatalf("an internal failure must be logged, got %q", logs)
+	}
+}
+
+func TestRespondDoesNotLogFailuresTheCallerCanFix(t *testing.T) {
+	logs := logsOf(func() {
+		httpapi.Respond(httptest.NewRecorder(), nil, architecturekit.NewDomainError("note 7 already exists"))
+	})
+
+	if logs != "" {
+		t.Fatalf("a failure the caller can fix must not be logged, got %q", logs)
+	}
+}
+
+// logsOf returns what the kit logs with the default logger of log/slog while
+// fn runs.
+func logsOf(fn func()) string {
+	var buffer bytes.Buffer
+
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buffer, nil)))
+	defer slog.SetDefault(previous)
+
+	fn()
+
+	return buffer.String()
 }
 
 func TestRespondExplainsFailuresTheCallerCanFix(t *testing.T) {
