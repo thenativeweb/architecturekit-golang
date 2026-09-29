@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -23,9 +25,7 @@ func ownerView() *architecturekit.InMemoryView[string, owner] {
 func insertOwner(t *testing.T, view *architecturekit.InMemoryView[string, owner], eventID string, name string) {
 	t.Helper()
 
-	if err := view.Insert(context.Background(), eventID, owner{Name: name}); err != nil {
-		t.Fatalf("failed to insert %q: %v", name, err)
-	}
+	require.NoError(t, view.Insert(context.Background(), eventID, owner{Name: name}), "failed to insert %q", name)
 }
 
 func ownerProjection(view *architecturekit.InMemoryView[string, owner]) architecturekit.Projection {
@@ -65,134 +65,151 @@ func (brokenView) All(context.Context) (iterSeq[owner], error) {
 	return nil, errors.New("the view is unavailable")
 }
 
-func TestStoredEventCarriesWhatADatabaseWould(t *testing.T) {
-	stored := architecturekittest.StoredEvent("/account/1", "7", opened{Owner: "golo"})
+func TestStoredEvent(t *testing.T) {
+	t.Run("carries what a database would", func(t *testing.T) {
+		stored := architecturekittest.StoredEvent("/account/1", "7", opened{Owner: "golo"})
 
-	if stored.Subject != "/account/1" {
-		t.Fatalf("got %q", stored.Subject)
-	}
-	if stored.ID != "7" {
-		t.Fatalf("got %q", stored.ID)
-	}
-	if stored.Type != (opened{}).EventType() {
-		t.Fatalf("got %q", stored.Type)
-	}
-	if string(stored.Data) != `{"owner":"golo"}` {
-		t.Fatalf("got %s", stored.Data)
-	}
-	if stored.SpecVersion == "" || stored.DataContentType == "" {
-		t.Fatalf("the stored shape has to look complete: %+v", stored)
-	}
-}
-
-func TestStoredEventsNumbersFromZero(t *testing.T) {
-	stored := architecturekittest.StoredEvents("/account/1",
-		opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})
-
-	if len(stored) != 3 {
-		t.Fatalf("got %d", len(stored))
-	}
-	for i, want := range []string{"0", "1", "2"} {
-		if stored[i].ID != want {
-			t.Fatalf("event %d: got id %q, want %q", i, stored[i].ID, want)
-		}
-	}
-}
-
-func TestStoredEventPanicsOnAnEventThatCannotBeMarshalled(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic, because such an event could never be stored")
-		}
-	}()
-
-	architecturekittest.StoredEvent("/account/1", "0", unmarshallable{Channel: make(chan int)})
-}
-
-func TestProjectDrivesAProjection(t *testing.T) {
-	view := ownerView()
-
-	architecturekittest.Project(t, ownerProjection(view),
-		architecturekittest.StoredEvents("/account/1",
-			opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})...)
-
-	architecturekittest.ExpectItems(t, view, owner{Name: "golo"}, owner{Name: "jane"})
-}
-
-func TestProjectReportsARefusal(t *testing.T) {
-	recorder := &spy{}
-	view := ownerView()
-
-	// Data that does not match the payload makes the projection refuse.
-	architecturekittest.Project(recorder, ownerProjection(view), eventsourcingdb.Event{
-		Subject: "/account/1",
-		Type:    (opened{}).EventType(),
-		ID:      "0",
-		Data:    []byte(`{"owner":42}`),
+		assert.Equal(t, "/account/1", stored.Subject)
+		assert.Equal(t, "7", stored.ID)
+		assert.Equal(t, (opened{}).EventType(), stored.Type)
+		assert.Equal(t, `{"owner":"golo"}`, string(stored.Data))
+		assert.NotEmpty(t, stored.SpecVersion, "the stored shape has to look complete")
+		assert.NotEmpty(t, stored.DataContentType, "the stored shape has to look complete")
 	})
 
-	recorder.expectFailure(t, "projecting event 0")
+	t.Run("panics on an event that cannot be marshalled", func(t *testing.T) {
+		assert.Panics(t, func() {
+			architecturekittest.StoredEvent("/account/1", "0", unmarshallable{Channel: make(chan int)})
+		}, "such an event could never be stored")
+	})
 }
 
-func TestItemsOfReadsAView(t *testing.T) {
-	view := ownerView()
-	insertOwner(t, view, "1", "golo")
+func TestStoredEvents(t *testing.T) {
+	t.Run("numbers from zero", func(t *testing.T) {
+		stored := architecturekittest.StoredEvents("/account/1",
+			opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})
 
-	items := architecturekittest.ItemsOf(t, view)
-
-	if len(items) != 1 || items[0].Name != "golo" {
-		t.Fatalf("got %v", items)
-	}
+		require.Len(t, stored, 3)
+		for i, want := range []string{"0", "1", "2"} {
+			assert.Equal(t, want, stored[i].ID)
+		}
+	})
 }
 
-func TestItemsOfReportsAnUnreadableView(t *testing.T) {
-	recorder := &spy{}
+func TestProject(t *testing.T) {
+	t.Run("drives a projection", func(t *testing.T) {
+		view := ownerView()
 
-	items := architecturekittest.ItemsOf(recorder, brokenView{})
+		architecturekittest.Project(t, ownerProjection(view),
+			architecturekittest.StoredEvents("/account/1",
+				opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})...)
 
-	recorder.expectFailure(t, "reading the view")
-	if items != nil {
-		t.Fatalf("got %v", items)
-	}
+		architecturekittest.ExpectItems(t, view, owner{Name: "golo"}, owner{Name: "jane"})
+	})
+
+	t.Run("reports a refusal", func(t *testing.T) {
+		recorder := &spy{}
+		view := ownerView()
+
+		// Data that does not match the payload makes the projection refuse.
+		architecturekittest.Project(recorder, ownerProjection(view), eventsourcingdb.Event{
+			Subject: "/account/1",
+			Type:    (opened{}).EventType(),
+			ID:      "0",
+			Data:    []byte(`{"owner":42}`),
+		})
+
+		recorder.expectFailure(t, "projecting event 0")
+	})
+
+	t.Run("refuses a projection that is transactional as well", func(t *testing.T) {
+		recorder := &spy{}
+		table := &ownerTableWithApply{}
+
+		architecturekittest.Project(recorder, table,
+			architecturekittest.StoredEvent("/account/1", "0", opened{Owner: "golo"}))
+
+		recorder.expectFailure(t, "is transactional, use ProjectTransactional")
+		expectLog(t, table.log)
+	})
+
+	t.Run("drives a typed projection", func(t *testing.T) {
+		view := ownerView()
+
+		projection := architecturekit.NewProjection().
+			On(func(ctx context.Context, event architecturekit.Envelope[opened]) error {
+				return view.Insert(ctx, event.ID, owner{Name: event.Data.Owner})
+			})
+
+		architecturekittest.Project(t, projection,
+			architecturekittest.StoredEvents("/account/1",
+				opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})...)
+
+		architecturekittest.ExpectItems(t, view, owner{Name: "golo"}, owner{Name: "jane"})
+	})
 }
 
-func TestExpectModeAcceptsTheRightMode(t *testing.T) {
-	view := ownerView()
+func TestItemsOf(t *testing.T) {
+	t.Run("reads a view", func(t *testing.T) {
+		view := ownerView()
+		insertOwner(t, view, "1", "golo")
 
-	architecturekittest.ExpectMode(t, ownerProjection(view), architecturekit.ModeRebuild)
-	architecturekittest.ExpectMode(t, &resumingProjection{Projection: ownerProjection(view)},
-		architecturekit.ModeResumable)
+		items := architecturekittest.ItemsOf(t, view)
+
+		assert.Equal(t, []owner{{Name: "golo"}}, items)
+	})
+
+	t.Run("reports an unreadable view", func(t *testing.T) {
+		recorder := &spy{}
+
+		items := architecturekittest.ItemsOf(recorder, brokenView{})
+
+		recorder.expectFailure(t, "reading the view")
+		assert.Nil(t, items)
+	})
 }
 
-func TestExpectModeReportsTheWrongMode(t *testing.T) {
-	recorder := &spy{}
+func TestExpectMode(t *testing.T) {
+	t.Run("accepts the right mode", func(t *testing.T) {
+		view := ownerView()
 
-	// A projection that keeps no checkpoint is driven in rebuild mode, so
-	// expecting it to resume has to fail. This is the assertion that catches a
-	// typo in an optional interface's method set.
-	architecturekittest.ExpectMode(recorder, ownerProjection(ownerView()), architecturekit.ModeResumable)
+		architecturekittest.ExpectMode(t, ownerProjection(view), architecturekit.ModeRebuild)
+		architecturekittest.ExpectMode(t, &resumingProjection{Projection: ownerProjection(view)},
+			architecturekit.ModeResumable)
+	})
 
-	recorder.expectFailure(t, "runs in \"rebuild\" mode, want \"resumable\"")
+	t.Run("reports the wrong mode", func(t *testing.T) {
+		recorder := &spy{}
+
+		// A projection that keeps no checkpoint is driven in rebuild mode, so
+		// expecting it to resume has to fail. This is the assertion that catches a
+		// typo in an optional interface's method set.
+		architecturekittest.ExpectMode(recorder, ownerProjection(ownerView()), architecturekit.ModeResumable)
+
+		recorder.expectFailure(t, "runs in \"rebuild\" mode, want \"resumable\"")
+	})
 }
 
-func TestExpectItemsReportsTheWrongCount(t *testing.T) {
-	recorder := &spy{}
-	view := ownerView()
-	insertOwner(t, view, "2", "golo")
+func TestExpectItems(t *testing.T) {
+	t.Run("reports the wrong count", func(t *testing.T) {
+		recorder := &spy{}
+		view := ownerView()
+		insertOwner(t, view, "2", "golo")
 
-	architecturekittest.ExpectItems(recorder, view, owner{Name: "golo"}, owner{Name: "jane"})
+		architecturekittest.ExpectItems(recorder, view, owner{Name: "golo"}, owner{Name: "jane"})
 
-	recorder.expectFailure(t, "expected 2 item(s), got 1")
-}
+		recorder.expectFailure(t, "expected 2 item(s), got 1")
+	})
 
-func TestExpectItemsReportsTheWrongContent(t *testing.T) {
-	recorder := &spy{}
-	view := ownerView()
-	insertOwner(t, view, "3", "golo")
+	t.Run("reports the wrong content", func(t *testing.T) {
+		recorder := &spy{}
+		view := ownerView()
+		insertOwner(t, view, "3", "golo")
 
-	architecturekittest.ExpectItems(recorder, view, owner{Name: "someone-else"})
+		architecturekittest.ExpectItems(recorder, view, owner{Name: "someone-else"})
 
-	recorder.expectFailure(t, "someone-else")
+		recorder.expectFailure(t, "someone-else")
+	})
 }
 
 // ownerTable is a transactional projection: it applies events only within a
@@ -245,88 +262,70 @@ func (*ownerTableWithApply) Apply(context.Context, eventsourcingdb.Event) error 
 func expectLog(t *testing.T, got []string, want ...string) {
 	t.Helper()
 
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
+	require.Len(t, got, len(want), "want %v", want)
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("step %d: got %q, want %q (full: %v)", i, got[i], want[i], got)
-		}
+		require.Equal(t, want[i], got[i], "step %d (full: %v)", i, got)
 	}
 }
 
-func TestProjectTransactionalAppliesWithinOneTransaction(t *testing.T) {
-	table := &ownerTable{}
+func TestProjectTransactional(t *testing.T) {
+	t.Run("applies within one transaction", func(t *testing.T) {
+		table := &ownerTable{}
 
-	architecturekittest.ProjectTransactional(t, table,
-		architecturekittest.StoredEvents("/account/1",
-			opened{Owner: "golo"}, opened{Owner: "jane"})...)
+		architecturekittest.ProjectTransactional(t, table,
+			architecturekittest.StoredEvents("/account/1",
+				opened{Owner: "golo"}, opened{Owner: "jane"})...)
 
-	expectLog(t, table.log, "begin", "apply 0", "apply 1", "commit 1")
-}
+		expectLog(t, table.log, "begin", "apply 0", "apply 1", "commit 1")
+	})
 
-func TestProjectTransactionalBeginsNothingWithoutEvents(t *testing.T) {
-	table := &ownerTable{}
+	t.Run("begins nothing without events", func(t *testing.T) {
+		table := &ownerTable{}
 
-	architecturekittest.ProjectTransactional(t, table)
+		architecturekittest.ProjectTransactional(t, table)
 
-	expectLog(t, table.log)
-}
+		expectLog(t, table.log)
+	})
 
-func TestProjectTransactionalRollsBackOnARefusal(t *testing.T) {
-	recorder := &spy{}
-	table := &ownerTable{rollbackErr: errors.New("rollback did not work either")}
+	t.Run("rolls back on a refusal", func(t *testing.T) {
+		recorder := &spy{}
+		table := &ownerTable{rollbackErr: errors.New("rollback did not work either")}
 
-	architecturekittest.ProjectTransactional(recorder, table,
-		architecturekittest.StoredEvents("/account/1", opened{Owner: "golo"}, closed{})...)
+		architecturekittest.ProjectTransactional(recorder, table,
+			architecturekittest.StoredEvents("/account/1", opened{Owner: "golo"}, closed{})...)
 
-	recorder.expectFailure(t, "projecting event 1")
-	recorder.expectFailure(t, "rollback did not work either")
-	expectLog(t, table.log, "begin", "apply 0", "rollback")
-}
+		recorder.expectFailure(t, "projecting event 1")
+		recorder.expectFailure(t, "rollback did not work either")
+		expectLog(t, table.log, "begin", "apply 0", "rollback")
+	})
 
-func TestProjectTransactionalReportsAFailingBegin(t *testing.T) {
-	recorder := &spy{}
+	t.Run("reports a failing begin", func(t *testing.T) {
+		recorder := &spy{}
 
-	architecturekittest.ProjectTransactional(recorder, &ownerTable{beginErr: errors.New("no connection")},
-		architecturekittest.StoredEvent("/account/1", "0", opened{Owner: "golo"}))
+		architecturekittest.ProjectTransactional(recorder, &ownerTable{beginErr: errors.New("no connection")},
+			architecturekittest.StoredEvent("/account/1", "0", opened{Owner: "golo"}))
 
-	recorder.expectFailure(t, "beginning a transaction: no connection")
-}
+		recorder.expectFailure(t, "beginning a transaction: no connection")
+	})
 
-func TestProjectTransactionalReportsAFailingCommit(t *testing.T) {
-	recorder := &spy{}
+	t.Run("reports a failing commit", func(t *testing.T) {
+		recorder := &spy{}
 
-	architecturekittest.ProjectTransactional(recorder, &ownerTable{commitErr: errors.New("disk full")},
-		architecturekittest.StoredEvent("/account/1", "0", opened{Owner: "golo"}))
+		architecturekittest.ProjectTransactional(recorder, &ownerTable{commitErr: errors.New("disk full")},
+			architecturekittest.StoredEvent("/account/1", "0", opened{Owner: "golo"}))
 
-	recorder.expectFailure(t, "committing the transaction: disk full")
-}
+		recorder.expectFailure(t, "committing the transaction: disk full")
+	})
 
-func TestProjectRefusesAProjectionThatIsTransactionalAsWell(t *testing.T) {
-	recorder := &spy{}
-	table := &ownerTableWithApply{}
+	t.Run("drives typed handlers built per transaction", func(t *testing.T) {
+		table := &typedOwnerTable{}
 
-	architecturekittest.Project(recorder, table,
-		architecturekittest.StoredEvent("/account/1", "0", opened{Owner: "golo"}))
+		architecturekittest.ProjectTransactional(t, table,
+			architecturekittest.StoredEvents("/account/1",
+				opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})...)
 
-	recorder.expectFailure(t, "is transactional, use ProjectTransactional")
-	expectLog(t, table.log)
-}
-
-func TestProjectDrivesATypedProjection(t *testing.T) {
-	view := ownerView()
-
-	projection := architecturekit.NewProjection().
-		On(func(ctx context.Context, event architecturekit.Envelope[opened]) error {
-			return view.Insert(ctx, event.ID, owner{Name: event.Data.Owner})
-		})
-
-	architecturekittest.Project(t, projection,
-		architecturekittest.StoredEvents("/account/1",
-			opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})...)
-
-	architecturekittest.ExpectItems(t, view, owner{Name: "golo"}, owner{Name: "jane"})
+		expectLog(t, table.committed, "golo", "jane")
+	})
 }
 
 // typedOwnerTable builds the handlers of every transaction anew, so that they
@@ -360,13 +359,3 @@ func (tx *typedOwnerTx) Commit(context.Context, string) error {
 }
 
 func (tx *typedOwnerTx) Rollback(context.Context) error { return nil }
-
-func TestProjectTransactionalDrivesTypedHandlersBuiltPerTransaction(t *testing.T) {
-	table := &typedOwnerTable{}
-
-	architecturekittest.ProjectTransactional(t, table,
-		architecturekittest.StoredEvents("/account/1",
-			opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})...)
-
-	expectLog(t, table.committed, "golo", "jane")
-}

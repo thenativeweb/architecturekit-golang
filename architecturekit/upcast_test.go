@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
@@ -107,78 +109,59 @@ func itoa(value int) string {
 	return digits
 }
 
-func TestUpcasterChainReachesTheCurrentShape(t *testing.T) {
-	current, err := architecturekit.ReplayStored(ledgerState(),
-		stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
-		stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
-		stored("io.thenativeweb.test.credited.v3", `{"amount":1,"currency":"USD"}`),
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+func TestUpcaster(t *testing.T) {
+	t.Run("chain reaches the current shape", func(t *testing.T) {
+		current, err := architecturekit.ReplayStored(ledgerState(),
+			stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
+			stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
+			stored("io.thenativeweb.test.credited.v3", `{"amount":1,"currency":"USD"}`),
+		)
+		require.NoError(t, err)
 
-	if current.Total != 16 {
-		t.Fatalf("got %d, want 16", current.Total)
-	}
-	if current.Entries != 3 {
-		t.Fatalf("got %d entries, want 3", current.Entries)
-	}
-	// The v1 event went through two steps and arrived with an upper case
-	// currency, which only the second upcaster produces.
-	if current.Currency != "USD" {
-		t.Fatalf("got %q", current.Currency)
-	}
-}
-
-func TestUpcasterCanSplitOneEventIntoTwo(t *testing.T) {
-	state := architecturekit.NewState(ledger{})
-	state.Evolve(func(current ledger, event credited) ledger {
-		current.Total += event.Amount
-		current.Entries++
-		return current
+		assert.Equal(t, 16, current.Total)
+		assert.Equal(t, 3, current.Entries)
+		// The v1 event went through two steps and arrived with an upper case
+		// currency, which only the second upcaster produces.
+		assert.Equal(t, "USD", current.Currency)
 	})
-	state.UpcastWith(architecturekit.NewUpcasters().
-		Upcast("io.thenativeweb.test.credited.batch", splitIntoTwo))
 
-	current, err := architecturekit.ReplayStored(state,
-		stored("io.thenativeweb.test.credited.batch", `{}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	t.Run("can split one event into two", func(t *testing.T) {
+		state := architecturekit.NewState(ledger{})
+		state.Evolve(func(current ledger, event credited) ledger {
+			current.Total += event.Amount
+			current.Entries++
+			return current
+		})
+		state.UpcastWith(architecturekit.NewUpcasters().
+			Upcast("io.thenativeweb.test.credited.batch", splitIntoTwo))
 
-	if current.Total != 7 || current.Entries != 2 {
-		t.Fatalf("got total %d in %d entries, want 7 in 2", current.Total, current.Entries)
-	}
-}
+		current, err := architecturekit.ReplayStored(state,
+			stored("io.thenativeweb.test.credited.batch", `{}`))
+		require.NoError(t, err)
 
-func TestUpcasterErrorIsPermanent(t *testing.T) {
-	_, err := architecturekit.ReplayStored(ledgerState(),
-		stored("io.thenativeweb.test.credited.v1", `not json`))
+		assert.Equal(t, 7, current.Total)
+		assert.Equal(t, 2, current.Entries)
+	})
 
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("an upcaster failure is permanent, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "upcasting") {
-		t.Fatalf("got %q", err.Error())
-	}
-}
+	t.Run("error is permanent", func(t *testing.T) {
+		_, err := architecturekit.ReplayStored(ledgerState(),
+			stored("io.thenativeweb.test.credited.v1", `not json`))
 
-func TestUpcasterThatKeepsItsTypeIsStopped(t *testing.T) {
-	state := architecturekit.NewState(ledger{})
-	state.UpcastWith(architecturekit.NewUpcasters().
-		Upcast("io.thenativeweb.test.loop", passThrough))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "an upcaster failure is permanent")
+		assert.ErrorContains(t, err, "upcasting")
+	})
 
-	_, err := architecturekit.ReplayStored(state, stored("io.thenativeweb.test.loop", `{}`))
+	t.Run("that keeps its type is stopped", func(t *testing.T) {
+		state := architecturekit.NewState(ledger{})
+		state.UpcastWith(architecturekit.NewUpcasters().
+			Upcast("io.thenativeweb.test.loop", passThrough))
 
-	if err == nil {
-		t.Fatal("an upcaster that never changes the type must be stopped")
-	}
-	if !strings.Contains(err.Error(), "exceeded") {
-		t.Fatalf("got %q", err.Error())
-	}
+		_, err := architecturekit.ReplayStored(state, stored("io.thenativeweb.test.loop", `{}`))
+
+		require.Error(t, err, "an upcaster that never changes the type must be stopped")
+		assert.ErrorContains(t, err, "exceeded")
+	})
 }
 
 // splitIntoTwo turns one stored event into two credits.
@@ -196,119 +179,71 @@ func passThrough(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
 	return []eventsourcingdb.Event{event}, nil
 }
 
-func TestUpcastPanicsOnDuplicateRegistration(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic for a duplicate upcaster")
+func TestUpcast(t *testing.T) {
+	t.Run("panics on duplicate registration", func(t *testing.T) {
+		assert.Panics(t, func() {
+			architecturekit.NewUpcasters().
+				Upcast("io.thenativeweb.test.same", passThrough).
+				Upcast("io.thenativeweb.test.same", passThrough)
+		})
+	})
+}
+
+func TestStateUpcastWith(t *testing.T) {
+	t.Run("panics when called twice", func(t *testing.T) {
+		assert.Panics(t, func() {
+			architecturekit.NewState(ledger{}).
+				UpcastWith(architecturekit.NewUpcasters()).
+				UpcastWith(architecturekit.NewUpcasters())
+		})
+	})
+
+	t.Run("panics without a set", func(t *testing.T) {
+		assert.Panics(t, func() {
+			architecturekit.NewState(ledger{}).UpcastWith(nil)
+		})
+	})
+}
+
+func TestSharedUpcasters(t *testing.T) {
+	t.Run("apply to every state that uses them", func(t *testing.T) {
+		upcasters := ledgerUpcasters()
+
+		total := architecturekit.NewState(0).
+			Evolve(func(current int, event credited) int { return current + event.Amount }).
+			UpcastWith(upcasters)
+		currencies := architecturekit.NewState("").
+			Evolve(func(current string, event credited) string { return current + event.Currency }).
+			UpcastWith(upcasters)
+
+		history := []eventsourcingdb.Event{
+			stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
+			stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
 		}
-	}()
 
-	architecturekit.NewUpcasters().
-		Upcast("io.thenativeweb.test.same", passThrough).
-		Upcast("io.thenativeweb.test.same", passThrough)
+		gotTotal, err := architecturekit.ReplayStored(total, history...)
+		require.NoError(t, err)
+		gotCurrencies, err := architecturekit.ReplayStored(currencies, history...)
+		require.NoError(t, err)
+
+		assert.Equal(t, 15, gotTotal)
+		assert.Equal(t, "EURCHF", gotCurrencies)
+	})
 }
 
-func TestStateUpcastWithPanicsWhenCalledTwice(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic for a second set of upcasters")
-		}
-	}()
+func TestReplayStored(t *testing.T) {
+	t.Run("fails on event without rule", func(t *testing.T) {
+		_, err := architecturekit.ReplayStored(ledgerState(),
+			stored("io.thenativeweb.test.unheard-of", `{}`))
 
-	architecturekit.NewState(ledger{}).
-		UpcastWith(architecturekit.NewUpcasters()).
-		UpcastWith(architecturekit.NewUpcasters())
-}
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+	})
 
-func TestStateUpcastWithPanicsWithoutASet(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic for a nil set of upcasters")
-		}
-	}()
+	t.Run("fails on data that does not match", func(t *testing.T) {
+		_, err := architecturekit.ReplayStored(ledgerState(),
+			stored("io.thenativeweb.test.credited.v3", `{"amount":"not a number"}`))
 
-	architecturekit.NewState(ledger{}).UpcastWith(nil)
-}
-
-func TestSharedUpcastersApplyToEveryStateThatUsesThem(t *testing.T) {
-	upcasters := ledgerUpcasters()
-
-	total := architecturekit.NewState(0).
-		Evolve(func(current int, event credited) int { return current + event.Amount }).
-		UpcastWith(upcasters)
-	currencies := architecturekit.NewState("").
-		Evolve(func(current string, event credited) string { return current + event.Currency }).
-		UpcastWith(upcasters)
-
-	history := []eventsourcingdb.Event{
-		stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
-		stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
-	}
-
-	gotTotal, err := architecturekit.ReplayStored(total, history...)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	gotCurrencies, err := architecturekit.ReplayStored(currencies, history...)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if gotTotal != 15 {
-		t.Fatalf("got %d, want 15", gotTotal)
-	}
-	if gotCurrencies != "EURCHF" {
-		t.Fatalf("got %q, want %q", gotCurrencies, "EURCHF")
-	}
-}
-
-func TestReplayStoredFailsOnEventWithoutRule(t *testing.T) {
-	_, err := architecturekit.ReplayStored(ledgerState(),
-		stored("io.thenativeweb.test.unheard-of", `{}`))
-
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestReplayStoredFailsOnDataThatDoesNotMatch(t *testing.T) {
-	_, err := architecturekit.ReplayStored(ledgerState(),
-		stored("io.thenativeweb.test.credited.v3", `{"amount":"not a number"}`))
-
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("got %v", err)
-	}
-	if !strings.Contains(err.Error(), "decoding") {
-		t.Fatalf("got %q", err.Error())
-	}
-}
-
-func TestReplayFailsOnAnEventThatCannotBeEncoded(t *testing.T) {
-	_, err := architecturekit.Replay(noteState(), annotatedUnmarshallable{Channel: make(chan int)})
-
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("got %v", err)
-	}
-	if !strings.Contains(err.Error(), "encoding") {
-		t.Fatalf("got %q", err.Error())
-	}
-}
-
-func TestReplayFailsOnDataThatDoesNotMatchTheRule(t *testing.T) {
-	_, err := architecturekit.Replay(noteState(), annotatedBroken{Note: 42})
-
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("got %v", err)
-	}
-	if !strings.Contains(err.Error(), "decoding") {
-		t.Fatalf("got %q", err.Error())
-	}
-}
-
-func TestReplayFailsOnEventWithoutRule(t *testing.T) {
-	_, err := architecturekit.Replay(noteState(), reset{})
-
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("got %v", err)
-	}
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, "decoding")
+	})
 }

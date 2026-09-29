@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
@@ -46,233 +48,216 @@ func apply(t *testing.T, projection architecturekit.Projection, events ...events
 	return nil
 }
 
-func TestTypedProjectionHandsOverTheMetadataAndTheDecodedData(t *testing.T) {
-	traceParent := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-	traceState := "vendor=value"
-	recorded := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+func TestTypedProjection(t *testing.T) {
+	t.Run("hands over the metadata and the decoded data", func(t *testing.T) {
+		traceParent := "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+		traceState := "vendor=value"
+		recorded := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 
-	target := &credits{}
-	err := apply(t, target.projection(), eventsourcingdb.Event{
-		ID:          "23",
-		Time:        recorded,
-		Source:      "https://thenativeweb.io",
-		Subject:     "/ledger/1",
-		Type:        (credited{}).EventType(),
-		TraceParent: &traceParent,
-		TraceState:  &traceState,
-		Data:        json.RawMessage(`{"amount":42,"currency":"EUR"}`),
+		target := &credits{}
+		err := apply(t, target.projection(), eventsourcingdb.Event{
+			ID:          "23",
+			Time:        recorded,
+			Source:      "https://thenativeweb.io",
+			Subject:     "/ledger/1",
+			Type:        (credited{}).EventType(),
+			TraceParent: &traceParent,
+			TraceState:  &traceState,
+			Data:        json.RawMessage(`{"amount":42,"currency":"EUR"}`),
+		})
+		require.NoError(t, err)
+
+		require.Len(t, target.envelopes, 1)
+
+		got := target.envelopes[0]
+		want := architecturekit.Envelope[credited]{
+			ID:          "23",
+			Time:        recorded,
+			Source:      "https://thenativeweb.io",
+			Subject:     "/ledger/1",
+			Type:        (credited{}).EventType(),
+			TraceParent: &traceParent,
+			TraceState:  &traceState,
+			Data:        credited{Amount: 42, Currency: "EUR"},
+		}
+		assert.Equal(t, want, got)
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
 
-	if len(target.envelopes) != 1 {
-		t.Fatalf("got %d events, want 1", len(target.envelopes))
-	}
+	t.Run("hands each event to the handler of its type", func(t *testing.T) {
+		var order []string
 
-	got := target.envelopes[0]
-	want := architecturekit.Envelope[credited]{
-		ID:          "23",
-		Time:        recorded,
-		Source:      "https://thenativeweb.io",
-		Subject:     "/ledger/1",
-		Type:        (credited{}).EventType(),
-		TraceParent: &traceParent,
-		TraceState:  &traceState,
-		Data:        credited{Amount: 42, Currency: "EUR"},
-	}
-	if got != want {
-		t.Fatalf("got %+v, want %+v", got, want)
-	}
-}
+		projection := architecturekit.NewProjection().
+			On(func(_ context.Context, event architecturekit.Envelope[incremented]) error {
+				order = append(order, "incremented "+itoa(event.Data.By))
+				return nil
+			}).
+			On(func(_ context.Context, event architecturekit.Envelope[reset]) error {
+				order = append(order, "reset")
+				return nil
+			})
 
-func TestTypedProjectionHandsEachEventToTheHandlerOfItsType(t *testing.T) {
-	var order []string
+		err := apply(t, projection,
+			stored((incremented{}).EventType(), `{"by":2}`),
+			stored((reset{}).EventType(), `{}`),
+			stored((incremented{}).EventType(), `{"by":5}`),
+		)
+		require.NoError(t, err)
 
-	projection := architecturekit.NewProjection().
-		On(func(_ context.Context, event architecturekit.Envelope[incremented]) error {
-			order = append(order, "incremented "+itoa(event.Data.By))
-			return nil
-		}).
-		On(func(_ context.Context, event architecturekit.Envelope[reset]) error {
-			order = append(order, "reset")
-			return nil
+		assert.Equal(t, "incremented 2, reset, incremented 5", strings.Join(order, ", "))
+	})
+
+	t.Run("skips events without a handler", func(t *testing.T) {
+		target := &credits{}
+
+		err := apply(t, target.projection(),
+			stored("io.thenativeweb.test.unheard-of", `not even json`),
+			stored((credited{}).EventType(), `{"amount":1,"currency":"EUR"}`),
+		)
+		require.NoError(t, err, "an event without a handler must be skipped")
+
+		assert.Equal(t, 1, target.total())
+	})
+
+	t.Run("fails on data that does not match", func(t *testing.T) {
+		target := &credits{}
+
+		err := apply(t, target.projection(),
+			stored((credited{}).EventType(), `{"amount":"not a number"}`))
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, "decoding")
+	})
+
+	t.Run("returns the error of a handler unchanged", func(t *testing.T) {
+		errFull := errors.New("the view is full")
+
+		projection := architecturekit.NewProjection().
+			On(func(context.Context, architecturekit.Envelope[credited]) error {
+				return errFull
+			})
+
+		err := apply(t, projection, stored((credited{}).EventType(), `{"amount":1}`))
+
+		assert.ErrorIs(t, err, errFull)
+		assert.NotErrorIs(t, err, architecturekit.ErrPermanent, "the kit must not categorise the error of a handler")
+	})
+
+	t.Run("panics on duplicate handler", func(t *testing.T) {
+		ignore := func(context.Context, architecturekit.Envelope[credited]) error { return nil }
+
+		assert.Panics(t, func() {
+			architecturekit.NewProjection().On(ignore).On(ignore)
 		})
+	})
 
-	err := apply(t, projection,
-		stored((incremented{}).EventType(), `{"by":2}`),
-		stored((reset{}).EventType(), `{}`),
-		stored((incremented{}).EventType(), `{"by":5}`),
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	t.Run("runs the upcasters", func(t *testing.T) {
+		target := &credits{}
 
-	if got := strings.Join(order, ", "); got != "incremented 2, reset, incremented 5" {
-		t.Fatalf("got %q", got)
-	}
-}
+		err := apply(t, target.projection().UpcastWith(ledgerUpcasters()),
+			stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
+			stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
+			stored("io.thenativeweb.test.credited.v3", `{"amount":1,"currency":"USD"}`),
+		)
+		require.NoError(t, err)
 
-func TestTypedProjectionSkipsEventsWithoutAHandler(t *testing.T) {
-	target := &credits{}
+		require.Len(t, target.envelopes, 3)
+		assert.Equal(t, 16, target.total())
 
-	err := apply(t, target.projection(),
-		stored("io.thenativeweb.test.unheard-of", `not even json`),
-		stored((credited{}).EventType(), `{"amount":1,"currency":"EUR"}`),
-	)
-	if err != nil {
-		t.Fatalf("an event without a handler must be skipped, got %v", err)
-	}
+		first := target.envelopes[0]
+		assert.Equal(t, (credited{}).EventType(), first.Type, "the v1 event did not arrive in its current shape")
+		assert.Equal(t, "EUR", first.Data.Currency, "the v1 event did not arrive in its current shape")
+	})
 
-	if target.total() != 1 {
-		t.Fatalf("got %d, want 1", target.total())
-	}
-}
+	t.Run("handles every event an upcaster produces", func(t *testing.T) {
+		target := &credits{}
+		projection := target.projection().UpcastWith(architecturekit.NewUpcasters().
+			Upcast("io.thenativeweb.test.credited.batch", splitIntoTwo))
 
-func TestTypedProjectionFailsOnDataThatDoesNotMatch(t *testing.T) {
-	target := &credits{}
+		require.NoError(t, apply(t, projection, stored("io.thenativeweb.test.credited.batch", `{}`)))
 
-	err := apply(t, target.projection(),
-		stored((credited{}).EventType(), `{"amount":"not a number"}`))
+		assert.Len(t, target.envelopes, 2)
+		assert.Equal(t, 7, target.total())
+	})
 
-	if !errors.Is(err, architecturekit.ErrPermanent) {
-		t.Fatalf("got %v", err)
-	}
-	if !strings.Contains(err.Error(), "decoding") {
-		t.Fatalf("got %q", err.Error())
-	}
-}
+	t.Run("reports a failing upcaster", func(t *testing.T) {
+		target := &credits{}
 
-func TestTypedProjectionReturnsTheErrorOfAHandlerUnchanged(t *testing.T) {
-	errFull := errors.New("the view is full")
+		err := apply(t, target.projection().UpcastWith(ledgerUpcasters()),
+			stored("io.thenativeweb.test.credited.v1", `not json`))
 
-	projection := architecturekit.NewProjection().
-		On(func(context.Context, architecturekit.Envelope[credited]) error {
-			return errFull
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "an upcaster failure is permanent")
+		assert.ErrorContains(t, err, "upcasting")
+	})
+
+	t.Run("sees what the state sees", func(t *testing.T) {
+		upcasters := ledgerUpcasters()
+
+		state := architecturekit.NewState(0).
+			Evolve(func(current int, event credited) int { return current + event.Amount }).
+			UpcastWith(upcasters)
+		target := &credits{}
+		projection := target.projection().UpcastWith(upcasters)
+
+		history := []eventsourcingdb.Event{
+			stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
+			stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
+		}
+
+		decided, err := architecturekit.ReplayStored(state, history...)
+		require.NoError(t, err)
+		require.NoError(t, apply(t, projection, history...))
+
+		assert.Equal(t, decided, target.total())
+	})
+
+	t.Run("UpcastWith panics when called twice", func(t *testing.T) {
+		assert.Panics(t, func() {
+			architecturekit.NewProjection().
+				UpcastWith(architecturekit.NewUpcasters()).
+				UpcastWith(architecturekit.NewUpcasters())
 		})
+	})
 
-	err := apply(t, projection, stored((credited{}).EventType(), `{"amount":1}`))
+	t.Run("UpcastWith panics without a set", func(t *testing.T) {
+		assert.Panics(t, func() {
+			architecturekit.NewProjection().UpcastWith(nil)
+		})
+	})
 
-	if !errors.Is(err, errFull) {
-		t.Fatalf("got %v", err)
-	}
-	if errors.Is(err, architecturekit.ErrPermanent) {
-		t.Fatalf("the kit must not categorise the error of a handler, got %v", err)
-	}
-}
+	t.Run("is rebuilt unless embedded in a resumable type", func(t *testing.T) {
+		assert.Equal(t, architecturekit.ModeRebuild, architecturekit.ModeOf(architecturekit.NewProjection()))
 
-func TestTypedProjectionPanicsOnDuplicateHandler(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic for a duplicate handler")
+		target := &credits{}
+		resumable := &resumableCredits{TypedProjection: target.projection()}
+
+		assert.Equal(t, architecturekit.ModeResumable, architecturekit.ModeOf(resumable))
+
+		require.NoError(t, apply(t, resumable, stored((credited{}).EventType(), `{"amount":3}`)))
+		assert.Equal(t, 3, target.total(), "the embedded projection did not apply the event")
+	})
+
+	t.Run("CatchUpProjection with a typed projection", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 3)
+
+		var total int
+		var subjects []string
+
+		projection := architecturekit.NewProjection().
+			On(func(_ context.Context, event architecturekit.Envelope[incremented]) error {
+				total += event.Data.By
+				subjects = append(subjects, event.Subject)
+				return nil
+			})
+
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, projection))
+
+		assert.Equal(t, 3, total)
+		for _, got := range subjects {
+			assert.Equal(t, subject, got)
 		}
-	}()
-
-	ignore := func(context.Context, architecturekit.Envelope[credited]) error { return nil }
-
-	architecturekit.NewProjection().On(ignore).On(ignore)
-}
-
-func TestTypedProjectionRunsTheUpcasters(t *testing.T) {
-	target := &credits{}
-
-	err := apply(t, target.projection().UpcastWith(ledgerUpcasters()),
-		stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
-		stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
-		stored("io.thenativeweb.test.credited.v3", `{"amount":1,"currency":"USD"}`),
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(target.envelopes) != 3 {
-		t.Fatalf("got %d events, want 3", len(target.envelopes))
-	}
-	if target.total() != 16 {
-		t.Fatalf("got %d, want 16", target.total())
-	}
-
-	first := target.envelopes[0]
-	if first.Type != (credited{}).EventType() || first.Data.Currency != "EUR" {
-		t.Fatalf("the v1 event did not arrive in its current shape: %+v", first)
-	}
-}
-
-func TestTypedProjectionHandlesEveryEventAnUpcasterProduces(t *testing.T) {
-	target := &credits{}
-	projection := target.projection().UpcastWith(architecturekit.NewUpcasters().
-		Upcast("io.thenativeweb.test.credited.batch", splitIntoTwo))
-
-	if err := apply(t, projection, stored("io.thenativeweb.test.credited.batch", `{}`)); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if len(target.envelopes) != 2 || target.total() != 7 {
-		t.Fatalf("got %d events with a total of %d, want 2 with 7", len(target.envelopes), target.total())
-	}
-}
-
-func TestTypedProjectionReportsAFailingUpcaster(t *testing.T) {
-	target := &credits{}
-
-	err := apply(t, target.projection().UpcastWith(ledgerUpcasters()),
-		stored("io.thenativeweb.test.credited.v1", `not json`))
-
-	if !errors.Is(err, architecturekit.ErrPermanent) {
-		t.Fatalf("an upcaster failure is permanent, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "upcasting") {
-		t.Fatalf("got %q", err.Error())
-	}
-}
-
-func TestTypedProjectionSeesWhatTheStateSees(t *testing.T) {
-	upcasters := ledgerUpcasters()
-
-	state := architecturekit.NewState(0).
-		Evolve(func(current int, event credited) int { return current + event.Amount }).
-		UpcastWith(upcasters)
-	target := &credits{}
-	projection := target.projection().UpcastWith(upcasters)
-
-	history := []eventsourcingdb.Event{
-		stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
-		stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
-	}
-
-	decided, err := architecturekit.ReplayStored(state, history...)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if err := apply(t, projection, history...); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if decided != target.total() {
-		t.Fatalf("the state sees %d, the projection %d", decided, target.total())
-	}
-}
-
-func TestTypedProjectionUpcastWithPanicsWhenCalledTwice(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic for a second set of upcasters")
-		}
-	}()
-
-	architecturekit.NewProjection().
-		UpcastWith(architecturekit.NewUpcasters()).
-		UpcastWith(architecturekit.NewUpcasters())
-}
-
-func TestTypedProjectionUpcastWithPanicsWithoutASet(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic for a nil set of upcasters")
-		}
-	}()
-
-	architecturekit.NewProjection().UpcastWith(nil)
+	})
 }
 
 // resumableCredits makes a typed projection resumable by embedding it.
@@ -288,53 +273,4 @@ func (r *resumableCredits) Checkpoint(context.Context) (string, error) {
 func (r *resumableCredits) SaveCheckpoint(_ context.Context, eventID string) error {
 	r.checkpoint = eventID
 	return nil
-}
-
-func TestTypedProjectionIsRebuiltUnlessEmbeddedInAResumableType(t *testing.T) {
-	if mode := architecturekit.ModeOf(architecturekit.NewProjection()); mode != architecturekit.ModeRebuild {
-		t.Fatalf("got %q, want %q", mode, architecturekit.ModeRebuild)
-	}
-
-	target := &credits{}
-	resumable := &resumableCredits{TypedProjection: target.projection()}
-
-	if mode := architecturekit.ModeOf(resumable); mode != architecturekit.ModeResumable {
-		t.Fatalf("got %q, want %q", mode, architecturekit.ModeResumable)
-	}
-
-	if err := apply(t, resumable, stored((credited{}).EventType(), `{"amount":3}`)); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if target.total() != 3 {
-		t.Fatalf("the embedded projection did not apply the event, got %d", target.total())
-	}
-}
-
-func TestCatchUpProjectionWithATypedProjection(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 3)
-
-	var total int
-	var subjects []string
-
-	projection := architecturekit.NewProjection().
-		On(func(_ context.Context, event architecturekit.Envelope[incremented]) error {
-			total += event.Data.By
-			subjects = append(subjects, event.Subject)
-			return nil
-		})
-
-	if err := architecturekit.CatchUpProjection(context.Background(), store, subject, false, projection); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if total != 3 {
-		t.Fatalf("got %d, want 3", total)
-	}
-	for _, got := range subjects {
-		if got != subject {
-			t.Fatalf("got subject %q, want %q", got, subject)
-		}
-	}
 }

@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
@@ -72,102 +73,9 @@ func runInBackground(t *testing.T, store *architecturekit.Store, projection arch
 		case err := <-done:
 			return err
 		case <-time.After(5 * time.Second):
-			t.Fatal("RunProjection did not return after its context ended")
+			require.Fail(t, "RunProjection did not return after its context ended")
 			return nil
 		}
-	}
-}
-
-func TestRunProjectionReconnectsAfterTheStreamEnds(t *testing.T) {
-	database := &fakeDatabase{
-		events:       []int{0, 1, 2},
-		endObserving: func(connection int) bool { return connection == 1 },
-	}
-	observed := &reconnects{}
-	target := &collector{}
-
-	stop := runInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), target)
-
-	waitFor(t, func() bool { return observed.count() == 1 })
-	database.add(3)
-	waitFor(t, func() bool { return len(target.IDs()) == 4 })
-
-	if err := stop(t); err != nil {
-		t.Fatalf("ending through the context is not a failure, got %v", err)
-	}
-
-	// Catching up again must not apply the events from before the reconnect
-	// a second time, although a rebuilt projection has no checkpoint.
-	if ids := target.IDs(); !slices.Equal(ids, []string{"0", "1", "2", "3"}) {
-		t.Fatalf("got %v, want every event exactly once", ids)
-	}
-
-	errs, _ := observed.recorded()
-	if errs[0] != nil {
-		t.Fatalf("a stream that ended is reported without an error, got %v", errs[0])
-	}
-}
-
-func TestRunProjectionDoublesTheDelayUpToTheMaximum(t *testing.T) {
-	database := &fakeDatabase{
-		endObserving: func(int) bool { return true },
-	}
-	observed := &reconnects{}
-
-	stop := runInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), &collector{})
-
-	waitFor(t, func() bool { return observed.count() >= 4 })
-	if err := stop(t); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	_, delays := observed.recorded()
-	want := []time.Duration{time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond, 4 * time.Millisecond}
-	if !slices.Equal(delays[:4], want) {
-		t.Fatalf("got %v, want %v", delays[:4], want)
-	}
-}
-
-func TestRunProjectionStartsOverWithTheInitialDelayAfterProgress(t *testing.T) {
-	database := &fakeDatabase{
-		endObserving: func(int) bool { return true },
-	}
-	observed := &reconnects{}
-	target := &collector{}
-
-	stop := runInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), target)
-
-	waitFor(t, func() bool { return observed.count() >= 3 })
-	database.add(0)
-	waitFor(t, func() bool { return len(target.IDs()) == 1 })
-
-	// The attempt after the one that applied the event starts over.
-	countAfterProgress := observed.count()
-	waitFor(t, func() bool { return observed.count() > countAfterProgress })
-
-	if err := stop(t); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	_, delays := observed.recorded()
-	if !slices.Contains(delays[3:], time.Millisecond) {
-		t.Fatalf("got %v, want the initial delay again after progress", delays)
-	}
-}
-
-func TestRunProjectionRetriesAnUnreachableDatabase(t *testing.T) {
-	observed := &reconnects{}
-
-	stop := runInBackground(t, reconnectingStore(deadClient(t), observed), &collector{})
-
-	waitFor(t, func() bool { return observed.count() >= 2 })
-	if err := stop(t); err != nil {
-		t.Fatalf("ending through the context is not a failure, got %v", err)
-	}
-
-	errs, _ := observed.recorded()
-	if !errors.Is(errs[0], architecturekit.ErrTransient) {
-		t.Fatalf("an unreachable database is transient, got %v", errs[0])
 	}
 }
 
@@ -178,22 +86,95 @@ func (failingCollector) Apply(context.Context, eventsourcingdb.Event) error {
 	return errors.New("the view is broken")
 }
 
-func TestRunProjectionEndsOnAFailureThatRetryingWillNotFix(t *testing.T) {
-	database := &fakeDatabase{
-		events:       []int{0},
-		endObserving: func(int) bool { return true },
-	}
-	observed := &reconnects{}
-	store := reconnectingStore(newFakeDatabase(t, database), observed)
+func TestRunProjectionWithReconnects(t *testing.T) {
+	t.Run("reconnects after the stream ends", func(t *testing.T) {
+		database := &fakeDatabase{
+			events:       []int{0, 1, 2},
+			endObserving: func(connection int) bool { return connection == 1 },
+		}
+		observed := &reconnects{}
+		target := &collector{}
 
-	err := architecturekit.RunProjection(context.Background(), store, "/test", false, failingCollector{})
+		stop := runInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), target)
 
-	if err == nil || !strings.Contains(err.Error(), "the view is broken") {
-		t.Fatalf("expected the failure of Apply, got %v", err)
-	}
-	if observed.count() != 0 {
-		t.Fatalf("a failing Apply must not be retried, got %d attempts", observed.count())
-	}
+		waitFor(t, func() bool { return observed.count() == 1 })
+		database.add(3)
+		waitFor(t, func() bool { return len(target.IDs()) == 4 })
+
+		assert.NoError(t, stop(t), "ending through the context is not a failure")
+
+		// Catching up again must not apply the events from before the reconnect
+		// a second time, although a rebuilt projection has no checkpoint.
+		assert.Equal(t, []string{"0", "1", "2", "3"}, target.IDs(), "want every event exactly once")
+
+		errs, _ := observed.recorded()
+		assert.NoError(t, errs[0], "a stream that ended is reported without an error")
+	})
+
+	t.Run("doubles the delay up to the maximum", func(t *testing.T) {
+		database := &fakeDatabase{
+			endObserving: func(int) bool { return true },
+		}
+		observed := &reconnects{}
+
+		stop := runInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), &collector{})
+
+		waitFor(t, func() bool { return observed.count() >= 4 })
+		require.NoError(t, stop(t))
+
+		_, delays := observed.recorded()
+		want := []time.Duration{time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond, 4 * time.Millisecond}
+		assert.Equal(t, want, delays[:4])
+	})
+
+	t.Run("starts over with the initial delay after progress", func(t *testing.T) {
+		database := &fakeDatabase{
+			endObserving: func(int) bool { return true },
+		}
+		observed := &reconnects{}
+		target := &collector{}
+
+		stop := runInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), target)
+
+		waitFor(t, func() bool { return observed.count() >= 3 })
+		database.add(0)
+		waitFor(t, func() bool { return len(target.IDs()) == 1 })
+
+		// The attempt after the one that applied the event starts over.
+		countAfterProgress := observed.count()
+		waitFor(t, func() bool { return observed.count() > countAfterProgress })
+
+		require.NoError(t, stop(t))
+
+		_, delays := observed.recorded()
+		assert.Contains(t, delays[3:], time.Millisecond, "want the initial delay again after progress")
+	})
+
+	t.Run("retries an unreachable database", func(t *testing.T) {
+		observed := &reconnects{}
+
+		stop := runInBackground(t, reconnectingStore(deadClient(t), observed), &collector{})
+
+		waitFor(t, func() bool { return observed.count() >= 2 })
+		assert.NoError(t, stop(t), "ending through the context is not a failure")
+
+		errs, _ := observed.recorded()
+		assert.ErrorIs(t, errs[0], architecturekit.ErrTransient, "an unreachable database is transient")
+	})
+
+	t.Run("ends on a failure that retrying will not fix", func(t *testing.T) {
+		database := &fakeDatabase{
+			events:       []int{0},
+			endObserving: func(int) bool { return true },
+		}
+		observed := &reconnects{}
+		store := reconnectingStore(newFakeDatabase(t, database), observed)
+
+		err := architecturekit.RunProjection(context.Background(), store, "/test", false, failingCollector{})
+
+		assert.ErrorContains(t, err, "the view is broken", "expected the failure of Apply")
+		assert.Zero(t, observed.count(), "a failing Apply must not be retried")
+	})
 }
 
 // flakyCollector fails on the first attempts at one event with a transient
