@@ -3,9 +3,11 @@ package architecturekit_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -191,5 +193,55 @@ func TestRunProjectionEndsOnAFailureThatRetryingWillNotFix(t *testing.T) {
 	}
 	if observed.count() != 0 {
 		t.Fatalf("a failing Apply must not be retried, got %d attempts", observed.count())
+	}
+}
+
+// flakyCollector fails on the first attempts at one event with a transient
+// failure, as a publisher does whose target is unavailable for a moment.
+type flakyCollector struct {
+	collector
+
+	flakyID      string
+	failuresLeft atomic.Int32
+}
+
+func (c *flakyCollector) Apply(ctx context.Context, event eventsourcingdb.Event) error {
+	if event.ID == c.flakyID && c.failuresLeft.Add(-1) >= 0 {
+		return fmt.Errorf("%w: the target is unavailable", architecturekit.ErrTransient)
+	}
+
+	return c.collector.Apply(ctx, event)
+}
+
+func TestRunProjectionRetriesAFailureOfApplyThatIsTransient(t *testing.T) {
+	database := &fakeDatabase{
+		events:       []int{0, 1, 2},
+		endObserving: func(int) bool { return false },
+	}
+	observed := &reconnects{}
+	target := &flakyCollector{flakyID: "1"}
+	target.failuresLeft.Store(2)
+
+	stop := runInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), target)
+
+	waitFor(t, func() bool { return len(target.IDs()) == 3 })
+	if err := stop(t); err != nil {
+		t.Fatalf("ending through the context is not a failure, got %v", err)
+	}
+
+	// The failing event is tried again until it succeeds, and no event is
+	// skipped or applied twice on the way.
+	if ids := target.IDs(); !slices.Equal(ids, []string{"0", "1", "2"}) {
+		t.Fatalf("got %v, want every event exactly once", ids)
+	}
+
+	errs, _ := observed.recorded()
+	if len(errs) != 2 {
+		t.Fatalf("got %d retries, want 2", len(errs))
+	}
+	for _, err := range errs {
+		if !errors.Is(err, architecturekit.ErrTransient) || !strings.Contains(err.Error(), "the target is unavailable") {
+			t.Fatalf("each retry follows the failure of Apply, got %v", err)
+		}
 	}
 }
