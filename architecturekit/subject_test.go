@@ -1,143 +1,137 @@
 package architecturekit_test
 
 import (
-	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 )
 
-func TestSubjectSchemeBuildsAndMatches(t *testing.T) {
-	scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
+func TestSubjectScheme(t *testing.T) {
+	t.Run("builds and matches", func(t *testing.T) {
+		scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
 
-	subject := scheme.Build("acme", "go-cqrs")
-	if want := "/tenant/acme/workshop/go-cqrs"; subject != want {
-		t.Fatalf("got %q, want %q", subject, want)
-	}
+		subject := scheme.Build("acme", "go-cqrs")
+		assert.Equal(t, "/tenant/acme/workshop/go-cqrs", subject)
 
-	values, ok := scheme.Match(subject)
-	if !ok {
-		t.Fatalf("%q should match %q", subject, scheme.Pattern())
-	}
-	if values["tenant"] != "acme" || values["workshop"] != "go-cqrs" {
-		t.Fatalf("got %v", values)
-	}
-}
+		values, ok := scheme.Match(subject)
+		require.True(t, ok, "%q should match %q", subject, scheme.Pattern())
+		assert.Equal(t, "acme", values["tenant"])
+		assert.Equal(t, "go-cqrs", values["workshop"])
+	})
 
-func TestSubjectSchemeWithoutPlaceholders(t *testing.T) {
-	scheme := architecturekit.NewSubjectScheme("/system/health")
+	t.Run("without placeholders", func(t *testing.T) {
+		scheme := architecturekit.NewSubjectScheme("/system/health")
 
-	if subject := scheme.Build(); subject != "/system/health" {
-		t.Fatalf("got %q", subject)
-	}
-	if _, ok := scheme.Match("/system/health"); !ok {
-		t.Fatal("should match itself")
-	}
-}
+		assert.Equal(t, "/system/health", scheme.Build())
+		_, ok := scheme.Match("/system/health")
+		assert.True(t, ok, "should match itself")
+	})
 
-func TestSubjectSchemeReportsItsPlaceholders(t *testing.T) {
-	scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
+	t.Run("reports its placeholders", func(t *testing.T) {
+		scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
 
-	names := scheme.Placeholders()
-	if len(names) != 2 || names[0] != "tenant" || names[1] != "workshop" {
-		t.Fatalf("got %v", names)
-	}
+		names := scheme.Placeholders()
+		require.Len(t, names, 2)
+		assert.Equal(t, []string{"tenant", "workshop"}, names)
 
-	// The returned slice is a copy, so a caller cannot reach into the scheme.
-	names[0] = "tampered"
-	if again := scheme.Placeholders(); again[0] != "tenant" {
-		t.Fatalf("scheme was modified from outside: %v", again)
-	}
-}
+		// The returned slice is a copy, so a caller cannot reach into the scheme.
+		names[0] = "tampered"
+		again := scheme.Placeholders()
+		assert.Equal(t, "tenant", again[0], "scheme was modified from outside")
+	})
 
-func TestSubjectSchemeRejectsSubjectsThatDoNotFit(t *testing.T) {
-	scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
+	t.Run("rejects subjects that do not fit", func(t *testing.T) {
+		scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
 
-	for _, subject := range []string{
-		"tenant/acme/workshop/go-cqrs",       // no leading slash
-		"/tenant/acme/workshop",              // too few segments
-		"/tenant/acme/workshop/go-cqrs/more", // too many segments
-		"/client/acme/workshop/go-cqrs",      // literal does not match
-		"/tenant/acme/workshop/",             // empty placeholder value
-	} {
-		if _, ok := scheme.Match(subject); ok {
-			t.Fatalf("%q should not match %q", subject, scheme.Pattern())
+		for _, test := range []struct {
+			name    string
+			subject string
+		}{
+			{name: "no leading slash", subject: "tenant/acme/workshop/go-cqrs"},
+			{name: "too few segments", subject: "/tenant/acme/workshop"},
+			{name: "too many segments", subject: "/tenant/acme/workshop/go-cqrs/more"},
+			{name: "literal does not match", subject: "/client/acme/workshop/go-cqrs"},
+			{name: "empty placeholder value", subject: "/tenant/acme/workshop/"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				_, ok := scheme.Match(test.subject)
+				assert.False(t, ok, "%q should not match %q", test.subject, scheme.Pattern())
+			})
 		}
-	}
-}
+	})
 
-func TestSubjectSchemePanicsOnMalformedPatterns(t *testing.T) {
-	for _, pattern := range []string{
-		"workshop/{id}",     // no leading slash
-		"/workshop//{id}",   // empty segment
-		"/workshop/{id",     // unclosed placeholder
-		"/workshop/{}",      // unnamed placeholder
-		"/a/{id}/b/{id}",    // duplicate placeholder
-		"/workshop/pre{id}", // malformed segment
-	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("pattern %q should panic", pattern)
-				}
-			}()
-			architecturekit.NewSubjectScheme(pattern)
-		}()
-	}
-}
-
-func TestSubjectSchemePanicsOnBadValues(t *testing.T) {
-	scheme := architecturekit.NewSubjectScheme("/workshop/{workshop}")
-
-	for _, values := range [][]string{
-		{},             // too few
-		{"a", "b"},     // too many
-		{""},           // empty
-		{"with/slash"}, // contains a slash
-	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("values %v should panic", values)
-				}
-			}()
-			scheme.Build(values...)
-		}()
-	}
-}
-
-func TestSubjectSchemeChecksValues(t *testing.T) {
-	scheme := architecturekit.NewSubjectScheme("/workshop/{workshop}")
-
-	if err := scheme.Check("42"); err != nil {
-		t.Fatalf("values that fit should pass, got %v", err)
-	}
-
-	for _, values := range [][]string{
-		{},             // too few
-		{"a", "b"},     // too many
-		{""},           // empty
-		{"with/slash"}, // contains a slash
-	} {
-		if err := scheme.Check(values...); err == nil {
-			t.Fatalf("values %v should not pass", values)
+	t.Run("panics on malformed patterns", func(t *testing.T) {
+		for _, test := range []struct {
+			name    string
+			pattern string
+		}{
+			{name: "no leading slash", pattern: "workshop/{id}"},
+			{name: "empty segment", pattern: "/workshop//{id}"},
+			{name: "unclosed placeholder", pattern: "/workshop/{id"},
+			{name: "unnamed placeholder", pattern: "/workshop/{}"},
+			{name: "duplicate placeholder", pattern: "/a/{id}/b/{id}"},
+			{name: "malformed segment", pattern: "/workshop/pre{id}"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				assert.Panics(t, func() {
+					architecturekit.NewSubjectScheme(test.pattern)
+				})
+			})
 		}
-	}
-}
+	})
 
-func TestSubjectSchemeNamesThePlaceholderOfABadValue(t *testing.T) {
-	scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
+	t.Run("panics on bad values", func(t *testing.T) {
+		scheme := architecturekit.NewSubjectScheme("/workshop/{workshop}")
 
-	err := scheme.Check("acme", "")
-	if err == nil || !strings.Contains(err.Error(), `"workshop"`) {
-		t.Fatalf("got %v", err)
-	}
-}
+		for _, test := range []struct {
+			name   string
+			values []string
+		}{
+			{name: "too few", values: []string{}},
+			{name: "too many", values: []string{"a", "b"}},
+			{name: "empty", values: []string{""}},
+			{name: "contains a slash", values: []string{"with/slash"}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				assert.Panics(t, func() {
+					scheme.Build(test.values...)
+				})
+			})
+		}
+	})
 
-func TestSubjectSchemeReportsItsPattern(t *testing.T) {
-	pattern := "/tenant/{tenant}/workshop/{workshop}"
+	t.Run("checks values", func(t *testing.T) {
+		scheme := architecturekit.NewSubjectScheme("/workshop/{workshop}")
 
-	if got := architecturekit.NewSubjectScheme(pattern).Pattern(); got != pattern {
-		t.Fatalf("got %q, want %q", got, pattern)
-	}
+		assert.NoError(t, scheme.Check("42"), "values that fit should pass")
+
+		for _, test := range []struct {
+			name   string
+			values []string
+		}{
+			{name: "too few", values: []string{}},
+			{name: "too many", values: []string{"a", "b"}},
+			{name: "empty", values: []string{""}},
+			{name: "contains a slash", values: []string{"with/slash"}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				assert.Error(t, scheme.Check(test.values...))
+			})
+		}
+	})
+
+	t.Run("names the placeholder of a bad value", func(t *testing.T) {
+		scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
+
+		err := scheme.Check("acme", "")
+		assert.ErrorContains(t, err, `"workshop"`)
+	})
+
+	t.Run("reports its pattern", func(t *testing.T) {
+		pattern := "/tenant/{tenant}/workshop/{workshop}"
+
+		assert.Equal(t, pattern, architecturekit.NewSubjectScheme(pattern).Pattern())
+	})
 }

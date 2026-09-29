@@ -4,86 +4,80 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestStateCacheReturnsWhatWasPut(t *testing.T) {
-	cache := newStateCache(10)
-	key := stateCacheKey{state: "state", subject: "/books/42"}
+func TestStateCache(t *testing.T) {
+	t.Run("returns what was put", func(t *testing.T) {
+		cache := newStateCache(10)
+		key := stateCacheKey{state: "state", subject: "/books/42"}
 
-	cache.put(key, 7, "3")
+		cache.put(key, 7, "3")
 
-	entry, isFound := cache.get(key)
-	if !isFound {
-		t.Fatal("expected the entry to be found")
-	}
-	if entry.state != 7 || entry.lastEventID != "3" {
-		t.Fatalf("got %v at %q, want 7 at \"3\"", entry.state, entry.lastEventID)
-	}
-}
+		entry, isFound := cache.get(key)
+		require.True(t, isFound, "expected the entry to be found")
+		assert.Equal(t, 7, entry.state)
+		assert.Equal(t, "3", entry.lastEventID)
+	})
 
-func TestStateCacheEvictsTheLeastRecentlyUsedSubject(t *testing.T) {
-	cache := newStateCache(2)
-	first := stateCacheKey{state: "state", subject: "/books/1"}
-	second := stateCacheKey{state: "state", subject: "/books/2"}
-	third := stateCacheKey{state: "state", subject: "/books/3"}
+	t.Run("evicts the least recently used subject", func(t *testing.T) {
+		cache := newStateCache(2)
+		first := stateCacheKey{state: "state", subject: "/books/1"}
+		second := stateCacheKey{state: "state", subject: "/books/2"}
+		third := stateCacheKey{state: "state", subject: "/books/3"}
 
-	cache.put(first, 1, "1")
-	cache.put(second, 2, "2")
+		cache.put(first, 1, "1")
+		cache.put(second, 2, "2")
 
-	// Using the first one makes the second one the least recently used.
-	if _, isFound := cache.get(first); !isFound {
-		t.Fatal("expected the first entry to be found")
-	}
+		// Using the first one makes the second one the least recently used.
+		_, isFound := cache.get(first)
+		require.True(t, isFound, "expected the first entry to be found")
 
-	cache.put(third, 3, "3")
+		cache.put(third, 3, "3")
 
-	if _, isFound := cache.get(second); isFound {
-		t.Fatal("expected the second entry to be evicted")
-	}
-	if _, isFound := cache.get(first); !isFound {
-		t.Fatal("expected the first entry to be kept")
-	}
-	if _, isFound := cache.get(third); !isFound {
-		t.Fatal("expected the third entry to be kept")
-	}
-}
+		_, isFound = cache.get(second)
+		assert.False(t, isFound, "expected the second entry to be evicted")
+		_, isFound = cache.get(first)
+		assert.True(t, isFound, "expected the first entry to be kept")
+		_, isFound = cache.get(third)
+		assert.True(t, isFound, "expected the third entry to be kept")
+	})
 
-func TestStateCacheKeepsTheStateBuiltFromTheLaterEvent(t *testing.T) {
-	cache := newStateCache(10)
-	key := stateCacheKey{state: "state", subject: "/books/42"}
+	t.Run("keeps the state built from the later event", func(t *testing.T) {
+		cache := newStateCache(10)
+		key := stateCacheKey{state: "state", subject: "/books/42"}
 
-	cache.put(key, 10, "10")
-	cache.put(key, 9, "9")
+		cache.put(key, 10, "10")
+		cache.put(key, 9, "9")
 
-	entry, _ := cache.get(key)
-	if entry.state != 10 || entry.lastEventID != "10" {
-		t.Fatalf("got %v at %q, want 10 at \"10\"", entry.state, entry.lastEventID)
-	}
-}
+		entry, _ := cache.get(key)
+		assert.Equal(t, 10, entry.state)
+		assert.Equal(t, "10", entry.lastEventID)
+	})
 
-func TestStateCacheKeepsStatesOfTheSameSubjectApart(t *testing.T) {
-	cache := newStateCache(10)
-	first := stateCacheKey{state: "first state", subject: "/books/42"}
-	second := stateCacheKey{state: "second state", subject: "/books/42"}
+	t.Run("keeps states of the same subject apart", func(t *testing.T) {
+		cache := newStateCache(10)
+		first := stateCacheKey{state: "first state", subject: "/books/42"}
+		second := stateCacheKey{state: "second state", subject: "/books/42"}
 
-	cache.put(first, 1, "1")
-	cache.put(second, 2, "1")
+		cache.put(first, 1, "1")
+		cache.put(second, 2, "1")
 
-	entry, _ := cache.get(first)
-	if entry.state != 1 {
-		t.Fatalf("got %v, want 1", entry.state)
-	}
-}
+		entry, _ := cache.get(first)
+		assert.Equal(t, 1, entry.state)
+	})
 
-func TestStateCacheHoldsAtLeastOneSubject(t *testing.T) {
-	cache := newStateCache(0)
-	key := stateCacheKey{state: "state", subject: "/books/42"}
+	t.Run("holds at least one subject", func(t *testing.T) {
+		cache := newStateCache(0)
+		key := stateCacheKey{state: "state", subject: "/books/42"}
 
-	cache.put(key, 7, "3")
+		cache.put(key, 7, "3")
 
-	if _, isFound := cache.get(key); !isFound {
-		t.Fatal("expected a cache for at least one subject")
-	}
+		_, isFound := cache.get(key)
+		assert.True(t, isFound, "expected a cache for at least one subject")
+	})
 }
 
 func TestIsValueType(t *testing.T) {
@@ -106,38 +100,37 @@ func TestIsValueType(t *testing.T) {
 	}
 
 	for _, testCase := range []struct {
+		name    string
 		value   any
 		isValue bool
 	}{
-		{value: 0, isValue: true},
-		{value: "", isValue: true},
-		{value: values{hidden: 1}, isValue: true},
-		{value: time.Time{}, isValue: true},
-		{value: [2]string{}, isValue: true},
-		{value: []int{}, isValue: false},
-		{value: map[string]int{}, isValue: false},
-		{value: new(int), isValue: false},
-		{value: withSlice{}, isValue: false},
-		{value: withNestedMap{}, isValue: false},
-		{value: [2][]int{}, isValue: false},
-		{value: struct{ Any any }{}, isValue: false},
-		{value: struct{ Callback func() }{}, isValue: false},
+		{name: "an int", value: 0, isValue: true},
+		{name: "a string", value: "", isValue: true},
+		{name: "a struct of values", value: values{hidden: 1}, isValue: true},
+		{name: "a time", value: time.Time{}, isValue: true},
+		{name: "an array of values", value: [2]string{}, isValue: true},
+		{name: "a slice", value: []int{}, isValue: false},
+		{name: "a map", value: map[string]int{}, isValue: false},
+		{name: "a pointer", value: new(int), isValue: false},
+		{name: "a struct with a slice", value: withSlice{}, isValue: false},
+		{name: "a struct with a nested map", value: withNestedMap{}, isValue: false},
+		{name: "an array of slices", value: [2][]int{}, isValue: false},
+		{name: "a struct with an interface", value: struct{ Any any }{}, isValue: false},
+		{name: "a struct with a function", value: struct{ Callback func() }{}, isValue: false},
 	} {
-		valueType := reflect.TypeOf(testCase.value)
-		if got := isValueType(valueType); got != testCase.isValue {
-			t.Errorf("%v: got %t, want %t", valueType, got, testCase.isValue)
-		}
+		t.Run(testCase.name, func(t *testing.T) {
+			valueType := reflect.TypeOf(testCase.value)
+			assert.Equal(t, testCase.isValue, isValueType(valueType))
+		})
 	}
 }
 
-func TestClonePanicsWhenCalledTwice(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic for a second clone function")
-		}
-	}()
-
-	NewState([]int{}).
-		Clone(func(state []int) []int { return state }).
-		Clone(func(state []int) []int { return state })
+func TestClone(t *testing.T) {
+	t.Run("panics when called twice", func(t *testing.T) {
+		assert.Panics(t, func() {
+			NewState([]int{}).
+				Clone(func(state []int) []int { return state }).
+				Clone(func(state []int) []int { return state })
+		})
+	})
 }

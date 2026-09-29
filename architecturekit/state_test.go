@@ -1,109 +1,88 @@
 package architecturekit_test
 
 import (
-	"errors"
-	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 )
 
-func TestReplayReturnsInitialStateForEmptyHistory(t *testing.T) {
-	current, err := architecturekit.Replay(counterState())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if current.Total != 0 {
-		t.Fatalf("got %d, want 0", current.Total)
-	}
+func TestStateReplay(t *testing.T) {
+	t.Run("returns initial state for empty history", func(t *testing.T) {
+		current, err := architecturekit.Replay(counterState())
+		require.NoError(t, err)
+		assert.Equal(t, 0, current.Total)
+	})
+
+	t.Run("folds events in order", func(t *testing.T) {
+		current, err := architecturekit.Replay(counterState(),
+			incremented{By: 3},
+			incremented{By: 4},
+			reset{},
+			incremented{By: 5},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, 5, current.Total)
+	})
+
+	t.Run("fails on unknown event type", func(t *testing.T) {
+		state := architecturekit.NewState(counter{})
+		state.Evolve(func(current counter, event incremented) counter { return current })
+
+		_, err := architecturekit.Replay(state, reset{})
+		require.Error(t, err, "expected an error for an event type without a rule")
+		assert.Contains(t, err.Error(), reset{}.EventType(), "error should name the event type")
+	})
 }
 
-func TestReplayFoldsEventsInOrder(t *testing.T) {
-	current, err := architecturekit.Replay(counterState(),
-		incremented{By: 3},
-		incremented{By: 4},
-		reset{},
-		incremented{By: 5},
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if current.Total != 5 {
-		t.Fatalf("got %d, want 5", current.Total)
-	}
+func TestEvolve(t *testing.T) {
+	t.Run("panics on duplicate event type", func(t *testing.T) {
+		defer func() {
+			recovered := recover()
+			require.NotNil(t, recovered, "expected a panic for a duplicate event type")
+			message, ok := recovered.(string)
+			require.True(t, ok, "panic should name the event type, got %v", recovered)
+			assert.Contains(t, message, incremented{}.EventType(), "panic should name the event type")
+		}()
+
+		state := architecturekit.NewState(counter{})
+		state.Evolve(func(current counter, event incremented) counter { return current })
+		state.Evolve(func(current counter, event incremented) counter { return current })
+	})
+
+	t.Run("is chainable", func(t *testing.T) {
+		state := architecturekit.NewState(counter{}).
+			Evolve(func(current counter, event incremented) counter {
+				current.Total += event.By
+				return current
+			})
+
+		current, err := architecturekit.Replay(state, incremented{By: 7})
+		require.NoError(t, err)
+		assert.Equal(t, 7, current.Total)
+	})
 }
 
-func TestReplayFailsOnUnknownEventType(t *testing.T) {
-	state := architecturekit.NewState(counter{})
-	state.Evolve(func(current counter, event incremented) counter { return current })
+func TestSchemas(t *testing.T) {
+	t.Run("collects the schema of every event", func(t *testing.T) {
+		schemas := counterState().Schemas()
 
-	_, err := architecturekit.Replay(state, reset{})
-	if err == nil {
-		t.Fatal("expected an error for an event type without a rule")
-	}
-	if !strings.Contains(err.Error(), reset{}.EventType()) {
-		t.Fatalf("error should name the event type, got %q", err.Error())
-	}
-}
-
-func TestEvolvePanicsOnDuplicateEventType(t *testing.T) {
-	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			t.Fatal("expected a panic for a duplicate event type")
+		require.Len(t, schemas, 2)
+		for i, want := range []architecturekit.Event{incremented{}, reset{}} {
+			assert.Equal(t, want.EventType(), schemas[i].EventType)
+			assert.NotNil(t, schemas[i].Schema, "schema %d must not be nil", i)
 		}
-		message, ok := recovered.(string)
-		if !ok || !strings.Contains(message, incremented{}.EventType()) {
-			t.Fatalf("panic should name the event type, got %v", recovered)
-		}
-	}()
-
-	state := architecturekit.NewState(counter{})
-	state.Evolve(func(current counter, event incremented) counter { return current })
-	state.Evolve(func(current counter, event incremented) counter { return current })
+	})
 }
 
-func TestEvolveIsChainable(t *testing.T) {
-	state := architecturekit.NewState(counter{}).
-		Evolve(func(current counter, event incremented) counter {
-			current.Total += event.By
-			return current
-		})
+func TestDomainError(t *testing.T) {
+	t.Run("carries its message", func(t *testing.T) {
+		err := architecturekit.NewDomainError("limit of %d would be exceeded", 10)
 
-	current, err := architecturekit.Replay(state, incremented{By: 7})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if current.Total != 7 {
-		t.Fatalf("got %d, want 7", current.Total)
-	}
-}
+		assert.EqualError(t, err, "limit of 10 would be exceeded")
 
-func TestSchemasCollectsTheSchemaOfEveryEvent(t *testing.T) {
-	schemas := counterState().Schemas()
-
-	if len(schemas) != 2 {
-		t.Fatalf("got %d schema(s), want 2", len(schemas))
-	}
-	for i, want := range []architecturekit.Event{incremented{}, reset{}} {
-		if schemas[i].EventType != want.EventType() {
-			t.Fatalf("schema %d: got %q, want %q", i, schemas[i].EventType, want.EventType())
-		}
-		if schemas[i].Schema == nil {
-			t.Fatalf("schema %d must not be nil", i)
-		}
-	}
-}
-
-func TestDomainErrorCarriesItsMessage(t *testing.T) {
-	err := architecturekit.NewDomainError("limit of %d would be exceeded", 10)
-
-	if err.Error() != "limit of 10 would be exceeded" {
-		t.Fatalf("got %q", err.Error())
-	}
-
-	var domainError *architecturekit.DomainError
-	if !errors.As(err, &domainError) {
-		t.Fatal("NewDomainError must produce a *DomainError")
-	}
+		var domainError *architecturekit.DomainError
+		assert.ErrorAs(t, err, &domainError)
+	})
 }

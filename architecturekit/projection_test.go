@@ -3,11 +3,12 @@ package architecturekit_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
@@ -67,127 +68,182 @@ func seed(t *testing.T, subject string, count int) {
 		}
 	}
 
-	if _, err := rawClient(t).WriteEvents(candidates, nil); err != nil {
-		t.Fatalf("failed to seed %q: %v", subject, err)
-	}
+	_, err := rawClient(t).WriteEvents(candidates, nil)
+	require.NoError(t, err, "failed to seed %q", subject)
 }
 
-func TestCatchUpProjectionAppliesWhatIsStored(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 3)
+func TestProjection(t *testing.T) {
+	t.Run("CatchUpProjection applies what is stored", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 3)
 
-	target := &collector{}
-	if err := architecturekit.CatchUpProjection(context.Background(), store, subject, false, target); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		target := &collector{}
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, target))
 
-	if got := len(target.IDs()); got != 3 {
-		t.Fatalf("got %d events, want 3: %v", got, target.IDs())
-	}
-}
+		assert.Len(t, target.IDs(), 3)
+	})
 
-func TestCatchUpProjectionReadsRecursively(t *testing.T) {
-	store := requireStore(t)
-	base := subjectFor(t)
-	seed(t, base+"/a", 2)
-	seed(t, base+"/b", 1)
+	t.Run("CatchUpProjection reads recursively", func(t *testing.T) {
+		store := requireStore(t)
+		base := subjectFor(t)
+		seed(t, base+"/a", 2)
+		seed(t, base+"/b", 1)
 
-	target := &collector{}
-	if err := architecturekit.CatchUpProjection(context.Background(), store, base, true, target); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		target := &collector{}
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, base, true, target))
 
-	if got := len(target.IDs()); got != 3 {
-		t.Fatalf("got %d events across both subjects, want 3", got)
-	}
-}
+		assert.Len(t, target.IDs(), 3, "events across both subjects")
+	})
 
-func TestCatchUpProjectionResumesFromItsCheckpoint(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 3)
+	t.Run("CatchUpProjection resumes from its checkpoint", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 3)
 
-	first := &resumingCollector{}
-	if err := architecturekit.CatchUpProjection(context.Background(), store, subject, false, first); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := len(first.IDs()); got != 3 {
-		t.Fatalf("got %d, want 3", got)
-	}
+		first := &resumingCollector{}
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, first))
+		require.Len(t, first.IDs(), 3)
 
-	// More events arrive, and a second run starts where the first stopped.
-	seed(t, subject, 2)
+		// More events arrive, and a second run starts where the first stopped.
+		seed(t, subject, 2)
 
-	second := &resumingCollector{checkpoint: first.checkpoint}
-	if err := architecturekit.CatchUpProjection(context.Background(), store, subject, false, second); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		second := &resumingCollector{checkpoint: first.checkpoint}
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, second))
 
-	if got := len(second.IDs()); got != 2 {
-		t.Fatalf("a resumed run must only see the new events, got %d: %v", got, second.IDs())
-	}
-}
+		assert.Len(t, second.IDs(), 2, "a resumed run must only see the new events")
+	})
 
-func TestCatchUpProjectionWithNothingToDo(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
+	t.Run("CatchUpProjection with nothing to do", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
 
-	target := &resumingCollector{}
-	if err := architecturekit.CatchUpProjection(context.Background(), store, subject, false, target); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		target := &resumingCollector{}
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, target))
 
-	if got := len(target.IDs()); got != 0 {
-		t.Fatalf("got %d, want none", got)
-	}
-	if target.checkpoint != "" {
-		t.Fatalf("nothing was applied, so no checkpoint: %q", target.checkpoint)
-	}
-}
+		assert.Empty(t, target.IDs())
+		assert.Empty(t, target.checkpoint, "nothing was applied, so no checkpoint")
+	})
 
-func TestRunProjectionFollowsTheStreamAndEndsWithItsContext(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 1)
+	t.Run("RunProjection follows the stream and ends with its context", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 1)
 
-	target := &collector{}
-	ctx, stop := context.WithCancel(context.Background())
+		target := &collector{}
+		ctx, stop := context.WithCancel(context.Background())
 
-	done := make(chan error, 1)
-	go func() { done <- architecturekit.RunProjection(ctx, store, subject, false, target) }()
+		done := make(chan error, 1)
+		go func() { done <- architecturekit.RunProjection(ctx, store, subject, false, target) }()
 
-	// Wait until the catch-up phase has arrived, then write again and watch
-	// the live phase pick it up.
-	waitFor(t, func() bool { return len(target.IDs()) == 1 })
-	seed(t, subject, 1)
-	waitFor(t, func() bool { return len(target.IDs()) == 2 })
+		// Wait until the catch-up phase has arrived, then write again and watch
+		// the live phase pick it up.
+		waitFor(t, func() bool { return len(target.IDs()) == 1 })
+		seed(t, subject, 1)
+		waitFor(t, func() bool { return len(target.IDs()) == 2 })
 
-	stop()
+		stop()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("ending through the context is not a failure, got %v", err)
+		select {
+		case err := <-done:
+			assert.NoError(t, err, "ending through the context is not a failure")
+		case <-time.After(5 * time.Second):
+			assert.Fail(t, "RunProjection did not return after its context ended")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunProjection did not return after its context ended")
-	}
-}
+	})
 
-func TestCatchUpProjectionReportsAFailingApply(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 1)
+	t.Run("CatchUpProjection reports a failing Apply", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 1)
 
-	err := architecturekit.CatchUpProjection(context.Background(), store, subject, false, &refusingCollector{})
+		err := architecturekit.CatchUpProjection(context.Background(), store, subject, false, &refusingCollector{})
 
-	if err == nil {
-		t.Fatal("expected the error from Apply")
-	}
-	if !strings.Contains(err.Error(), "not today") {
-		t.Fatalf("got %q", err.Error())
-	}
+		assert.ErrorContains(t, err, "not today")
+	})
+
+	t.Run("CatchUpProjection stops when the checkpoint cannot be read", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 1)
+
+		err := architecturekit.CatchUpProjection(context.Background(), store, subject, false,
+			&unreadableCheckpoint{})
+
+		assert.ErrorContains(t, err, "checkpoint is gone")
+	})
+
+	t.Run("CatchUpTransactionalProjection commits with the last event ID", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 3)
+
+		target := &batchedTransactionalCollector{}
+		require.NoError(t, architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target))
+
+		ids := target.IDs()
+		require.Len(t, ids, 3)
+		assert.Equal(t, ids[2], target.checkpoint, "the checkpoint is the last event")
+		// Two events, then the incomplete final batch.
+		assert.Equal(t, 2, target.commits)
+	})
+
+	t.Run("CatchUpTransactionalProjection resumes from its checkpoint", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 2)
+
+		target := &transactionalCollector{}
+		require.NoError(t, architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target))
+
+		seed(t, subject, 1)
+
+		require.NoError(t, architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target))
+
+		assert.Len(t, target.IDs(), 3, "a resumed run must only add the new event")
+	})
+
+	t.Run("RunTransactionalProjection follows the stream and ends with its context", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 1)
+
+		target := &transactionalCollector{}
+		ctx, stop := context.WithCancel(t.Context())
+
+		done := make(chan error, 1)
+		go func() { done <- architecturekit.RunTransactionalProjection(ctx, store, subject, false, target) }()
+
+		waitFor(t, func() bool { return len(target.IDs()) == 1 })
+		seed(t, subject, 1)
+		waitFor(t, func() bool { return len(target.IDs()) == 2 })
+
+		stop()
+
+		select {
+		case err := <-done:
+			assert.NoError(t, err, "ending through the context is not a failure")
+		case <-time.After(5 * time.Second):
+			assert.Fail(t, "RunTransactionalProjection did not return after its context ended")
+		}
+	})
+
+	t.Run("RunProjection refuses a projection that is transactional as well", func(t *testing.T) {
+		// Driving it through Apply would bypass its transactions without anyone
+		// noticing, so both entry points refuse it before reading anything.
+		for name, run := range map[string]func(){
+			"RunProjection": func() {
+				_ = architecturekit.RunProjection(t.Context(), nil, "/", true, &transactionalWithApply{})
+			},
+			"CatchUpProjection": func() {
+				_ = architecturekit.CatchUpProjection(t.Context(), nil, "/", true, &transactionalWithApply{})
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				assert.Panics(t, run)
+			})
+		}
+	})
 }
 
 type refusingCollector struct{}
@@ -207,23 +263,7 @@ func waitFor(t *testing.T, condition func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	t.Fatal("condition was not met in time")
-}
-
-func TestCatchUpProjectionStopsWhenTheCheckpointCannotBeRead(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 1)
-
-	err := architecturekit.CatchUpProjection(context.Background(), store, subject, false,
-		&unreadableCheckpoint{})
-
-	if err == nil {
-		t.Fatal("expected the error from Checkpoint")
-	}
-	if !strings.Contains(err.Error(), "checkpoint is gone") {
-		t.Fatalf("got %q", err.Error())
-	}
+	require.FailNow(t, "condition was not met in time")
 }
 
 // transactionalCollector applies events only within a transaction, and makes
@@ -294,100 +334,6 @@ func (c *batchedTransactionalCollector) BatchSizes() (int, int) { return 2, 1 }
 type transactionalWithApply struct {
 	collector
 	transactionalCollector
-}
-
-func TestCatchUpTransactionalProjectionCommitsWithTheLastEventID(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 3)
-
-	target := &batchedTransactionalCollector{}
-	if err := architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	ids := target.IDs()
-	if len(ids) != 3 {
-		t.Fatalf("got %d events, want 3: %v", len(ids), ids)
-	}
-	if target.checkpoint != ids[2] {
-		t.Errorf("got checkpoint %q, want the last event %q", target.checkpoint, ids[2])
-	}
-	// Two events, then the incomplete final batch.
-	if target.commits != 2 {
-		t.Errorf("got %d commits, want 2", target.commits)
-	}
-}
-
-func TestCatchUpTransactionalProjectionResumesFromItsCheckpoint(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 2)
-
-	target := &transactionalCollector{}
-	if err := architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	seed(t, subject, 1)
-
-	if err := architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if got := len(target.IDs()); got != 3 {
-		t.Fatalf("a resumed run must only add the new event, got %d: %v", got, target.IDs())
-	}
-}
-
-func TestRunTransactionalProjectionFollowsTheStreamAndEndsWithItsContext(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 1)
-
-	target := &transactionalCollector{}
-	ctx, stop := context.WithCancel(t.Context())
-
-	done := make(chan error, 1)
-	go func() { done <- architecturekit.RunTransactionalProjection(ctx, store, subject, false, target) }()
-
-	waitFor(t, func() bool { return len(target.IDs()) == 1 })
-	seed(t, subject, 1)
-	waitFor(t, func() bool { return len(target.IDs()) == 2 })
-
-	stop()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("ending through the context is not a failure, got %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunTransactionalProjection did not return after its context ended")
-	}
-}
-
-func TestRunProjectionRefusesAProjectionThatIsTransactionalAsWell(t *testing.T) {
-	// Driving it through Apply would bypass its transactions without anyone
-	// noticing, so both entry points refuse it before reading anything.
-	for name, run := range map[string]func(){
-		"RunProjection": func() {
-			_ = architecturekit.RunProjection(t.Context(), nil, "/", true, &transactionalWithApply{})
-		},
-		"CatchUpProjection": func() {
-			_ = architecturekit.CatchUpProjection(t.Context(), nil, "/", true, &transactionalWithApply{})
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("expected a panic")
-				}
-			}()
-
-			run()
-		})
-	}
 }
 
 // unreadableCheckpoint cannot tell where it stopped, so nothing may be read.

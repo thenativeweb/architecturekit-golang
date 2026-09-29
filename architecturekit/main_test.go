@@ -10,6 +10,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdbtest"
@@ -72,9 +73,7 @@ func requireStore(t *testing.T) *architecturekit.Store {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
-	if testStore == nil {
-		t.Fatal("no store available")
-	}
+	require.NotNil(t, testStore, "no store available")
 
 	return testStore
 }
@@ -86,9 +85,7 @@ func rawClient(t *testing.T) *eventsourcingdb.Client {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
-	if testClient == nil {
-		t.Fatal("no client available")
-	}
+	require.NotNil(t, testClient, "no client available")
 
 	return testClient
 }
@@ -101,16 +98,12 @@ func totalIn(t *testing.T, store *architecturekit.Store, subject string) int {
 	total := 0
 	for event, err := range rawClient(t).ReadEvents(context.Background(), subject,
 		eventsourcingdb.ReadEventsOptions{Recursive: false}) {
-		if err != nil {
-			t.Fatalf("failed to read %q: %v", subject, err)
-		}
+		require.NoError(t, err, "failed to read %q", subject)
 
 		switch event.Type {
 		case (incremented{}).EventType():
 			var payload incremented
-			if err := json.Unmarshal(event.Data, &payload); err != nil {
-				t.Fatalf("failed to decode: %v", err)
-			}
+			require.NoError(t, json.Unmarshal(event.Data, &payload))
 			total += payload.By
 		case (reset{}).EventType():
 			total = 0
@@ -125,14 +118,10 @@ func deadClient(t *testing.T) *eventsourcingdb.Client {
 	t.Helper()
 
 	deadURL, err := url.Parse("http://127.0.0.1:1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	client, err := eventsourcingdb.NewClient(deadURL, "secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	return client
 }

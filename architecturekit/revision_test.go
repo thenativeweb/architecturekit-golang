@@ -7,332 +7,317 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-func TestRevisionsAreComparedAsNumbers(t *testing.T) {
-	tests := []struct {
-		left, right string
-		want        int
-	}{
-		{"", "", 0},
-		{"0", "0", 0},
-		{"7", "7", 0},
-		{"", "0", -1},
-		{"0", "", 1},
-		{"1", "2", -1},
-		{"2", "1", 1},
-		// The trap this exists for: as text, "10" sorts before "9".
-		{"9", "10", -1},
-		{"10", "9", 1},
-		{"100", "99", 1},
-		{"18446744073709551615", "18446744073709551614", 1},
-	}
-
-	for _, test := range tests {
-		got, err := architecturekit.CompareRevisions(test.left, test.right)
-		if err != nil {
-			t.Errorf("%q vs %q: %v", test.left, test.right, err)
-			continue
+func TestCompareRevisions(t *testing.T) {
+	t.Run("revisions are compared as numbers", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			left, right string
+			want        int
+		}{
+			{"empty vs empty", "", "", 0},
+			{"0 vs 0", "0", "0", 0},
+			{"7 vs 7", "7", "7", 0},
+			{"empty vs 0", "", "0", -1},
+			{"0 vs empty", "0", "", 1},
+			{"1 vs 2", "1", "2", -1},
+			{"2 vs 1", "2", "1", 1},
+			// The trap this exists for: as text, "10" sorts before "9".
+			{"9 vs 10", "9", "10", -1},
+			{"10 vs 9", "10", "9", 1},
+			{"100 vs 99", "100", "99", 1},
+			{"the largest vs the one below", "18446744073709551615", "18446744073709551614", 1},
 		}
 
-		if got != test.want {
-			t.Errorf("%q vs %q: got %d, want %d", test.left, test.right, got, test.want)
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				got, err := architecturekit.CompareRevisions(test.left, test.right)
+				require.NoError(t, err)
+
+				assert.Equal(t, test.want, got)
+			})
 		}
-	}
-}
+	})
 
-func TestSomethingThatIsNotARevisionIsRefused(t *testing.T) {
-	for _, revision := range []string{"abc", "1.5", "-1", " 1", "0x10", "99999999999999999999"} {
-		if _, err := architecturekit.CompareRevisions(revision, "1"); !errors.Is(err, architecturekit.ErrNotARevision) {
-			t.Errorf("%q: got %v, want %v", revision, err, architecturekit.ErrNotARevision)
-		}
-
-		// Both sides are checked, not only the first.
-		if _, err := architecturekit.CompareRevisions("1", revision); !errors.Is(err, architecturekit.ErrNotARevision) {
-			t.Errorf("%q on the right: got %v", revision, err)
-		}
-	}
-}
-
-func TestAFreshViewHasSeenNothing(t *testing.T) {
-	if got := intView().Revision(); got != "" {
-		t.Errorf("got %q, want the empty revision", got)
-	}
-}
-
-func TestSeenMovesTheRevisionForwardOnly(t *testing.T) {
-	view := intView()
-
-	view.Seen("5")
-	if got := view.Revision(); got != "5" {
-		t.Fatalf("got %q, want %q", got, "5")
-	}
-
-	// An event that arrives twice, or out of order after a restart, must not
-	// pull the revision back.
-	view.Seen("3")
-	view.Seen("5")
-	if got := view.Revision(); got != "5" {
-		t.Errorf("got %q, want %q", got, "5")
-	}
-
-	view.Seen("12")
-	if got := view.Revision(); got != "12" {
-		t.Errorf("got %q, want %q", got, "12")
-	}
-}
-
-func TestSeenIgnoresWhatIsNotARevision(t *testing.T) {
-	view := intView()
-	view.Seen("5")
-	view.Seen("nonsense")
-
-	if got := view.Revision(); got != "5" {
-		t.Errorf("got %q, want %q", got, "5")
-	}
-}
-
-func TestWaitingForARevisionAlreadyReachedReturnsAtOnce(t *testing.T) {
-	view := intView()
-	view.Seen("10")
-
-	for _, revision := range []string{"", "9", "10"} {
-		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-
-		if err := view.WaitFor(ctx, revision); err != nil {
-			t.Errorf("waiting for %q: %v", revision, err)
+	t.Run("something that is not a revision is refused", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			revision string
+		}{
+			{"letters", "abc"},
+			{"a fraction", "1.5"},
+			{"a negative number", "-1"},
+			{"a leading space", " 1"},
+			{"a hexadecimal number", "0x10"},
+			{"a number beyond 64 bits", "99999999999999999999"},
 		}
 
-		cancel()
-	}
-}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				_, err := architecturekit.CompareRevisions(test.revision, "1")
+				assert.ErrorIs(t, err, architecturekit.ErrNotARevision)
 
-func TestWaitingReturnsWhenTheRevisionArrives(t *testing.T) {
-	view := intView()
-
-	waited := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		waited <- view.WaitFor(ctx, "3")
-	}()
-
-	// Everything below the wanted revision leaves the waiter waiting.
-	view.Seen("1")
-	view.Seen("2")
-
-	select {
-	case err := <-waited:
-		t.Fatalf("returned too early: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	view.Seen("3")
-
-	select {
-	case err := <-waited:
-		if err != nil {
-			t.Errorf("got %v", err)
+				// Both sides are checked, not only the first.
+				_, err = architecturekit.CompareRevisions("1", test.revision)
+				assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "on the right")
+			})
 		}
-	case <-time.After(10 * time.Second):
-		t.Error("never returned")
-	}
+	})
 }
 
-func TestWaitingEndsWithTheContext(t *testing.T) {
-	view := intView()
+func TestInMemoryViewRevision(t *testing.T) {
+	t.Run("a fresh view has seen nothing", func(t *testing.T) {
+		assert.Empty(t, intView().Revision())
+	})
 
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
-	defer cancel()
+	t.Run("Seen moves the revision forward only", func(t *testing.T) {
+		view := intView()
 
-	err := view.WaitFor(ctx, "1")
+		view.Seen("5")
+		require.Equal(t, "5", view.Revision())
 
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("got %v, want %v", err, context.DeadlineExceeded)
-	}
-}
+		// An event that arrives twice, or out of order after a restart, must not
+		// pull the revision back.
+		view.Seen("3")
+		view.Seen("5")
+		assert.Equal(t, "5", view.Revision())
 
-func TestWaitingForSomethingThatIsNotARevisionFails(t *testing.T) {
-	view := intView()
+		view.Seen("12")
+		assert.Equal(t, "12", view.Revision())
+	})
 
-	if err := view.WaitFor(t.Context(), "soon"); !errors.Is(err, architecturekit.ErrNotARevision) {
-		t.Errorf("got %v, want %v", err, architecturekit.ErrNotARevision)
-	}
-}
+	t.Run("Seen ignores what is not a revision", func(t *testing.T) {
+		view := intView()
+		view.Seen("5")
+		view.Seen("nonsense")
 
-func TestManyWaitersAreAllWokenUp(t *testing.T) {
-	view := intView()
+		assert.Equal(t, "5", view.Revision())
+	})
 
-	var group sync.WaitGroup
-	failures := make(chan error, 10)
+	t.Run("waiting for a revision already reached returns at once", func(t *testing.T) {
+		view := intView()
+		view.Seen("10")
 
-	for range 10 {
-		group.Add(1)
+		tests := []struct {
+			name     string
+			revision string
+		}{
+			{"the empty revision", ""},
+			{"an older revision", "9"},
+			{"the same revision", "10"},
+		}
 
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+
+				assert.NoError(t, view.WaitFor(ctx, test.revision))
+
+				cancel()
+			})
+		}
+	})
+
+	t.Run("waiting returns when the revision arrives", func(t *testing.T) {
+		view := intView()
+
+		waited := make(chan error, 1)
 		go func() {
-			defer group.Done()
-
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			if err := view.WaitFor(ctx, "4"); err != nil {
-				failures <- err
-			}
+			waited <- view.WaitFor(ctx, "3")
 		}()
-	}
 
-	// Several steps, so that the waiters go around their loop more than once.
-	for _, id := range []string{"1", "2", "3", "4"} {
-		view.Seen(id)
-	}
+		// Everything below the wanted revision leaves the waiter waiting.
+		view.Seen("1")
+		view.Seen("2")
 
-	group.Wait()
-	close(failures)
+		select {
+		case err := <-waited:
+			require.Fail(t, "returned too early", err)
+		case <-time.After(50 * time.Millisecond):
+		}
 
-	for err := range failures {
-		t.Errorf("a waiter failed: %v", err)
-	}
+		view.Seen("3")
+
+		select {
+		case err := <-waited:
+			assert.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			assert.Fail(t, "never returned")
+		}
+	})
+
+	t.Run("waiting ends with the context", func(t *testing.T) {
+		view := intView()
+
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+
+		err := view.WaitFor(ctx, "1")
+
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+
+	t.Run("waiting for something that is not a revision fails", func(t *testing.T) {
+		view := intView()
+
+		assert.ErrorIs(t, view.WaitFor(t.Context(), "soon"), architecturekit.ErrNotARevision)
+	})
+
+	t.Run("many waiters are all woken up", func(t *testing.T) {
+		view := intView()
+
+		var group sync.WaitGroup
+		failures := make(chan error, 10)
+
+		for range 10 {
+			group.Add(1)
+
+			go func() {
+				defer group.Done()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+
+				if err := view.WaitFor(ctx, "4"); err != nil {
+					failures <- err
+				}
+			}()
+		}
+
+		// Several steps, so that the waiters go around their loop more than once.
+		for _, id := range []string{"1", "2", "3", "4"} {
+			view.Seen(id)
+		}
+
+		group.Wait()
+		close(failures)
+
+		for err := range failures {
+			assert.NoError(t, err, "a waiter failed")
+		}
+	})
 }
 
 // --- Tracking ---
 
-func TestTrackingRecordsEveryEvent(t *testing.T) {
-	view := intView()
+func TestTracking(t *testing.T) {
+	t.Run("records every event", func(t *testing.T) {
+		view := intView()
 
-	applied := 0
-	projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
-		func(context.Context, eventsourcingdb.Event) error {
-			applied++
-			return nil
-		},
-	))
+		applied := 0
+		projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
+			func(context.Context, eventsourcingdb.Event) error {
+				applied++
+				return nil
+			},
+		))
 
-	architecturekittest.Project(t, projection,
-		architecturekittest.StoredEvent("/counter/a", "0", incremented{By: 1}),
-		architecturekittest.StoredEvent("/counter/a", "1", incremented{By: 1}),
-	)
+		architecturekittest.Project(t, projection,
+			architecturekittest.StoredEvent("/counter/a", "0", incremented{By: 1}),
+			architecturekittest.StoredEvent("/counter/a", "1", incremented{By: 1}),
+		)
 
-	if applied != 2 {
-		t.Errorf("applied %d event(s), want 2", applied)
-	}
+		assert.Equal(t, 2, applied)
 
-	if got := view.Revision(); got != "1" {
-		t.Errorf("got revision %q, want %q", got, "1")
-	}
-}
+		assert.Equal(t, "1", view.Revision())
+	})
 
-func TestTrackingAlsoRecordsWhatTheProjectionIgnores(t *testing.T) {
-	// This is the whole reason Tracking exists: a projection skips what does
-	// not concern it, but a reader may be waiting for exactly that event.
-	view := intView()
+	t.Run("also records what the projection ignores", func(t *testing.T) {
+		// This is the whole reason Tracking exists: a projection skips what does
+		// not concern it, but a reader may be waiting for exactly that event.
+		view := intView()
 
-	projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
-		func(context.Context, eventsourcingdb.Event) error { return nil },
-	))
+		projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
+			func(context.Context, eventsourcingdb.Event) error { return nil },
+		))
 
-	architecturekittest.Project(t, projection,
-		architecturekittest.StoredEvent("/somewhere/else", "42", incremented{By: 1}),
-	)
+		architecturekittest.Project(t, projection,
+			architecturekittest.StoredEvent("/somewhere/else", "42", incremented{By: 1}),
+		)
 
-	if got := view.Revision(); got != "42" {
-		t.Errorf("got %q, want %q", got, "42")
-	}
-}
+		assert.Equal(t, "42", view.Revision())
+	})
 
-func TestTrackingDoesNotRecordAFailedEvent(t *testing.T) {
-	view := intView()
-	failed := errors.New("could not apply")
+	t.Run("does not record a failed event", func(t *testing.T) {
+		view := intView()
+		failed := errors.New("could not apply")
 
-	projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
-		func(context.Context, eventsourcingdb.Event) error { return failed },
-	))
+		projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
+			func(context.Context, eventsourcingdb.Event) error { return failed },
+		))
 
-	err := projection.Apply(t.Context(),
-		architecturekittest.StoredEvent("/counter/a", "7", incremented{By: 1}))
+		err := projection.Apply(t.Context(),
+			architecturekittest.StoredEvent("/counter/a", "7", incremented{By: 1}))
 
-	if !errors.Is(err, failed) {
-		t.Errorf("got %v, want %v", err, failed)
-	}
+		assert.ErrorIs(t, err, failed)
 
-	if got := view.Revision(); got != "" {
-		t.Errorf("recorded %q although applying failed", got)
-	}
-}
+		assert.Empty(t, view.Revision(), "recorded although applying failed")
+	})
 
-func TestTrackingKeepsAProjectionThatIsRebuiltAsItIs(t *testing.T) {
-	projection := architecturekit.Tracking(intView(), &collector{})
+	t.Run("keeps a projection that is rebuilt as it is", func(t *testing.T) {
+		projection := architecturekit.Tracking(intView(), &collector{})
 
-	architecturekittest.ExpectMode(t, projection, architecturekit.ModeRebuild)
+		architecturekittest.ExpectMode(t, projection, architecturekit.ModeRebuild)
 
-	batched, ok := projection.(architecturekit.Batched)
-	if !ok {
-		t.Fatal("a tracked projection passes on its batch sizes")
-	}
-	if catchUp, live := batched.BatchSizes(); catchUp != 1 || live != 1 {
-		t.Errorf("got %d and %d, want the defaults 1 and 1", catchUp, live)
-	}
-}
+		batched, ok := projection.(architecturekit.Batched)
+		require.True(t, ok, "a tracked projection passes on its batch sizes")
 
-func TestTrackingKeepsAResumableProjectionResumable(t *testing.T) {
-	// A wrapper that dropped the checkpoint would silently turn this into a
-	// projection that is rebuilt on every start.
-	target := &batchedResumingCollector{resumingCollector: resumingCollector{checkpoint: "7"}}
-	projection := architecturekit.Tracking(intView(), target)
+		catchUp, live := batched.BatchSizes()
+		assert.Equal(t, 1, catchUp)
+		assert.Equal(t, 1, live)
+	})
 
-	architecturekittest.ExpectMode(t, projection, architecturekit.ModeResumable)
+	t.Run("keeps a resumable projection resumable", func(t *testing.T) {
+		// A wrapper that dropped the checkpoint would silently turn this into a
+		// projection that is rebuilt on every start.
+		target := &batchedResumingCollector{resumingCollector: resumingCollector{checkpoint: "7"}}
+		projection := architecturekit.Tracking(intView(), target)
 
-	resumable := projection.(architecturekit.Resumable)
+		architecturekittest.ExpectMode(t, projection, architecturekit.ModeResumable)
 
-	checkpoint, err := resumable.Checkpoint(t.Context())
-	if err != nil || checkpoint != "7" {
-		t.Fatalf("got %q, %v, want the checkpoint of the wrapped projection", checkpoint, err)
-	}
+		resumable := projection.(architecturekit.Resumable)
 
-	if err := resumable.SaveCheckpoint(t.Context(), "8"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if target.checkpoint != "8" {
-		t.Errorf("got %q, the checkpoint has to reach the wrapped projection", target.checkpoint)
-	}
+		checkpoint, err := resumable.Checkpoint(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, "7", checkpoint, "the checkpoint of the wrapped projection")
 
-	if catchUp, live := projection.(architecturekit.Batched).BatchSizes(); catchUp != 500 || live != 10 {
-		t.Errorf("got %d and %d, want the batch sizes of the wrapped projection", catchUp, live)
-	}
-}
+		require.NoError(t, resumable.SaveCheckpoint(t.Context(), "8"))
+		assert.Equal(t, "8", target.checkpoint, "the checkpoint has to reach the wrapped projection")
 
-func TestTrackingRefusesAProjectionThatIsTransactionalAsWell(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("expected a panic, because tracking would bypass the transactions")
-		}
-	}()
+		catchUp, live := projection.(architecturekit.Batched).BatchSizes()
+		assert.Equal(t, 500, catchUp, "the batch sizes of the wrapped projection")
+		assert.Equal(t, 10, live, "the batch sizes of the wrapped projection")
+	})
 
-	architecturekit.Tracking(intView(), &transactionalWithApply{})
-}
+	t.Run("refuses a projection that is transactional as well", func(t *testing.T) {
+		assert.Panics(t, func() {
+			architecturekit.Tracking(intView(), &transactionalWithApply{})
+		}, "tracking would bypass the transactions")
+	})
 
-func TestTrackingResumesFromTheCheckpoint(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
-	seed(t, subject, 3)
+	t.Run("resumes from the checkpoint", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 3)
 
-	view := intView()
-	target := &resumingCollector{}
+		view := intView()
+		target := &resumingCollector{}
 
-	if err := architecturekit.CatchUpProjection(t.Context(), store, subject, false,
-		architecturekit.Tracking(view, target)); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		require.NoError(t, architecturekit.CatchUpProjection(t.Context(), store, subject, false,
+			architecturekit.Tracking(view, target)))
 
-	if target.checkpoint == "" {
-		t.Fatal("a tracked resumable projection has to save its checkpoint")
-	}
-	if got := view.Revision(); got != target.checkpoint {
-		t.Errorf("got revision %q, want %q", got, target.checkpoint)
-	}
+		require.NotEmpty(t, target.checkpoint, "a tracked resumable projection has to save its checkpoint")
+		assert.Equal(t, target.checkpoint, view.Revision())
+	})
 }
 
 // batchedResumingCollector is resumable and announces its own batch sizes.
@@ -344,27 +329,27 @@ func (c *batchedResumingCollector) BatchSizes() (int, int) { return 500, 10 }
 
 // --- RevisionOf ---
 
-func TestTheRevisionOfAWriteIsItsHighestEventID(t *testing.T) {
-	tests := []struct {
-		name   string
-		events []eventsourcingdb.Event
-		want   string
-	}{
-		{"nothing written", nil, ""},
-		{"one event", []eventsourcingdb.Event{{ID: "7"}}, "7"},
-		{"two events", []eventsourcingdb.Event{{ID: "7"}, {ID: "8"}}, "8"},
-		// Order is not assumed, and numbers decide, not text.
-		{"out of order", []eventsourcingdb.Event{{ID: "10"}, {ID: "9"}}, "10"},
-		{"nonsense is skipped", []eventsourcingdb.Event{{ID: "x"}, {ID: "3"}}, "3"},
-	}
+func TestRevisionOf(t *testing.T) {
+	t.Run("the revision of a write is its highest event ID", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			events []eventsourcingdb.Event
+			want   string
+		}{
+			{"nothing written", nil, ""},
+			{"one event", []eventsourcingdb.Event{{ID: "7"}}, "7"},
+			{"two events", []eventsourcingdb.Event{{ID: "7"}, {ID: "8"}}, "8"},
+			// Order is not assumed, and numbers decide, not text.
+			{"out of order", []eventsourcingdb.Event{{ID: "10"}, {ID: "9"}}, "10"},
+			{"nonsense is skipped", []eventsourcingdb.Event{{ID: "x"}, {ID: "3"}}, "3"},
+		}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := architecturekit.RevisionOf(test.events); got != test.want {
-				t.Errorf("got %q, want %q", got, test.want)
-			}
-		})
-	}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				assert.Equal(t, test.want, architecturekit.RevisionOf(test.events))
+			})
+		}
+	})
 }
 
 // intView is a view of numbers, each its own key.

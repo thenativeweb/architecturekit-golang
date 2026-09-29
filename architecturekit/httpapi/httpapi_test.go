@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -100,13 +102,9 @@ func deadStore(t *testing.T) *architecturekit.Store {
 	t.Helper()
 
 	deadURL, err := url.Parse("http://127.0.0.1:1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	client, err := eventsourcingdb.NewClient(deadURL, "secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	return architecturekit.NewStore(client, "https://thenativeweb.io")
 }
@@ -143,101 +141,92 @@ func send(t *testing.T, mux *http.ServeMux, r request) *httptest.ResponseRecorde
 
 // --- StatusFor, without any infrastructure ---
 
-func TestStatusForMapsEveryCategory(t *testing.T) {
-	cases := []struct {
-		label string
-		err   error
-		want  int
-	}{
-		{"no error", nil, http.StatusOK},
-		{"unauthorized", httpapi.ErrUnauthorized, http.StatusUnauthorized},
-		{"too large", httpapi.ErrTooLarge, http.StatusRequestEntityTooLarge},
-		{"wrong media type", httpapi.ErrUnsupportedMediaType, http.StatusUnsupportedMediaType},
-		{"malformed", httpapi.ErrMalformed, http.StatusBadRequest},
-		{"domain rule", architecturekit.NewDomainError("nope"), http.StatusUnprocessableEntity},
-		{"conflict", architecturekit.ErrConflict, http.StatusConflict},
-		{"transient", architecturekit.ErrTransient, http.StatusServiceUnavailable},
-		{"permanent", architecturekit.ErrPermanent, http.StatusInternalServerError},
-		{"unverified", architecturekit.ErrUnverified, http.StatusInternalServerError},
-		{"anything else", errors.New("who knows"), http.StatusInternalServerError},
-	}
-
-	for _, c := range cases {
-		if got := httpapi.StatusFor(c.err); got != c.want {
-			t.Fatalf("%s: got %d, want %d", c.label, got, c.want)
+func TestStatusFor(t *testing.T) {
+	t.Run("maps every category", func(t *testing.T) {
+		cases := []struct {
+			label string
+			err   error
+			want  int
+		}{
+			{"no error", nil, http.StatusOK},
+			{"unauthorized", httpapi.ErrUnauthorized, http.StatusUnauthorized},
+			{"too large", httpapi.ErrTooLarge, http.StatusRequestEntityTooLarge},
+			{"wrong media type", httpapi.ErrUnsupportedMediaType, http.StatusUnsupportedMediaType},
+			{"malformed", httpapi.ErrMalformed, http.StatusBadRequest},
+			{"domain rule", architecturekit.NewDomainError("nope"), http.StatusUnprocessableEntity},
+			{"conflict", architecturekit.ErrConflict, http.StatusConflict},
+			{"transient", architecturekit.ErrTransient, http.StatusServiceUnavailable},
+			{"permanent", architecturekit.ErrPermanent, http.StatusInternalServerError},
+			{"unverified", architecturekit.ErrUnverified, http.StatusInternalServerError},
+			{"anything else", errors.New("who knows"), http.StatusInternalServerError},
 		}
-	}
-}
 
-func TestStatusForPrefersConflictOverItsCategory(t *testing.T) {
-	// A conflict is transient, so the order of the cases decides. 409 says
-	// more than 503, hence it has to win.
-	if !errors.Is(architecturekit.ErrConflict, architecturekit.ErrTransient) {
-		t.Fatal("a conflict is expected to be transient")
-	}
-	if got := httpapi.StatusFor(architecturekit.ErrConflict); got != http.StatusConflict {
-		t.Fatalf("got %d, want 409", got)
-	}
-}
-
-func TestRespondReportsEventIDsOnSuccess(t *testing.T) {
-	recorder := httptest.NewRecorder()
-
-	httpapi.Respond(recorder, []eventsourcingdb.Event{{ID: "0"}, {ID: "1"}}, nil)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("got %d", recorder.Code)
-	}
-	if recorder.Header().Get("Content-Type") != "application/json" {
-		t.Fatalf("got %q", recorder.Header().Get("Content-Type"))
-	}
-
-	var body struct {
-		Message  string   `json:"message"`
-		EventIDs []string `json:"eventIds"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body.Message != "ok" {
-		t.Fatalf("got %q", body.Message)
-	}
-	if len(body.EventIDs) != 2 || body.EventIDs[0] != "0" || body.EventIDs[1] != "1" {
-		t.Fatalf("got %v", body.EventIDs)
-	}
-}
-
-func TestRespondKeepsInternalFailuresToItself(t *testing.T) {
-	recorder := httptest.NewRecorder()
-
-	httpapi.Respond(recorder, nil, errors.New("the password is hunter2"))
-
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("got %d", recorder.Code)
-	}
-	if strings.Contains(recorder.Body.String(), "hunter2") {
-		t.Fatalf("an internal failure must not be explained: %s", recorder.Body)
-	}
-}
-
-func TestRespondLogsInternalFailures(t *testing.T) {
-	logs := logsOf(func() {
-		httpapi.Respond(httptest.NewRecorder(), nil, errors.New("the database is gone"))
+		for _, c := range cases {
+			t.Run(c.label, func(t *testing.T) {
+				assert.Equal(t, c.want, httpapi.StatusFor(c.err))
+			})
+		}
 	})
 
-	if !strings.Contains(logs, "the database is gone") {
-		t.Fatalf("an internal failure must be logged, got %q", logs)
-	}
+	t.Run("prefers conflict over its category", func(t *testing.T) {
+		// A conflict is transient, so the order of the cases decides. 409 says
+		// more than 503, hence it has to win.
+		require.ErrorIs(t, architecturekit.ErrConflict, architecturekit.ErrTransient, "a conflict is expected to be transient")
+		assert.Equal(t, http.StatusConflict, httpapi.StatusFor(architecturekit.ErrConflict))
+	})
 }
 
-func TestRespondDoesNotLogFailuresTheCallerCanFix(t *testing.T) {
-	logs := logsOf(func() {
-		httpapi.Respond(httptest.NewRecorder(), nil, architecturekit.NewDomainError("note 7 already exists"))
+func TestRespond(t *testing.T) {
+	t.Run("reports event IDs on success", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+
+		httpapi.Respond(recorder, []eventsourcingdb.Event{{ID: "0"}, {ID: "1"}}, nil)
+
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+
+		var body struct {
+			Message  string   `json:"message"`
+			EventIDs []string `json:"eventIds"`
+		}
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+		assert.Equal(t, "ok", body.Message)
+		assert.Equal(t, []string{"0", "1"}, body.EventIDs)
 	})
 
-	if logs != "" {
-		t.Fatalf("a failure the caller can fix must not be logged, got %q", logs)
-	}
+	t.Run("keeps internal failures to itself", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+
+		httpapi.Respond(recorder, nil, errors.New("the password is hunter2"))
+
+		assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+		assert.NotContains(t, recorder.Body.String(), "hunter2", "an internal failure must not be explained")
+	})
+
+	t.Run("logs internal failures", func(t *testing.T) {
+		logs := logsOf(func() {
+			httpapi.Respond(httptest.NewRecorder(), nil, errors.New("the database is gone"))
+		})
+
+		assert.Contains(t, logs, "the database is gone", "an internal failure must be logged")
+	})
+
+	t.Run("does not log failures the caller can fix", func(t *testing.T) {
+		logs := logsOf(func() {
+			httpapi.Respond(httptest.NewRecorder(), nil, architecturekit.NewDomainError("note 7 already exists"))
+		})
+
+		assert.Empty(t, logs, "a failure the caller can fix must not be logged")
+	})
+
+	t.Run("explains failures the caller can fix", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+
+		httpapi.Respond(recorder, nil, architecturekit.NewDomainError("note 7 already exists"))
+
+		assert.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "note 7 already exists")
+	})
 }
 
 // logsOf returns what the kit logs with the default logger of log/slog while
@@ -254,170 +243,154 @@ func logsOf(fn func()) string {
 	return buffer.String()
 }
 
-func TestRespondExplainsFailuresTheCallerCanFix(t *testing.T) {
-	recorder := httptest.NewRecorder()
-
-	httpapi.Respond(recorder, nil, architecturekit.NewDomainError("note 7 already exists"))
-
-	if recorder.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("got %d", recorder.Code)
-	}
-	if !strings.Contains(recorder.Body.String(), "note 7 already exists") {
-		t.Fatalf("got %s", recorder.Body)
-	}
-}
-
 // --- everything that fails before the store is touched ---
 
-func TestRequestWithoutAUserIsUnauthorized(t *testing.T) {
-	response := send(t, muxFor(t, deadStore(t)), request{
-		contentType: "application/json",
-		body:        `{"id":"1"}`,
-	})
-
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("got %d: %s", response.Code, response.Body)
-	}
-}
-
-func TestContentTypeIsRequired(t *testing.T) {
-	mux := muxFor(t, deadStore(t))
-
-	for _, contentType := range []string{
-		"",                // missing
-		"text/plain",      // the CSRF-friendly one
-		"application/xml", // simply wrong
-		"application/x-www-form-urlencoded",
-		"text/plain; application/json", // would pass a substring test
-		"not a media type at all;;;",
-	} {
-		response := send(t, mux, request{
-			user:        "golo",
-			contentType: contentType,
+func TestRequest(t *testing.T) {
+	t.Run("without a user is unauthorized", func(t *testing.T) {
+		response := send(t, muxFor(t, deadStore(t)), request{
+			contentType: "application/json",
 			body:        `{"id":"1"}`,
 		})
 
-		if response.Code != http.StatusUnsupportedMediaType {
-			t.Fatalf("%q: got %d, want 415: %s", contentType, response.Code, response.Body)
+		assert.Equal(t, http.StatusUnauthorized, response.Code)
+	})
+}
+
+func TestContentType(t *testing.T) {
+	t.Run("is required", func(t *testing.T) {
+		mux := muxFor(t, deadStore(t))
+
+		for _, c := range []struct {
+			label       string
+			contentType string
+		}{
+			{"missing", ""},
+			{"the CSRF-friendly one", "text/plain"},
+			{"simply wrong", "application/xml"},
+			{"a form", "application/x-www-form-urlencoded"},
+			{"would pass a substring test", "text/plain; application/json"},
+			{"not a media type at all", "not a media type at all;;;"},
+		} {
+			t.Run(c.label, func(t *testing.T) {
+				response := send(t, mux, request{
+					user:        "golo",
+					contentType: c.contentType,
+					body:        `{"id":"1"}`,
+				})
+
+				assert.Equal(t, http.StatusUnsupportedMediaType, response.Code)
+			})
 		}
-	}
-}
-
-func TestContentTypeWithParametersIsAccepted(t *testing.T) {
-	// The media type is parsed, so a charset does not get in the way. This one
-	// reaches the store and fails there, which is enough to show it passed the
-	// media type check.
-	response := send(t, muxFor(t, deadStore(t)), request{
-		user:        "golo",
-		contentType: "application/json; charset=utf-8",
-		body:        `{"id":"1"}`,
 	})
 
-	if response.Code == http.StatusUnsupportedMediaType {
-		t.Fatalf("a charset must not be rejected: %s", response.Body)
-	}
+	t.Run("with parameters is accepted", func(t *testing.T) {
+		// The media type is parsed, so a charset does not get in the way. This one
+		// reaches the store and fails there, which is enough to show it passed the
+		// media type check.
+		response := send(t, muxFor(t, deadStore(t)), request{
+			user:        "golo",
+			contentType: "application/json; charset=utf-8",
+			body:        `{"id":"1"}`,
+		})
+
+		assert.NotEqual(t, http.StatusUnsupportedMediaType, response.Code, "a charset must not be rejected")
+	})
 }
 
-func TestMalformedJSONIsRejected(t *testing.T) {
-	response := send(t, muxFor(t, deadStore(t)), request{
-		user:        "golo",
-		contentType: "application/json",
-		body:        `not json`,
+func TestMalformedJSON(t *testing.T) {
+	t.Run("is rejected", func(t *testing.T) {
+		response := send(t, muxFor(t, deadStore(t)), request{
+			user:        "golo",
+			contentType: "application/json",
+			body:        `not json`,
+		})
+
+		assert.Equal(t, http.StatusBadRequest, response.Code)
+	})
+}
+
+func TestUnknownFields(t *testing.T) {
+	t.Run("are rejected", func(t *testing.T) {
+		response := send(t, muxFor(t, deadStore(t)), request{
+			user:        "golo",
+			contentType: "application/json",
+			// A misspelled field would otherwise turn into a zero value in silence.
+			body: `{"id":"1","txt":"typo"}`,
+		})
+
+		assert.Equal(t, http.StatusBadRequest, response.Code)
+		assert.Contains(t, response.Body.String(), "txt", "the answer should name the unknown field")
+	})
+}
+
+func TestCommand(t *testing.T) {
+	t.Run("that cannot be built is rejected", func(t *testing.T) {
+		response := send(t, muxFor(t, deadStore(t)), request{
+			user:        "golo",
+			contentType: "application/json",
+			body:        `{"text":"no id"}`,
+		})
+
+		assert.Equal(t, http.StatusBadRequest, response.Code)
+		assert.Contains(t, response.Body.String(), "id must not be empty")
+	})
+}
+
+func TestBody(t *testing.T) {
+	t.Run("over the limit is rejected", func(t *testing.T) {
+		padding := strings.Repeat("a", httpapi.MaxRequestBody)
+
+		response := send(t, muxFor(t, deadStore(t)), request{
+			user:        "golo",
+			contentType: "application/json",
+			body:        `{"id":"1","text":"` + padding + `"}`,
+		})
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, response.Code)
 	})
 
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("got %d: %s", response.Code, response.Body)
-	}
-}
+	t.Run("at the limit is read", func(t *testing.T) {
+		// Exactly at the limit the body is still read, so this fails later, at the
+		// dead store, rather than with 413.
+		prefix := `{"id":"1","text":"`
+		suffix := `"}`
+		padding := strings.Repeat("a", httpapi.MaxRequestBody-len(prefix)-len(suffix))
 
-func TestUnknownFieldsAreRejected(t *testing.T) {
-	response := send(t, muxFor(t, deadStore(t)), request{
-		user:        "golo",
-		contentType: "application/json",
-		// A misspelled field would otherwise turn into a zero value in silence.
-		body: `{"id":"1","txt":"typo"}`,
+		response := send(t, muxFor(t, deadStore(t)), request{
+			user:        "golo",
+			contentType: "application/json",
+			body:        prefix + padding + suffix,
+		})
+
+		assert.NotEqual(t, http.StatusRequestEntityTooLarge, response.Code, "a body exactly at the limit must still be read")
 	})
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("got %d: %s", response.Code, response.Body)
-	}
-	if !strings.Contains(response.Body.String(), "txt") {
-		t.Fatalf("the answer should name the unknown field: %s", response.Body)
-	}
 }
 
-func TestCommandThatCannotBeBuiltIsRejected(t *testing.T) {
-	response := send(t, muxFor(t, deadStore(t)), request{
-		user:        "golo",
-		contentType: "application/json",
-		body:        `{"text":"no id"}`,
+func TestUnreadableBody(t *testing.T) {
+	t.Run("is rejected", func(t *testing.T) {
+		httpRequest := httptest.NewRequest(http.MethodPost, "/note", failingReader{})
+		httpRequest.Header.Set("X-User", "golo")
+		httpRequest.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+
+		muxFor(t, deadStore(t)).ServeHTTP(recorder, httpRequest)
+
+		assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	})
-
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("got %d: %s", response.Code, response.Body)
-	}
-	if !strings.Contains(response.Body.String(), "id must not be empty") {
-		t.Fatalf("got %s", response.Body)
-	}
 }
 
-func TestBodyOverTheLimitIsRejected(t *testing.T) {
-	padding := strings.Repeat("a", httpapi.MaxRequestBody)
+func TestUnreachableStore(t *testing.T) {
+	t.Run("is an internal failure", func(t *testing.T) {
+		response := send(t, muxFor(t, deadStore(t)), request{
+			user:        "golo",
+			contentType: "application/json",
+			body:        `{"id":"1","text":"hello"}`,
+		})
 
-	response := send(t, muxFor(t, deadStore(t)), request{
-		user:        "golo",
-		contentType: "application/json",
-		body:        `{"id":"1","text":"` + padding + `"}`,
+		// Reading fails, which the kit reports as transient, so the caller is told
+		// to try again later.
+		assert.Equal(t, http.StatusServiceUnavailable, response.Code)
 	})
-
-	if response.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("got %d, want 413: %s", response.Code, response.Body)
-	}
-}
-
-func TestBodyAtTheLimitIsRead(t *testing.T) {
-	// Exactly at the limit the body is still read, so this fails later, at the
-	// dead store, rather than with 413.
-	prefix := `{"id":"1","text":"`
-	suffix := `"}`
-	padding := strings.Repeat("a", httpapi.MaxRequestBody-len(prefix)-len(suffix))
-
-	response := send(t, muxFor(t, deadStore(t)), request{
-		user:        "golo",
-		contentType: "application/json",
-		body:        prefix + padding + suffix,
-	})
-
-	if response.Code == http.StatusRequestEntityTooLarge {
-		t.Fatal("a body exactly at the limit must still be read")
-	}
-}
-
-func TestUnreadableBodyIsRejected(t *testing.T) {
-	httpRequest := httptest.NewRequest(http.MethodPost, "/note", failingReader{})
-	httpRequest.Header.Set("X-User", "golo")
-	httpRequest.Header.Set("Content-Type", "application/json")
-	recorder := httptest.NewRecorder()
-
-	muxFor(t, deadStore(t)).ServeHTTP(recorder, httpRequest)
-
-	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("got %d: %s", recorder.Code, recorder.Body)
-	}
-}
-
-func TestUnreachableStoreIsAnInternalFailure(t *testing.T) {
-	response := send(t, muxFor(t, deadStore(t)), request{
-		user:        "golo",
-		contentType: "application/json",
-		body:        `{"id":"1","text":"hello"}`,
-	})
-
-	// Reading fails, which the kit reports as transient, so the caller is told
-	// to try again later.
-	if response.Code != http.StatusServiceUnavailable {
-		t.Fatalf("got %d, want 503: %s", response.Code, response.Body)
-	}
 }
 
 type failingReader struct{}
@@ -436,67 +409,53 @@ func (r generatedRequest) ToCommand(u user) (note, error) {
 	return note{ID: "generated-" + u.UserID, Text: r.Text}, nil
 }
 
-func TestHandleGivesBackTheCommandItBuilt(t *testing.T) {
-	api := httpapi.NewAPI(deadStore(t), userFrom)
+func TestHandle(t *testing.T) {
+	t.Run("gives back the command it built", func(t *testing.T) {
+		api := httpapi.NewAPI(deadStore(t), userFrom)
 
-	request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"text":"hello"}`))
-	request.Header.Set("X-User", "golo")
-	request.Header.Set("Content-Type", "application/json")
+		request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"text":"hello"}`))
+		request.Header.Set("X-User", "golo")
+		request.Header.Set("Content-Type", "application/json")
 
-	handled, err := httpapi.Handle[generatedRequest](request, api, noteDecider())
+		handled, err := httpapi.Handle[generatedRequest](request, api, noteDecider())
 
-	// The store is unreachable, so this fails, and the command still comes
-	// back: a handler may want to say what it tried to do.
-	if err == nil {
-		t.Fatal("expected the store to be unreachable")
-	}
-	if handled.Command.ID != "generated-golo" {
-		t.Fatalf("got %q, want the id the handler made up", handled.Command.ID)
-	}
-	// Without this, the id would have to be dug back out of the subject of a
-	// written event, which does not exist when the write failed.
-	if handled.Command.Subject() != "/note/generated-golo" {
-		t.Fatalf("got %q", handled.Command.Subject())
-	}
+		// The store is unreachable, so this fails, and the command still comes
+		// back: a handler may want to say what it tried to do.
+		require.Error(t, err, "expected the store to be unreachable")
+		assert.Equal(t, "generated-golo", handled.Command.ID, "want the id the handler made up")
+		// Without this, the id would have to be dug back out of the subject of a
+		// written event, which does not exist when the write failed.
+		assert.Equal(t, "/note/generated-golo", handled.Command.Subject())
+	})
+
+	t.Run("reports a failure before a command exists", func(t *testing.T) {
+		api := httpapi.NewAPI(deadStore(t), userFrom)
+
+		request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"text":"x"}`))
+		request.Header.Set("Content-Type", "application/json")
+
+		handled, err := httpapi.Handle[generatedRequest](request, api, noteDecider())
+
+		assert.ErrorIs(t, err, httpapi.ErrUnauthorized)
+		assert.Empty(t, handled.Command.ID, "no command was built, so it has to be empty")
+	})
 }
 
-func TestHandleReportsAFailureBeforeACommandExists(t *testing.T) {
-	api := httpapi.NewAPI(deadStore(t), userFrom)
+func TestUserOf(t *testing.T) {
+	t.Run("determines the caller for your own handlers", func(t *testing.T) {
+		api := httpapi.NewAPI(deadStore(t), userFrom)
 
-	request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"text":"x"}`))
-	request.Header.Set("Content-Type", "application/json")
+		known := httptest.NewRequest(http.MethodGet, "/", nil)
+		known.Header.Set("X-User", "golo")
 
-	handled, err := httpapi.Handle[generatedRequest](request, api, noteDecider())
+		user, err := httpapi.UserOf(known, api)
+		require.NoError(t, err)
+		assert.Equal(t, "golo", user.UserID)
 
-	if !errors.Is(err, httpapi.ErrUnauthorized) {
-		t.Fatalf("got %v", err)
-	}
-	if handled.Command.ID != "" {
-		t.Fatalf("no command was built, so it has to be empty: %+v", handled.Command)
-	}
-}
+		// An unknown caller comes back as 401, exactly as on a wired route.
+		_, err = httpapi.UserOf(httptest.NewRequest(http.MethodGet, "/", nil), api)
 
-func TestUserOfDeterminesTheCallerForYourOwnHandlers(t *testing.T) {
-	api := httpapi.NewAPI(deadStore(t), userFrom)
-
-	known := httptest.NewRequest(http.MethodGet, "/", nil)
-	known.Header.Set("X-User", "golo")
-
-	user, err := httpapi.UserOf(known, api)
-	if err != nil {
-		t.Fatalf("failed to determine the user: %v", err)
-	}
-	if user.UserID != "golo" {
-		t.Errorf("got %q, want %q", user.UserID, "golo")
-	}
-
-	// An unknown caller comes back as 401, exactly as on a wired route.
-	_, err = httpapi.UserOf(httptest.NewRequest(http.MethodGet, "/", nil), api)
-
-	if !errors.Is(err, httpapi.ErrUnauthorized) {
-		t.Errorf("got %v, want %v", err, httpapi.ErrUnauthorized)
-	}
-	if got := httpapi.StatusFor(err); got != http.StatusUnauthorized {
-		t.Errorf("got status %d, want %d", got, http.StatusUnauthorized)
-	}
+		assert.ErrorIs(t, err, httpapi.ErrUnauthorized)
+		assert.Equal(t, http.StatusUnauthorized, httpapi.StatusFor(err))
+	})
 }

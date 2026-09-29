@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
 )
@@ -27,9 +29,8 @@ func noteView() *architecturekit.InMemoryView[string, noteItem] {
 func insertNote(t *testing.T, view *architecturekit.InMemoryView[string, noteItem], eventID string, note noteItem) {
 	t.Helper()
 
-	if err := view.Insert(context.Background(), eventID, note); err != nil {
-		t.Fatalf("failed to insert %+v: %v", note, err)
-	}
+	err := view.Insert(context.Background(), eventID, note)
+	require.NoError(t, err, "failed to insert %+v", note)
 }
 
 func countNotesIn(view *architecturekit.InMemoryView[string, noteItem]) httpapi.Answer[countNotes, int] {
@@ -77,234 +78,204 @@ func askNotes(mux *http.ServeMux, headers map[string]string) *httptest.ResponseR
 	return recorder
 }
 
-func TestAQueryWithoutAWantedRevisionAnswersAtOnce(t *testing.T) {
-	view := noteView()
-	insertNote(t, view, "1", noteItem{Text: "one"})
-	view.Seen("3")
+func TestAQuery(t *testing.T) {
+	t.Run("without a wanted revision answers at once", func(t *testing.T) {
+		view := noteView()
+		insertNote(t, view, "1", noteItem{Text: "one"})
+		view.Seen("3")
 
-	response := askNotes(servingNotes(t, view, time.Second), nil)
+		response := askNotes(servingNotes(t, view, time.Second), nil)
 
-	if response.Code != http.StatusOK {
-		t.Fatalf("got %d: %s", response.Code, response.Body)
-	}
+		assert.Equal(t, http.StatusOK, response.Code)
 
-	if got := response.Header().Get(httpapi.HeaderRevision); got != "3" {
-		t.Errorf("got revision %q, want %q", got, "3")
-	}
+		assert.Equal(t, "3", response.Header().Get(httpapi.HeaderRevision))
 
-	if got := response.Header().Get("ETag"); got == "" {
-		t.Error("no ETag")
-	}
+		assert.NotEmpty(t, response.Header().Get("ETag"))
+	})
+
+	t.Run("waits for the revision it was asked for", func(t *testing.T) {
+		view := noteView()
+		view.Seen("1")
+
+		// The revision arrives only after the request is already waiting.
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			insertNote(t, view, "2", noteItem{Text: "late"})
+			view.Seen("5")
+		}()
+
+		started := time.Now()
+		response := askNotes(servingNotes(t, view, 10*time.Second), map[string]string{
+			httpapi.HeaderWaitFor: "5",
+		})
+
+		assert.Equal(t, http.StatusOK, response.Code)
+
+		assert.GreaterOrEqual(t, time.Since(started), 100*time.Millisecond, "answered too early, so it cannot have waited")
+
+		assert.Equal(t, "5", response.Header().Get(httpapi.HeaderRevision))
+
+		// The whole point: the item written with that revision is in the answer.
+		assert.Equal(t, "1\n", response.Body.String(), "want the late item to be counted")
+	})
+
+	t.Run("answers with what it has when the wait runs out", func(t *testing.T) {
+		view := noteView()
+		insertNote(t, view, "3", noteItem{Text: "one"})
+		view.Seen("2")
+
+		response := askNotes(servingNotes(t, view, 50*time.Millisecond), map[string]string{
+			httpapi.HeaderWaitFor: "99",
+		})
+
+		// Running out of time is not an error: the caller gets the data and is
+		// told which revision it is looking at.
+		assert.Equal(t, http.StatusOK, response.Code)
+
+		assert.Equal(t, "2", response.Header().Get(httpapi.HeaderRevision))
+	})
 }
 
-func TestAQueryWaitsForTheRevisionItWasAskedFor(t *testing.T) {
-	view := noteView()
-	view.Seen("1")
+func TestAWantedRevision(t *testing.T) {
+	t.Run("that is not one is refused", func(t *testing.T) {
+		view := noteView()
+		view.Seen("1")
 
-	// The revision arrives only after the request is already waiting.
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		insertNote(t, view, "2", noteItem{Text: "late"})
+		response := askNotes(servingNotes(t, view, 10*time.Second), map[string]string{
+			httpapi.HeaderWaitFor: "soon",
+		})
+
+		assert.Equal(t, http.StatusBadRequest, response.Code)
+	})
+}
+
+func TestAKnownRevision(t *testing.T) {
+	t.Run("is answered with Not Modified", func(t *testing.T) {
+		view := noteView()
+		insertNote(t, view, "4", noteItem{Text: "one"})
+		view.Seen("4")
+
+		mux := servingNotes(t, view, time.Second)
+
+		first := askNotes(mux, nil)
+		tag := first.Header().Get("ETag")
+
+		second := askNotes(mux, map[string]string{"If-None-Match": tag})
+
+		require.Equal(t, http.StatusNotModified, second.Code)
+
+		assert.Empty(t, second.Body.String(), "304 carried a body")
+
+		// After something changes, the same tag no longer matches.
+		insertNote(t, view, "5", noteItem{Text: "two"})
 		view.Seen("5")
-	}()
 
-	started := time.Now()
-	response := askNotes(servingNotes(t, view, 10*time.Second), map[string]string{
-		httpapi.HeaderWaitFor: "5",
+		third := askNotes(mux, map[string]string{"If-None-Match": tag})
+
+		assert.Equal(t, http.StatusOK, third.Code)
 	})
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("got %d: %s", response.Code, response.Body)
-	}
-
-	if took := time.Since(started); took < 100*time.Millisecond {
-		t.Errorf("answered after %v, so it cannot have waited", took)
-	}
-
-	if got := response.Header().Get(httpapi.HeaderRevision); got != "5" {
-		t.Errorf("got revision %q, want %q", got, "5")
-	}
-
-	// The whole point: the item written with that revision is in the answer.
-	if got := response.Body.String(); got != "1\n" {
-		t.Errorf("got %q, want the late item to be counted", got)
-	}
 }
 
-func TestAQueryAnswersWithWhatItHasWhenTheWaitRunsOut(t *testing.T) {
-	view := noteView()
-	insertNote(t, view, "3", noteItem{Text: "one"})
-	view.Seen("2")
+func TestOneResourcesTag(t *testing.T) {
+	t.Run("does not match another", func(t *testing.T) {
+		// Every query over the same view shares a revision, so a tag that held
+		// nothing else would wrongly match across resources.
+		view := noteView()
+		view.Seen("4")
 
-	response := askNotes(servingNotes(t, view, 50*time.Millisecond), map[string]string{
-		httpapi.HeaderWaitFor: "99",
+		mux := http.NewServeMux()
+		api := httpapi.NewAPI(deadStore(t), userFrom)
+
+		httpapi.QueryRevisioned(api, mux, "GET /notes", view, allNotes, countNotesIn(view), time.Second)
+		httpapi.QueryRevisioned(api, mux, "GET /other", view, allNotes, countNotesIn(view), time.Second)
+
+		tag := askNotes(mux, nil).Header().Get("ETag")
+
+		request := httptest.NewRequest(http.MethodGet, "/other", nil)
+		request.Header.Set("X-User", "someone")
+		request.Header.Set("If-None-Match", tag)
+
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+
+		assert.Equal(t, http.StatusOK, response.Code, "the tag of /notes matched /other")
 	})
-
-	// Running out of time is not an error: the caller gets the data and is
-	// told which revision it is looking at.
-	if response.Code != http.StatusOK {
-		t.Fatalf("got %d: %s", response.Code, response.Body)
-	}
-
-	if got := response.Header().Get(httpapi.HeaderRevision); got != "2" {
-		t.Errorf("got revision %q, want %q", got, "2")
-	}
 }
 
-func TestAWantedRevisionThatIsNotOneIsRefused(t *testing.T) {
-	view := noteView()
-	view.Seen("1")
+func TestAView(t *testing.T) {
+	t.Run("that has seen nothing carries no tag", func(t *testing.T) {
+		view := noteView()
 
-	response := askNotes(servingNotes(t, view, 10*time.Second), map[string]string{
-		httpapi.HeaderWaitFor: "soon",
+		response := askNotes(servingNotes(t, view, time.Second), nil)
+
+		assert.Equal(t, http.StatusOK, response.Code)
+
+		assert.Empty(t, response.Header().Get("ETag"))
+		assert.Empty(t, response.Header().Get(httpapi.HeaderRevision))
 	})
-
-	if response.Code != http.StatusBadRequest {
-		t.Errorf("got %d, want %d", response.Code, http.StatusBadRequest)
-	}
 }
 
-func TestAKnownRevisionIsAnsweredWithNotModified(t *testing.T) {
-	view := noteView()
-	insertNote(t, view, "4", noteItem{Text: "one"})
-	view.Seen("4")
+func TestNobody(t *testing.T) {
+	t.Run("can make the server wait without being let in", func(t *testing.T) {
+		view := noteView()
+		view.Seen("1")
 
-	mux := servingNotes(t, view, time.Second)
+		// No X-User header, so the request never gets as far as waiting.
+		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request.Header.Set(httpapi.HeaderWaitFor, "99")
 
-	first := askNotes(mux, nil)
-	tag := first.Header().Get("ETag")
+		started := time.Now()
+		response := httptest.NewRecorder()
+		servingNotes(t, view, 10*time.Second).ServeHTTP(response, request)
 
-	second := askNotes(mux, map[string]string{"If-None-Match": tag})
+		assert.Equal(t, http.StatusUnauthorized, response.Code)
 
-	if second.Code != http.StatusNotModified {
-		t.Fatalf("got %d, want %d", second.Code, http.StatusNotModified)
-	}
-
-	if second.Body.Len() != 0 {
-		t.Errorf("304 carried a body: %q", second.Body.String())
-	}
-
-	// After something changes, the same tag no longer matches.
-	insertNote(t, view, "5", noteItem{Text: "two"})
-	view.Seen("5")
-
-	third := askNotes(mux, map[string]string{"If-None-Match": tag})
-
-	if third.Code != http.StatusOK {
-		t.Errorf("got %d, want %d", third.Code, http.StatusOK)
-	}
+		assert.LessOrEqual(t, time.Since(started), time.Second, "waited before refusing")
+	})
 }
 
-func TestOneResourcesTagDoesNotMatchAnother(t *testing.T) {
-	// Every query over the same view shares a revision, so a tag that held
-	// nothing else would wrongly match across resources.
-	view := noteView()
-	view.Seen("4")
+func TestAFailingQuery(t *testing.T) {
+	t.Run("carries no revision", func(t *testing.T) {
+		view := noteView()
+		view.Seen("4")
 
-	mux := http.NewServeMux()
-	api := httpapi.NewAPI(deadStore(t), userFrom)
+		mux := http.NewServeMux()
+		api := httpapi.NewAPI(deadStore(t), userFrom)
 
-	httpapi.QueryRevisioned(api, mux, "GET /notes", view, allNotes, countNotesIn(view), time.Second)
-	httpapi.QueryRevisioned(api, mux, "GET /other", view, allNotes, countNotesIn(view), time.Second)
+		failing := func(context.Context, countNotes) (int, error) {
+			return 0, architecturekit.NewDomainError("nothing to count")
+		}
 
-	tag := askNotes(mux, nil).Header().Get("ETag")
+		httpapi.QueryRevisioned(api, mux, "GET /notes", view, allNotes, failing, time.Second)
 
-	request := httptest.NewRequest(http.MethodGet, "/other", nil)
-	request.Header.Set("X-User", "someone")
-	request.Header.Set("If-None-Match", tag)
+		response := askNotes(mux, nil)
 
-	response := httptest.NewRecorder()
-	mux.ServeHTTP(response, request)
+		assert.Equal(t, http.StatusUnprocessableEntity, response.Code)
 
-	if response.Code != http.StatusOK {
-		t.Errorf("got %d, want %d: the tag of /notes matched /other", response.Code, http.StatusOK)
-	}
-}
-
-func TestAViewThatHasSeenNothingCarriesNoTag(t *testing.T) {
-	view := noteView()
-
-	response := askNotes(servingNotes(t, view, time.Second), nil)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("got %d", response.Code)
-	}
-
-	if got := response.Header().Get("ETag"); got != "" {
-		t.Errorf("got ETag %q, want none", got)
-	}
-	if got := response.Header().Get(httpapi.HeaderRevision); got != "" {
-		t.Errorf("got revision %q, want none", got)
-	}
-}
-
-func TestNobodyCanMakeTheServerWaitWithoutBeingLetIn(t *testing.T) {
-	view := noteView()
-	view.Seen("1")
-
-	// No X-User header, so the request never gets as far as waiting.
-	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
-	request.Header.Set(httpapi.HeaderWaitFor, "99")
-
-	started := time.Now()
-	response := httptest.NewRecorder()
-	servingNotes(t, view, 10*time.Second).ServeHTTP(response, request)
-
-	if response.Code != http.StatusUnauthorized {
-		t.Errorf("got %d, want %d", response.Code, http.StatusUnauthorized)
-	}
-
-	if took := time.Since(started); took > time.Second {
-		t.Errorf("waited %v before refusing", took)
-	}
-}
-
-func TestAFailingQueryCarriesNoRevision(t *testing.T) {
-	view := noteView()
-	view.Seen("4")
-
-	mux := http.NewServeMux()
-	api := httpapi.NewAPI(deadStore(t), userFrom)
-
-	failing := func(context.Context, countNotes) (int, error) {
-		return 0, architecturekit.NewDomainError("nothing to count")
-	}
-
-	httpapi.QueryRevisioned(api, mux, "GET /notes", view, allNotes, failing, time.Second)
-
-	response := askNotes(mux, nil)
-
-	if response.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("got %d", response.Code)
-	}
-
-	if got := response.Header().Get("ETag"); got != "" {
-		t.Errorf("a failed answer was tagged %q", got)
-	}
+		assert.Empty(t, response.Header().Get("ETag"), "a failed answer was tagged")
+	})
 }
 
 // --- the building blocks on their own ---
 
-func TestAwaitIgnoresARequestThatAsksForNothing(t *testing.T) {
-	view := noteView()
+func TestAwait(t *testing.T) {
+	t.Run("ignores a request that asks for nothing", func(t *testing.T) {
+		view := noteView()
 
-	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
 
-	if err := httpapi.Await(t.Context(), request, view, time.Millisecond); err != nil {
-		t.Errorf("got %v", err)
-	}
-}
+		assert.NoError(t, httpapi.Await(t.Context(), request, view, time.Millisecond))
+	})
 
-func TestAwaitPassesOnWhatTheViewReports(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
-	request.Header.Set(httpapi.HeaderWaitFor, "5")
+	t.Run("passes on what the view reports", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request.Header.Set(httpapi.HeaderWaitFor, "5")
 
-	// A view that refuses rather than waits.
-	err := httpapi.Await(t.Context(), request, refusingView{}, time.Second)
+		// A view that refuses rather than waits.
+		err := httpapi.Await(t.Context(), request, refusingView{}, time.Second)
 
-	if err == nil {
-		t.Error("waited without an error")
-	}
+		assert.Error(t, err, "waited without an error")
+	})
 }
 
 type refusingView struct{}
@@ -315,75 +286,65 @@ func (refusingView) WaitFor(context.Context, string) error {
 	return architecturekit.ErrNotARevision
 }
 
-// TestAnAnswerThatDependsOnMoreThanTheRevision covers the case the revision
-// alone cannot describe. An answer such as "everything due today" changes at
-// midnight although no event is written, so the revision stays put -- and a
-// tag built from it alone would tell the caller, wrongly, that nothing had
-// changed. That is exactly how an application can end up showing yesterday's
-// list until something unrelated happens.
-func TestAnAnswerThatDependsOnMoreThanTheRevision(t *testing.T) {
-	view := noteView()
-	view.Seen("7")
+// TestAnAnswer covers the case the revision alone cannot describe. An answer
+// such as "everything due today" changes at midnight although no event is
+// written, so the revision stays put -- and a tag built from it alone would
+// tell the caller, wrongly, that nothing had changed. That is exactly how an
+// application can end up showing yesterday's list until something unrelated
+// happens.
+func TestAnAnswer(t *testing.T) {
+	t.Run("that depends on more than the revision", func(t *testing.T) {
+		view := noteView()
+		view.Seen("7")
 
-	day := "2026-09-22"
+		day := "2026-09-22"
 
-	mux := http.NewServeMux()
-	api := httpapi.NewAPI(deadStore(t), userFrom)
+		mux := http.NewServeMux()
+		api := httpapi.NewAPI(deadStore(t), userFrom)
 
-	httpapi.QueryVarying(api, mux, "GET /notes", view, allNotes, countNotesIn(view),
-		time.Second, func(*http.Request) string { return day })
+		httpapi.QueryVarying(api, mux, "GET /notes", view, allNotes, countNotesIn(view),
+			time.Second, func(*http.Request) string { return day })
 
-	first := askNotes(mux, nil)
-	if first.Code != http.StatusOK {
-		t.Fatalf("got %d, want 200", first.Code)
-	}
+		first := askNotes(mux, nil)
+		require.Equal(t, http.StatusOK, first.Code)
 
-	tag := first.Header().Get("ETag")
-	if tag == "" {
-		t.Fatal("the answer carries no entity tag")
-	}
+		tag := first.Header().Get("ETag")
+		require.NotEmpty(t, tag, "the answer carries no entity tag")
 
-	// A browser left to itself decides how long an answer stays good and does
-	// not ask again until it has.
-	if cache := first.Header().Get("Cache-Control"); cache != "no-cache" {
-		t.Errorf("got Cache-Control %q, want no-cache", cache)
-	}
+		// A browser left to itself decides how long an answer stays good and does
+		// not ask again until it has.
+		assert.Equal(t, "no-cache", first.Header().Get("Cache-Control"))
 
-	// Same revision, same day: nothing has changed, and saying so is the
-	// whole point of the tag.
-	again := askNotes(mux, map[string]string{"If-None-Match": tag})
-	if again.Code != http.StatusNotModified {
-		t.Errorf("got %d for an unchanged answer, want 304", again.Code)
-	}
+		// Same revision, same day: nothing has changed, and saying so is the
+		// whole point of the tag.
+		again := askNotes(mux, map[string]string{"If-None-Match": tag})
+		assert.Equal(t, http.StatusNotModified, again.Code, "the answer has not changed")
 
-	// Same revision, next day: the answer has changed even though no event
-	// was written.
-	day = "2026-09-23"
+		// Same revision, next day: the answer has changed even though no event
+		// was written.
+		day = "2026-09-23"
 
-	tomorrow := askNotes(mux, map[string]string{"If-None-Match": tag})
-	if tomorrow.Code != http.StatusOK {
-		t.Errorf("got %d after the day turned over, want 200", tomorrow.Code)
-	}
+		tomorrow := askNotes(mux, map[string]string{"If-None-Match": tag})
+		assert.Equal(t, http.StatusOK, tomorrow.Code, "the day turned over")
 
-	if moved := tomorrow.Header().Get("ETag"); moved == tag {
-		t.Error("the tag is the same on the next day, so the caller keeps yesterday's answer")
-	}
+		assert.NotEqual(t, tag, tomorrow.Header().Get("ETag"), "the tag is the same on the next day, so the caller keeps yesterday's answer")
+	})
 }
 
-// TestQueryRevisionedIsQueryVaryingWithoutAVariance keeps the plain case
-// honest: an answer that follows from the read model alone needs nothing
-// extra, and its tag still holds across requests.
-func TestQueryRevisionedIsQueryVaryingWithoutAVariance(t *testing.T) {
-	view := noteView()
-	view.Seen("3")
+// TestQueryRevisioned keeps the plain case honest: an answer that follows
+// from the read model alone needs nothing extra, and its tag still holds
+// across requests.
+func TestQueryRevisioned(t *testing.T) {
+	t.Run("is QueryVarying without a variance", func(t *testing.T) {
+		view := noteView()
+		view.Seen("3")
 
-	mux := servingNotes(t, view, time.Second)
+		mux := servingNotes(t, view, time.Second)
 
-	first := askNotes(mux, nil)
-	tag := first.Header().Get("ETag")
+		first := askNotes(mux, nil)
+		tag := first.Header().Get("ETag")
 
-	again := askNotes(mux, map[string]string{"If-None-Match": tag})
-	if again.Code != http.StatusNotModified {
-		t.Errorf("got %d, want 304 for an unchanged answer", again.Code)
-	}
+		again := askNotes(mux, map[string]string{"If-None-Match": tag})
+		assert.Equal(t, http.StatusNotModified, again.Code, "the answer has not changed")
+	})
 }
