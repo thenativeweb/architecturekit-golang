@@ -3,9 +3,10 @@ package architecturekit_test
 import (
 	"slices"
 	"strconv"
-	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
@@ -31,162 +32,117 @@ func tallyState() *architecturekit.State[tally] {
 		})
 }
 
-func TestStepWalksTheSameStatesAsReplay(t *testing.T) {
-	history := []architecturekit.Event{incremented{By: 3}, incremented{By: 4}, reset{}, incremented{By: 2}}
-	want := []int{3, 7, 0, 2}
+func TestStep(t *testing.T) {
+	t.Run("walks the same states as Replay", func(t *testing.T) {
+		history := []architecturekit.Event{incremented{By: 3}, incremented{By: 4}, reset{}, incremented{By: 2}}
+		want := []int{3, 7, 0, 2}
 
-	current, err := architecturekit.Replay(counterState())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		current, err := architecturekit.Replay(counterState())
+		require.NoError(t, err)
 
-	for i, event := range history {
-		current, err = architecturekit.Step(counterState(), current, event)
-		if err != nil {
-			t.Fatalf("step %d: %v", i, err)
+		for i, event := range history {
+			current, err = architecturekit.Step(counterState(), current, event)
+			require.NoError(t, err, "step %d", i)
+			assert.Equal(t, want[i], current.Total, "step %d", i)
+
+			replayed, err := architecturekit.Replay(counterState(), history[:i+1]...)
+			require.NoError(t, err, "replay %d", i)
+			assert.Equal(t, replayed, current, "step %d walks another state than Replay", i)
 		}
-		if current.Total != want[i] {
-			t.Fatalf("step %d: got %d, want %d", i, current.Total, want[i])
-		}
-
-		replayed, err := architecturekit.Replay(counterState(), history[:i+1]...)
-		if err != nil {
-			t.Fatalf("replay %d: %v", i, err)
-		}
-		if current != replayed {
-			t.Fatalf("step %d: got %+v, but Replay gives %+v", i, current, replayed)
-		}
-	}
-}
-
-func TestStepStoredRunsTheUpcasters(t *testing.T) {
-	history := []eventsourcingdb.Event{
-		stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
-		stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
-		stored("io.thenativeweb.test.credited.v3", `{"amount":1,"currency":"USD"}`),
-	}
-
-	var current ledger
-	for i, event := range history {
-		var err error
-		current, err = architecturekit.StepStored(ledgerState(), current, event)
-		if err != nil {
-			t.Fatalf("step %d: %v", i, err)
-		}
-
-		replayed, err := architecturekit.ReplayStored(ledgerState(), history[:i+1]...)
-		if err != nil {
-			t.Fatalf("replay %d: %v", i, err)
-		}
-		if current != replayed {
-			t.Fatalf("step %d: got %+v, but ReplayStored gives %+v", i, current, replayed)
-		}
-	}
-
-	// The v1 event went through both upcasters, which only the second one
-	// turns into an upper case currency.
-	if current.Total != 16 || current.Currency != "USD" {
-		t.Fatalf("got %+v", current)
-	}
-}
-
-func TestStepStoredAppliesAllEventsAnUpcasterSplitsOneInto(t *testing.T) {
-	state := architecturekit.NewState(ledger{})
-	state.Evolve(func(current ledger, event credited) ledger {
-		current.Total += event.Amount
-		current.Entries++
-		return current
-	})
-	state.UpcastWith(architecturekit.NewUpcasters().
-		Upcast("io.thenativeweb.test.credited.batch", splitIntoTwo))
-
-	current, err := architecturekit.StepStored(state, ledger{Total: 1, Entries: 1},
-		stored("io.thenativeweb.test.credited.batch", `{}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if current.Total != 8 || current.Entries != 3 {
-		t.Fatalf("got total %d in %d entries, want 8 in 3", current.Total, current.Entries)
-	}
-}
-
-func TestStepLeavesTheGivenStateUnchanged(t *testing.T) {
-	state := tallyState().Clone(func(current tally) tally {
-		return tally{Entries: slices.Clone(current.Entries)}
 	})
 
-	before := tally{Entries: []string{"3", "4"}}
+	t.Run("leaves the given state unchanged", func(t *testing.T) {
+		state := tallyState().Clone(func(current tally) tally {
+			return tally{Entries: slices.Clone(current.Entries)}
+		})
 
-	after, err := architecturekit.Step(state, before, reset{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		before := tally{Entries: []string{"3", "4"}}
 
-	if !slices.Equal(after.Entries, []string{"0", "0"}) {
-		t.Fatalf("got %v", after.Entries)
-	}
-	if !slices.Equal(before.Entries, []string{"3", "4"}) {
-		t.Fatalf("the given state changed to %v", before.Entries)
-	}
+		after, err := architecturekit.Step(state, before, reset{})
+		require.NoError(t, err)
 
-	afterStored, err := architecturekit.StepStored(state, before,
-		stored((reset{}).EventType(), `{}`))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !slices.Equal(afterStored.Entries, []string{"0", "0"}) {
-		t.Fatalf("got %v", afterStored.Entries)
-	}
-	if !slices.Equal(before.Entries, []string{"3", "4"}) {
-		t.Fatalf("the given state changed to %v", before.Entries)
-	}
+		assert.Equal(t, []string{"0", "0"}, after.Entries)
+		assert.Equal(t, []string{"3", "4"}, before.Entries, "the given state changed")
+
+		afterStored, err := architecturekit.StepStored(state, before,
+			stored((reset{}).EventType(), `{}`))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"0", "0"}, afterStored.Entries)
+		assert.Equal(t, []string{"3", "4"}, before.Entries, "the given state changed")
+	})
+
+	t.Run("refuses a state that it cannot copy", func(t *testing.T) {
+		before := tally{Entries: []string{"3", "4"}}
+
+		_, err := architecturekit.Step(tallyState(), before, reset{})
+		require.ErrorIs(t, err, architecturekit.ErrPermanent, "a state without Clone is refused permanently")
+		assert.ErrorContains(t, err, "Clone", "the error should point to Clone")
+
+		_, err = architecturekit.StepStored(tallyState(), before, stored((reset{}).EventType(), `{}`))
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a state without Clone is refused permanently")
+
+		assert.Equal(t, []string{"3", "4"}, before.Entries, "the given state changed")
+	})
+
+	t.Run("returns the given state on failure", func(t *testing.T) {
+		before := counter{Total: 5}
+
+		current, err := architecturekit.Step(counterState(), before, annotated{Note: "unexpected"})
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "an event without rule is permanent")
+		assert.Equal(t, before, current)
+
+		current, err = architecturekit.StepStored(counterState(), before,
+			stored("io.thenativeweb.test.unheard-of", `{}`))
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "an event without rule is permanent")
+		assert.Equal(t, before, current)
+
+		_, err = architecturekit.StepStored(ledgerState(), ledger{},
+			stored("io.thenativeweb.test.credited.v3", `{"amount":"not a number"}`))
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, "decoding")
+	})
 }
 
-func TestStepRefusesAStateThatItCannotCopy(t *testing.T) {
-	before := tally{Entries: []string{"3", "4"}}
+func TestStepStored(t *testing.T) {
+	t.Run("runs the upcasters", func(t *testing.T) {
+		history := []eventsourcingdb.Event{
+			stored("io.thenativeweb.test.credited.v1", `{"amount":10}`),
+			stored("io.thenativeweb.test.credited.v2", `{"amount":5,"currency":"chf"}`),
+			stored("io.thenativeweb.test.credited.v3", `{"amount":1,"currency":"USD"}`),
+		}
 
-	_, err := architecturekit.Step(tallyState(), before, reset{})
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("a state without Clone is refused permanently, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "Clone") {
-		t.Fatalf("error should point to Clone, got %q", err.Error())
-	}
+		var current ledger
+		for i, event := range history {
+			var err error
+			current, err = architecturekit.StepStored(ledgerState(), current, event)
+			require.NoError(t, err, "step %d", i)
 
-	_, err = architecturekit.StepStored(tallyState(), before, stored((reset{}).EventType(), `{}`))
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("a state without Clone is refused permanently, got %v", err)
-	}
+			replayed, err := architecturekit.ReplayStored(ledgerState(), history[:i+1]...)
+			require.NoError(t, err, "replay %d", i)
+			assert.Equal(t, replayed, current, "step %d walks another state than ReplayStored", i)
+		}
 
-	if !slices.Equal(before.Entries, []string{"3", "4"}) {
-		t.Fatalf("the given state changed to %v", before.Entries)
-	}
-}
+		// The v1 event went through both upcasters, which only the second one
+		// turns into an upper case currency.
+		assert.Equal(t, 16, current.Total)
+		assert.Equal(t, "USD", current.Currency)
+	})
 
-func TestStepReturnsTheGivenStateOnFailure(t *testing.T) {
-	before := counter{Total: 5}
+	t.Run("applies all events an upcaster splits one into", func(t *testing.T) {
+		state := architecturekit.NewState(ledger{})
+		state.Evolve(func(current ledger, event credited) ledger {
+			current.Total += event.Amount
+			current.Entries++
+			return current
+		})
+		state.UpcastWith(architecturekit.NewUpcasters().
+			Upcast("io.thenativeweb.test.credited.batch", splitIntoTwo))
 
-	current, err := architecturekit.Step(counterState(), before, annotated{Note: "unexpected"})
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("an event without rule is permanent, got %v", err)
-	}
-	if current != before {
-		t.Fatalf("got %+v, want %+v", current, before)
-	}
+		current, err := architecturekit.StepStored(state, ledger{Total: 1, Entries: 1},
+			stored("io.thenativeweb.test.credited.batch", `{}`))
+		require.NoError(t, err)
 
-	current, err = architecturekit.StepStored(counterState(), before,
-		stored("io.thenativeweb.test.unheard-of", `{}`))
-	if !errorsIs(err, architecturekit.ErrPermanent) {
-		t.Fatalf("an event without rule is permanent, got %v", err)
-	}
-	if current != before {
-		t.Fatalf("got %+v, want %+v", current, before)
-	}
-
-	_, err = architecturekit.StepStored(ledgerState(), ledger{},
-		stored("io.thenativeweb.test.credited.v3", `{"amount":"not a number"}`))
-	if !errorsIs(err, architecturekit.ErrPermanent) || !strings.Contains(err.Error(), "decoding") {
-		t.Fatalf("got %v", err)
-	}
+		assert.Equal(t, 8, current.Total)
+		assert.Equal(t, 3, current.Entries)
+	})
 }
