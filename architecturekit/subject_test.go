@@ -1,6 +1,7 @@
 package architecturekit_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
@@ -102,6 +103,34 @@ func TestSubjectSchemePanicsOnBadValues(t *testing.T) {
 			}()
 			scheme.Build(values...)
 		}()
+	}
+}
+
+func TestSubjectSchemeChecksValues(t *testing.T) {
+	scheme := architecturekit.NewSubjectScheme("/workshop/{workshop}")
+
+	if err := scheme.Check("42"); err != nil {
+		t.Fatalf("values that fit should pass, got %v", err)
+	}
+
+	for _, values := range [][]string{
+		{},             // too few
+		{"a", "b"},     // too many
+		{""},           // empty
+		{"with/slash"}, // contains a slash
+	} {
+		if err := scheme.Check(values...); err == nil {
+			t.Fatalf("values %v should not pass", values)
+		}
+	}
+}
+
+func TestSubjectSchemeNamesThePlaceholderOfABadValue(t *testing.T) {
+	scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
+
+	err := scheme.Check("acme", "")
+	if err == nil || !strings.Contains(err.Error(), `"workshop"`) {
+		t.Fatalf("got %v", err)
 	}
 }
 
