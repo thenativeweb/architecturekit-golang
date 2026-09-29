@@ -2,11 +2,12 @@ package architecturekit_test
 
 import (
 	"context"
-	"errors"
 	"slices"
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 )
 
@@ -62,181 +63,160 @@ func load[TState any](t *testing.T, store *architecturekit.Store, state *archite
 	t.Helper()
 
 	current, err := architecturekit.Load(context.Background(), store, state, subject)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
 	return current
 }
 
-func TestLoadReadsTheStateOfASubject(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
+func TestLoad(t *testing.T) {
+	t.Run("reads the state of a subject", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
 
-	writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
 
-	current := load(t, store, counterState(), subject)
-	if current.Total != 7 {
-		t.Fatalf("got %d, want 7", current.Total)
-	}
+		current := load(t, store, counterState(), subject)
+		assert.Equal(t, 7, current.Total)
+	})
 }
 
-func TestLoadWithoutStateCacheReadsAllEventsEveryTime(t *testing.T) {
-	store := requireStore(t)
-	subject := subjectFor(t)
+func TestLoadWithoutStateCache(t *testing.T) {
+	t.Run("reads all events every time", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
 
-	var evolved atomic.Int64
-	state := countingState(&evolved)
+		var evolved atomic.Int64
+		state := countingState(&evolved)
 
-	writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
 
-	load(t, store, state, subject)
-	load(t, store, state, subject)
+		load(t, store, state, subject)
+		load(t, store, state, subject)
 
-	if evolved.Load() != 4 {
-		t.Fatalf("evolved %d events, want 4", evolved.Load())
-	}
+		assert.Equal(t, int64(4), evolved.Load())
+	})
 }
 
-func TestLoadWithStateCacheReadsOnlyTheEventsWrittenSince(t *testing.T) {
-	store := cachedStore(t, 10)
-	subject := subjectFor(t)
+func TestLoadWithStateCache(t *testing.T) {
+	t.Run("reads only the events written since", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
 
-	var evolved atomic.Int64
-	state := countingState(&evolved)
+		var evolved atomic.Int64
+		state := countingState(&evolved)
 
-	writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
-	load(t, store, state, subject)
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+		load(t, store, state, subject)
 
-	// These events are written past the store, as another process would.
-	writeRaw(t, subject, incremented{By: 5})
-	current := load(t, store, state, subject)
+		// These events are written past the store, as another process would.
+		writeRaw(t, subject, incremented{By: 5})
+		current := load(t, store, state, subject)
 
-	if current.Total != 12 {
-		t.Fatalf("got %d, want 12", current.Total)
-	}
-	if evolved.Load() != 3 {
-		t.Fatalf("evolved %d events, want 3", evolved.Load())
-	}
+		assert.Equal(t, 12, current.Total)
+		assert.Equal(t, int64(3), evolved.Load())
+	})
+
+	t.Run("skips a state with references and no clone function", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
+
+		var evolved atomic.Int64
+		state := historyState(&evolved)
+
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+
+		load(t, store, state, subject)
+		load(t, store, state, subject)
+
+		assert.Equal(t, int64(4), evolved.Load(), "the state must not be cached")
+	})
+
+	t.Run("caches a state with a clone function", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
+
+		var evolved atomic.Int64
+		state := historyState(&evolved).Clone(cloneHistory)
+
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+		load(t, store, state, subject)
+
+		writeRaw(t, subject, incremented{By: 5})
+		current := load(t, store, state, subject)
+
+		assert.Equal(t, []int{3, 4, 5}, current.Values)
+		assert.Equal(t, int64(3), evolved.Load())
+	})
+
+	t.Run("returns a copy of the cached state", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
+
+		var evolved atomic.Int64
+		state := historyState(&evolved).Clone(cloneHistory)
+
+		writeRaw(t, subject, incremented{By: 3})
+
+		first := load(t, store, state, subject)
+		first.Values[0] = 999
+
+		second := load(t, store, state, subject)
+		assert.Equal(t, 3, second.Values[0], "changing a loaded state must not change the cache")
+	})
+
+	t.Run("reads an evicted subject again", func(t *testing.T) {
+		store := cachedStore(t, 1)
+		first := subjectFor(t) + "/first"
+		second := subjectFor(t) + "/second"
+
+		var evolved atomic.Int64
+		state := countingState(&evolved)
+
+		writeRaw(t, first, incremented{By: 1}, incremented{By: 2})
+		writeRaw(t, second, incremented{By: 3})
+
+		load(t, store, state, first)
+		load(t, store, state, second)
+		current := load(t, store, state, first)
+
+		assert.Equal(t, 3, current.Total)
+		assert.Equal(t, int64(5), evolved.Load(), "the first subject was evicted")
+	})
+
+	t.Run("works with FromLatest", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
+
+		var evolved atomic.Int64
+		state := countingState(&evolved).FromLatest[reset]()
+
+		writeRaw(t, subject, incremented{By: 10}, reset{}, incremented{By: 2})
+		load(t, store, state, subject)
+
+		writeRaw(t, subject, incremented{By: 1})
+		current := load(t, store, state, subject)
+
+		assert.Equal(t, 3, current.Total)
+		assert.Equal(t, int64(3), evolved.Load(), "the reset and one increment first, then one more")
+	})
 }
 
-func TestExecuteWithStateCacheSeesItsOwnWrites(t *testing.T) {
-	store := cachedStore(t, 10)
-	subject := subjectFor(t)
-	ctx := context.Background()
+func TestExecuteWithStateCache(t *testing.T) {
+	t.Run("sees its own writes", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
+		ctx := context.Background()
 
-	for range 2 {
-		if _, err := architecturekit.Execute(ctx, store, counterDecider(),
-			increment{subject: subject, By: 2, Limit: 5}); err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		for range 2 {
+			_, err := architecturekit.Execute(ctx, store, counterDecider(),
+				increment{subject: subject, By: 2, Limit: 5})
+			require.NoError(t, err)
 		}
-	}
 
-	// The total is 4, so another 2 exceed the limit. A cache that missed the
-	// events it did not read itself would still see 0 or 2.
-	_, err := architecturekit.Execute(ctx, store, counterDecider(),
-		increment{subject: subject, By: 2, Limit: 5})
-	if !errors.Is(err, architecturekit.ErrDomain) {
-		t.Fatalf("expected the limit to be exceeded, got %v", err)
-	}
-}
-
-func TestStateCacheSkipsAStateWithReferencesAndNoCloneFunction(t *testing.T) {
-	store := cachedStore(t, 10)
-	subject := subjectFor(t)
-
-	var evolved atomic.Int64
-	state := historyState(&evolved)
-
-	writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
-
-	load(t, store, state, subject)
-	load(t, store, state, subject)
-
-	if evolved.Load() != 4 {
-		t.Fatalf("evolved %d events, want 4, since the state must not be cached", evolved.Load())
-	}
-}
-
-func TestStateCacheCachesAStateWithACloneFunction(t *testing.T) {
-	store := cachedStore(t, 10)
-	subject := subjectFor(t)
-
-	var evolved atomic.Int64
-	state := historyState(&evolved).Clone(cloneHistory)
-
-	writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
-	load(t, store, state, subject)
-
-	writeRaw(t, subject, incremented{By: 5})
-	current := load(t, store, state, subject)
-
-	if !slices.Equal(current.Values, []int{3, 4, 5}) {
-		t.Fatalf("got %v, want [3 4 5]", current.Values)
-	}
-	if evolved.Load() != 3 {
-		t.Fatalf("evolved %d events, want 3", evolved.Load())
-	}
-}
-
-func TestLoadWithStateCacheReturnsACopyOfTheCachedState(t *testing.T) {
-	store := cachedStore(t, 10)
-	subject := subjectFor(t)
-
-	var evolved atomic.Int64
-	state := historyState(&evolved).Clone(cloneHistory)
-
-	writeRaw(t, subject, incremented{By: 3})
-
-	first := load(t, store, state, subject)
-	first.Values[0] = 999
-
-	second := load(t, store, state, subject)
-	if second.Values[0] != 3 {
-		t.Fatalf("got %d, want 3, since changing a loaded state must not change the cache", second.Values[0])
-	}
-}
-
-func TestStateCacheReadsAnEvictedSubjectAgain(t *testing.T) {
-	store := cachedStore(t, 1)
-	first := subjectFor(t) + "/first"
-	second := subjectFor(t) + "/second"
-
-	var evolved atomic.Int64
-	state := countingState(&evolved)
-
-	writeRaw(t, first, incremented{By: 1}, incremented{By: 2})
-	writeRaw(t, second, incremented{By: 3})
-
-	load(t, store, state, first)
-	load(t, store, state, second)
-	current := load(t, store, state, first)
-
-	if current.Total != 3 {
-		t.Fatalf("got %d, want 3", current.Total)
-	}
-	if evolved.Load() != 5 {
-		t.Fatalf("evolved %d events, want 5, since the first subject was evicted", evolved.Load())
-	}
-}
-
-func TestStateCacheWorksWithFromLatest(t *testing.T) {
-	store := cachedStore(t, 10)
-	subject := subjectFor(t)
-
-	var evolved atomic.Int64
-	state := countingState(&evolved).FromLatest[reset]()
-
-	writeRaw(t, subject, incremented{By: 10}, reset{}, incremented{By: 2})
-	load(t, store, state, subject)
-
-	writeRaw(t, subject, incremented{By: 1})
-	current := load(t, store, state, subject)
-
-	if current.Total != 3 {
-		t.Fatalf("got %d, want 3", current.Total)
-	}
-	if evolved.Load() != 3 {
-		t.Fatalf("evolved %d events, want 3: the reset and one increment first, then one more", evolved.Load())
-	}
+		// The total is 4, so another 2 exceed the limit. A cache that missed the
+		// events it did not read itself would still see 0 or 2.
+		_, err := architecturekit.Execute(ctx, store, counterDecider(),
+			increment{subject: subject, By: 2, Limit: 5})
+		assert.ErrorIs(t, err, architecturekit.ErrDomain, "expected the limit to be exceeded")
+	})
 }

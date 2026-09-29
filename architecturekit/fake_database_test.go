@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
@@ -116,14 +117,10 @@ func newFakeDatabase(t *testing.T, database *fakeDatabase) *eventsourcingdb.Clie
 	t.Cleanup(server.Close)
 
 	serverURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	client, err := eventsourcingdb.NewClient(serverURL, "secret")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	return client
 }

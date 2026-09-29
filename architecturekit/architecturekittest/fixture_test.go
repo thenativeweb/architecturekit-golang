@@ -3,9 +3,10 @@ package architecturekittest_test
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -33,20 +34,14 @@ func (s *spy) firstFailure() string {
 func (s *spy) expectFailure(t *testing.T, containing string) {
 	t.Helper()
 
-	if len(s.failures) == 0 {
-		t.Fatalf("expected a failure containing %q, got none", containing)
-	}
-	if !strings.Contains(s.firstFailure(), containing) {
-		t.Fatalf("expected a failure containing %q, got %q", containing, s.firstFailure())
-	}
+	require.NotEmpty(t, s.failures, "expected a failure containing %q", containing)
+	require.Contains(t, s.firstFailure(), containing)
 }
 
 func (s *spy) expectNoFailure(t *testing.T) {
 	t.Helper()
 
-	if len(s.failures) > 0 {
-		t.Fatalf("expected no failure, got %q", s.firstFailure())
-	}
+	require.Empty(t, s.failures)
 }
 
 // --- test domain ---
@@ -176,381 +171,395 @@ func emitDecider() architecturekit.Decider[emit, account] {
 	}
 }
 
-// --- the happy paths ---
+// --- the happy paths and the fixture's own failure paths ---
 
-func TestGivenWhenThenEvents(t *testing.T) {
-	architecturekittest.Given(t, decider()).
-		When(open{Owner: "golo"}).
-		ThenEvents(opened{Owner: "golo"})
+func TestGiven(t *testing.T) {
+	t.Run("when then events", func(t *testing.T) {
+		architecturekittest.Given(t, decider()).
+			When(open{Owner: "golo"}).
+			ThenEvents(opened{Owner: "golo"})
+	})
+
+	t.Run("fails on event without rule", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider(), unheardOf{})
+
+		recorder.expectFailure(t, "given:")
+	})
 }
 
-func TestHistoryIsFoldedInOrder(t *testing.T) {
-	architecturekittest.Given(t, decider(), opened{Owner: "golo"}, closed{}).
-		When(open{Owner: "jane"}).
-		ThenEvents(opened{Owner: "jane"})
+func TestHistory(t *testing.T) {
+	t.Run("is folded in order", func(t *testing.T) {
+		architecturekittest.Given(t, decider(), opened{Owner: "golo"}, closed{}).
+			When(open{Owner: "jane"}).
+			ThenEvents(opened{Owner: "jane"})
+	})
 }
 
-func TestThenNothingWhenThereIsNothingToDo(t *testing.T) {
-	architecturekittest.Given(t, decider()).
-		When(open{Owner: "nobody"}).
-		ThenNothing()
+func TestThenNothing(t *testing.T) {
+	t.Run("when there is nothing to do", func(t *testing.T) {
+		architecturekittest.Given(t, decider()).
+			When(open{Owner: "nobody"}).
+			ThenNothing()
+	})
+
+	t.Run("fails when something happened", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "golo"}).
+			ThenNothing()
+
+		recorder.expectFailure(t, "1 event(s)")
+	})
+
+	t.Run("fails on an error", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{}).
+			ThenNothing()
+
+		recorder.expectFailure(t, "no owner given")
+	})
 }
 
-func TestThenRejectedAndThenFailedDescribeTheSameRejection(t *testing.T) {
-	architecturekittest.Given(t, decider(), opened{Owner: "golo"}).
-		When(open{Owner: "jane"}).
-		ThenRejected("account is already open").
-		ThenFailed(architecturekit.ErrDomain)
+func TestThenRejected(t *testing.T) {
+	t.Run("and ThenFailed describe the same rejection", func(t *testing.T) {
+		architecturekittest.Given(t, decider(), opened{Owner: "golo"}).
+			When(open{Owner: "jane"}).
+			ThenRejected("account is already open").
+			ThenFailed(architecturekit.ErrDomain)
+	})
+
+	t.Run("fails when events were produced", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "golo"}).
+			ThenRejected("account is already open")
+
+		recorder.expectFailure(t, "1 event(s)")
+	})
+
+	t.Run("fails on wrong message", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider(), opened{Owner: "golo"}).
+			When(open{Owner: "jane"}).
+			ThenRejected("something else")
+
+		recorder.expectFailure(t, "something else")
+	})
 }
 
-func TestThenFailedTellsCategoriesApart(t *testing.T) {
-	architecturekittest.Given(t, decider()).
-		When(open{}).
-		ThenFailed(architecturekit.ErrPermanent)
+func TestThenFailed(t *testing.T) {
+	t.Run("tells categories apart", func(t *testing.T) {
+		architecturekittest.Given(t, decider()).
+			When(open{}).
+			ThenFailed(architecturekit.ErrPermanent)
+	})
+
+	t.Run("fails when nothing failed", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "golo"}).
+			ThenFailed(architecturekit.ErrDomain)
+
+		recorder.expectFailure(t, "1 event(s)")
+	})
+
+	t.Run("fails on the wrong category", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider(), opened{Owner: "golo"}).
+			When(open{Owner: "jane"}).
+			ThenFailed(architecturekit.ErrTransient)
+
+		recorder.expectFailure(t, "category")
+	})
 }
 
-func TestThenStateChecksWhatWasDecidedOn(t *testing.T) {
-	checked := false
+func TestThenState(t *testing.T) {
+	t.Run("checks what was decided on", func(t *testing.T) {
+		checked := false
 
-	architecturekittest.Given(t, decider(), opened{Owner: "golo"}).
-		When(open{Owner: "jane"}).
-		ThenState(func(state account) {
-			checked = true
-			if !state.IsOpen || state.Owner != "golo" {
-				t.Fatalf("got %+v", state)
-			}
+		architecturekittest.Given(t, decider(), opened{Owner: "golo"}).
+			When(open{Owner: "jane"}).
+			ThenState(func(state account) {
+				checked = true
+				assert.Equal(t, account{IsOpen: true, Owner: "golo"}, state)
+			})
+
+		assert.True(t, checked, "ThenState did not run its check")
+	})
+}
+
+func TestGivenStored(t *testing.T) {
+	t.Run("runs the upcasters", func(t *testing.T) {
+		// The old type has no Go struct any more, so only the stored shape can
+		// carry it. This is exactly what typed events cannot express.
+		old := eventsourcingdb.Event{
+			Subject: "/account/1",
+			Type:    "test.account.opened.v1",
+			ID:      "0",
+			Data:    []byte(`{"whatever":true}`),
+		}
+
+		architecturekittest.GivenStored(t, decider(), old).
+			When(open{Owner: "jane"}).
+			ThenState(func(state account) {
+				assert.Equal(t, "from the old shape", state.Owner, "the upcaster did not run")
+			}).
+			ThenRejected("account is already open")
+	})
+
+	t.Run("fails on event without rule", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.GivenStored(recorder, decider(), eventsourcingdb.Event{
+			Subject: "/account/1",
+			Type:    "test.account.unheardOf",
+			Data:    []byte(`{}`),
 		})
 
-	if !checked {
-		t.Fatal("ThenState did not run its check")
-	}
-}
-
-func TestGivenStoredRunsTheUpcasters(t *testing.T) {
-	// The old type has no Go struct any more, so only the stored shape can
-	// carry it. This is exactly what typed events cannot express.
-	old := eventsourcingdb.Event{
-		Subject: "/account/1",
-		Type:    "test.account.opened.v1",
-		ID:      "0",
-		Data:    []byte(`{"whatever":true}`),
-	}
-
-	architecturekittest.GivenStored(t, decider(), old).
-		When(open{Owner: "jane"}).
-		ThenState(func(state account) {
-			if state.Owner != "from the old shape" {
-				t.Fatalf("the upcaster did not run: %+v", state)
-			}
-		}).
-		ThenRejected("account is already open")
+		recorder.expectFailure(t, "given stored:")
+	})
 }
 
 func TestEventMatchers(t *testing.T) {
-	isOpened := func(event architecturekit.Event) bool {
-		return event.EventType() == (opened{}).EventType()
-	}
-	isClosed := func(event architecturekit.Event) bool {
-		return event.EventType() == (closed{}).EventType()
-	}
-
-	architecturekittest.Given(t, emitDecider()).
-		When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, opened{Owner: "jane"}}}).
-		ThenSomeEvent(isOpened).
-		ThenEveryEvent(isOpened).
-		ThenNoEvent(isClosed)
-}
-
-func TestPreconditionsOfACommand(t *testing.T) {
-	architecturekittest.Given(t, decider()).
-		When(open{
-			Owner: "golo",
-			preconditions: []architecturekit.Precondition{
-				architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/1", "7")),
-			},
-		}).
-		ThenPreconditions(architecturekittest.OnEventID("/account/1", "7"))
-}
-
-func TestPreconditionsOfEveryKind(t *testing.T) {
-	cmd := open{
-		Owner: "golo",
-		preconditions: []architecturekit.Precondition{
-			architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1")),
-			architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/2")),
-			architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/3", "9")),
-			architecturekit.Require(eventsourcingdb.NewIsEventQLQueryTruePrecondition("FROM e IN events PROJECT INTO true")),
-			architecturekit.OnStateRead(),
-		},
-	}
-
-	architecturekittest.Given(t, decider()).
-		When(cmd).
-		ThenPreconditions(
-			// A pristine and a populated check look alike from outside,
-			// because the client exposes only the subject for both.
-			architecturekittest.OnSubject("/account/1"),
-			architecturekittest.OnSubject("/account/2"),
-			architecturekittest.OnEventID("/account/3", "9"),
-			architecturekittest.OnQuery("FROM e IN events PROJECT INTO true"),
-			architecturekittest.OnStateRead(),
-		)
-}
-
-func TestPreconditionsOfAnUnconditionalCommand(t *testing.T) {
-	architecturekittest.Given(t, decider()).
-		When(open{
-			Owner:         "golo",
-			preconditions: []architecturekit.Precondition{architecturekit.Unconditionally()},
-		}).
-		ThenPreconditions(architecturekittest.Unconditionally())
-}
-
-func TestCommandWithoutPreconditionsDeclaresNone(t *testing.T) {
-	// Execute rejects such a command, but the fixture reports what it sees.
-	if declared := architecturekittest.PreconditionsOf(open{}); len(declared) != 0 {
-		t.Fatalf("got %v", declared)
-	}
-}
-
-func TestPreconditionsOfShowsAnInvalidPrecondition(t *testing.T) {
-	// A zero value or a nil requirement is rejected by Execute, so the fixture
-	// shows it as an empty description instead of dropping it.
-	declared := architecturekittest.PreconditionsOf(open{
-		preconditions: []architecturekit.Precondition{{}, architecturekit.Require(nil)},
-	})
-
-	if len(declared) != 2 || declared[0] != (architecturekittest.Precondition{}) || declared[1] != (architecturekittest.Precondition{}) {
-		t.Fatalf("got %v", declared)
-	}
-}
-
-// --- the fixture's own failure paths ---
-
-func TestGivenFailsOnEventWithoutRule(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider(), unheardOf{})
-
-	recorder.expectFailure(t, "given:")
-}
-
-func TestGivenStoredFailsOnEventWithoutRule(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.GivenStored(recorder, decider(), eventsourcingdb.Event{
-		Subject: "/account/1",
-		Type:    "test.account.unheardOf",
-		Data:    []byte(`{}`),
-	})
-
-	recorder.expectFailure(t, "given stored:")
-}
-
-func TestThenEventsFailsOnUnexpectedError(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider()).
-		When(open{}).
-		ThenEvents(opened{Owner: "golo"})
-
-	recorder.expectFailure(t, "no owner given")
-}
-
-func TestThenEventsFailsOnWrongCount(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider()).
-		When(open{Owner: "golo"}).
-		ThenEvents(opened{Owner: "golo"}, closed{})
-
-	recorder.expectFailure(t, "expected 2 event(s), got 1")
-}
-
-func TestThenEventsFailsOnWrongType(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider()).
-		When(open{Owner: "golo"}).
-		ThenEvents(closed{})
-
-	recorder.expectFailure(t, "want \"test.account.closed\"")
-}
-
-func TestThenEventsFailsOnWrongPayload(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider()).
-		When(open{Owner: "golo"}).
-		ThenEvents(opened{Owner: "someone-else"})
-
-	recorder.expectFailure(t, "someone-else")
-}
-
-func TestThenEventsFailsWhenTheActualEventCannotBeMarshalled(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, emitDecider()).
-		When(emit{events: []architecturekit.Event{unmarshallable{Channel: make(chan int)}}}).
-		ThenEvents(opened{Owner: "golo"})
-
-	recorder.expectFailure(t, "json")
-}
-
-func TestThenEventsFailsWhenTheExpectedEventCannotBeMarshalled(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, emitDecider()).
-		When(emit{events: []architecturekit.Event{opened{Owner: "golo"}}}).
-		ThenEvents(unmarshallable{Channel: make(chan int)})
-
-	recorder.expectFailure(t, "json")
-}
-
-func TestThenNothingFailsWhenSomethingHappened(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider()).
-		When(open{Owner: "golo"}).
-		ThenNothing()
-
-	recorder.expectFailure(t, "1 event(s)")
-}
-
-func TestThenNothingFailsOnAnError(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider()).
-		When(open{}).
-		ThenNothing()
-
-	recorder.expectFailure(t, "no owner given")
-}
-
-func TestThenRejectedFailsWhenEventsWereProduced(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider()).
-		When(open{Owner: "golo"}).
-		ThenRejected("account is already open")
-
-	recorder.expectFailure(t, "1 event(s)")
-}
-
-func TestThenRejectedFailsOnWrongMessage(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider(), opened{Owner: "golo"}).
-		When(open{Owner: "jane"}).
-		ThenRejected("something else")
-
-	recorder.expectFailure(t, "something else")
-}
-
-func TestThenFailedFailsWhenNothingFailed(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider()).
-		When(open{Owner: "golo"}).
-		ThenFailed(architecturekit.ErrDomain)
-
-	recorder.expectFailure(t, "1 event(s)")
-}
-
-func TestThenFailedFailsOnTheWrongCategory(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider(), opened{Owner: "golo"}).
-		When(open{Owner: "jane"}).
-		ThenFailed(architecturekit.ErrTransient)
-
-	recorder.expectFailure(t, "category")
-}
-
-func TestMatchersFailWhenNothingMatches(t *testing.T) {
-	isClosed := func(event architecturekit.Event) bool {
-		return event.EventType() == (closed{}).EventType()
-	}
-	isOpened := func(event architecturekit.Event) bool {
-		return event.EventType() == (opened{}).EventType()
-	}
-
-	some := &spy{}
-	architecturekittest.Given(some, decider()).When(open{Owner: "golo"}).ThenSomeEvent(isClosed)
-	some.expectFailure(t, "no event matched")
-
-	every := &spy{}
-	architecturekittest.Given(every, emitDecider()).
-		When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, closed{}}}).
-		ThenEveryEvent(isOpened)
-	every.expectFailure(t, "did not match")
-
-	none := &spy{}
-	architecturekittest.Given(none, decider()).When(open{Owner: "golo"}).ThenNoEvent(isOpened)
-	none.expectFailure(t, "matched although it should not")
-
-	empty := &spy{}
-	architecturekittest.Given(empty, decider()).When(open{Owner: "nobody"}).ThenEveryEvent(isOpened)
-	empty.expectFailure(t, "got none")
-}
-
-func TestMatchersFailOnAnError(t *testing.T) {
-	always := func(architecturekit.Event) bool { return true }
-
-	for label, assert := range map[string]func(o *architecturekittest.Outcome[open, account]){
-		"ThenSomeEvent":  func(o *architecturekittest.Outcome[open, account]) { o.ThenSomeEvent(always) },
-		"ThenEveryEvent": func(o *architecturekittest.Outcome[open, account]) { o.ThenEveryEvent(always) },
-		"ThenNoEvent":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNoEvent(always) },
-	} {
-		recorder := &spy{}
-		assert(architecturekittest.Given(recorder, decider()).When(open{}))
-		recorder.expectFailure(t, "no owner given")
-		if len(recorder.failures) == 0 {
-			t.Fatalf("%s did not report the error", label)
+	t.Run("pass when the events match", func(t *testing.T) {
+		isOpened := func(event architecturekit.Event) bool {
+			return event.EventType() == (opened{}).EventType()
 		}
-	}
+		isClosed := func(event architecturekit.Event) bool {
+			return event.EventType() == (closed{}).EventType()
+		}
+
+		architecturekittest.Given(t, emitDecider()).
+			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, opened{Owner: "jane"}}}).
+			ThenSomeEvent(isOpened).
+			ThenEveryEvent(isOpened).
+			ThenNoEvent(isClosed)
+	})
+
+	t.Run("fail when nothing matches", func(t *testing.T) {
+		isClosed := func(event architecturekit.Event) bool {
+			return event.EventType() == (closed{}).EventType()
+		}
+		isOpened := func(event architecturekit.Event) bool {
+			return event.EventType() == (opened{}).EventType()
+		}
+
+		some := &spy{}
+		architecturekittest.Given(some, decider()).When(open{Owner: "golo"}).ThenSomeEvent(isClosed)
+		some.expectFailure(t, "no event matched")
+
+		every := &spy{}
+		architecturekittest.Given(every, emitDecider()).
+			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, closed{}}}).
+			ThenEveryEvent(isOpened)
+		every.expectFailure(t, "did not match")
+
+		none := &spy{}
+		architecturekittest.Given(none, decider()).When(open{Owner: "golo"}).ThenNoEvent(isOpened)
+		none.expectFailure(t, "matched although it should not")
+
+		empty := &spy{}
+		architecturekittest.Given(empty, decider()).When(open{Owner: "nobody"}).ThenEveryEvent(isOpened)
+		empty.expectFailure(t, "got none")
+	})
+
+	t.Run("fail on an error", func(t *testing.T) {
+		always := func(architecturekit.Event) bool { return true }
+
+		for label, check := range map[string]func(o *architecturekittest.Outcome[open, account]){
+			"ThenSomeEvent":  func(o *architecturekittest.Outcome[open, account]) { o.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(o *architecturekittest.Outcome[open, account]) { o.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNoEvent(always) },
+		} {
+			t.Run(label, func(t *testing.T) {
+				recorder := &spy{}
+				check(architecturekittest.Given(recorder, decider()).When(open{}))
+				recorder.expectFailure(t, "no owner given")
+				assert.NotEmpty(t, recorder.failures, "%s did not report the error", label)
+			})
+		}
+	})
 }
 
-func TestThenPreconditionsFailsOnWrongCount(t *testing.T) {
-	recorder := &spy{}
+func TestPreconditionsOf(t *testing.T) {
+	t.Run("a command", func(t *testing.T) {
+		architecturekittest.Given(t, decider()).
+			When(open{
+				Owner: "golo",
+				preconditions: []architecturekit.Precondition{
+					architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/1", "7")),
+				},
+			}).
+			ThenPreconditions(architecturekittest.OnEventID("/account/1", "7"))
+	})
 
-	architecturekittest.Given(recorder, decider()).
-		When(open{Owner: "golo"}).
-		ThenPreconditions(architecturekittest.OnSubject("/account/1"))
-
-	recorder.expectFailure(t, "expected 1 precondition(s), got 0")
-}
-
-func TestThenPreconditionsFailsOnWrongContent(t *testing.T) {
-	recorder := &spy{}
-
-	architecturekittest.Given(recorder, decider()).
-		When(open{
+	t.Run("every kind", func(t *testing.T) {
+		cmd := open{
 			Owner: "golo",
 			preconditions: []architecturekit.Precondition{
 				architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1")),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/2")),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/3", "9")),
+				architecturekit.Require(eventsourcingdb.NewIsEventQLQueryTruePrecondition("FROM e IN events PROJECT INTO true")),
+				architecturekit.OnStateRead(),
 			},
-		}).
-		ThenPreconditions(architecturekittest.OnSubject("/account/other"))
+		}
 
-	recorder.expectFailure(t, "/account/other")
+		architecturekittest.Given(t, decider()).
+			When(cmd).
+			ThenPreconditions(
+				// A pristine and a populated check look alike from outside,
+				// because the client exposes only the subject for both.
+				architecturekittest.OnSubject("/account/1"),
+				architecturekittest.OnSubject("/account/2"),
+				architecturekittest.OnEventID("/account/3", "9"),
+				architecturekittest.OnQuery("FROM e IN events PROJECT INTO true"),
+				architecturekittest.OnStateRead(),
+			)
+	})
+
+	t.Run("an unconditional command", func(t *testing.T) {
+		architecturekittest.Given(t, decider()).
+			When(open{
+				Owner:         "golo",
+				preconditions: []architecturekit.Precondition{architecturekit.Unconditionally()},
+			}).
+			ThenPreconditions(architecturekittest.Unconditionally())
+	})
+
+	t.Run("shows an invalid precondition", func(t *testing.T) {
+		// A zero value or a nil requirement is rejected by Execute, so the fixture
+		// shows it as an empty description instead of dropping it.
+		declared := architecturekittest.PreconditionsOf(open{
+			preconditions: []architecturekit.Precondition{{}, architecturekit.Require(nil)},
+		})
+
+		assert.Equal(t, []architecturekittest.Precondition{{}, {}}, declared)
+	})
 }
 
-func TestSpyHelperIsHarmless(t *testing.T) {
-	// Helper only exists to satisfy the interface.
-	recorder := &spy{}
-	recorder.Helper()
-	recorder.expectNoFailure(t)
+func TestCommandWithoutPreconditions(t *testing.T) {
+	t.Run("declares none", func(t *testing.T) {
+		// Execute rejects such a command, but the fixture reports what it sees.
+		assert.Empty(t, architecturekittest.PreconditionsOf(open{}))
+	})
 }
 
-func TestThenEventsSaysSoWhenNothingHappenedAtAll(t *testing.T) {
-	recorder := &spy{}
+func TestThenEvents(t *testing.T) {
+	t.Run("fails on unexpected error", func(t *testing.T) {
+		recorder := &spy{}
 
-	// The command decides there is nothing to do, so the mismatch has to read
-	// as "no events" rather than as an empty list.
-	architecturekittest.Given(recorder, decider()).
-		When(open{Owner: "nobody"}).
-		ThenEvents(opened{Owner: "golo"})
+		architecturekittest.Given(recorder, decider()).
+			When(open{}).
+			ThenEvents(opened{Owner: "golo"})
 
-	recorder.expectFailure(t, "no events")
+		recorder.expectFailure(t, "no owner given")
+	})
+
+	t.Run("fails on wrong count", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "golo"}).
+			ThenEvents(opened{Owner: "golo"}, closed{})
+
+		recorder.expectFailure(t, "expected 2 event(s), got 1")
+	})
+
+	t.Run("fails on wrong type", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "golo"}).
+			ThenEvents(closed{})
+
+		recorder.expectFailure(t, "want \"test.account.closed\"")
+	})
+
+	t.Run("fails on wrong payload", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "golo"}).
+			ThenEvents(opened{Owner: "someone-else"})
+
+		recorder.expectFailure(t, "someone-else")
+	})
+
+	t.Run("fails when the actual event cannot be marshalled", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, emitDecider()).
+			When(emit{events: []architecturekit.Event{unmarshallable{Channel: make(chan int)}}}).
+			ThenEvents(opened{Owner: "golo"})
+
+		recorder.expectFailure(t, "json")
+	})
+
+	t.Run("fails when the expected event cannot be marshalled", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, emitDecider()).
+			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}}}).
+			ThenEvents(unmarshallable{Channel: make(chan int)})
+
+		recorder.expectFailure(t, "json")
+	})
+
+	t.Run("says so when nothing happened at all", func(t *testing.T) {
+		recorder := &spy{}
+
+		// The command decides there is nothing to do, so the mismatch has to read
+		// as "no events" rather than as an empty list.
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "nobody"}).
+			ThenEvents(opened{Owner: "golo"})
+
+		recorder.expectFailure(t, "no events")
+	})
+}
+
+func TestThenPreconditions(t *testing.T) {
+	t.Run("fails on wrong count", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "golo"}).
+			ThenPreconditions(architecturekittest.OnSubject("/account/1"))
+
+		recorder.expectFailure(t, "expected 1 precondition(s), got 0")
+	})
+
+	t.Run("fails on wrong content", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{
+				Owner: "golo",
+				preconditions: []architecturekit.Precondition{
+					architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1")),
+				},
+			}).
+			ThenPreconditions(architecturekittest.OnSubject("/account/other"))
+
+		recorder.expectFailure(t, "/account/other")
+	})
+}
+
+func TestSpy(t *testing.T) {
+	t.Run("Helper is harmless", func(t *testing.T) {
+		// Helper only exists to satisfy the interface.
+		recorder := &spy{}
+		recorder.Helper()
+		recorder.expectNoFailure(t)
+	})
 }

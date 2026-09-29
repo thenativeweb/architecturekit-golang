@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
@@ -122,254 +123,255 @@ func failingEvents(after int, err error) iter.Seq2[eventsourcingdb.Event, error]
 	}
 }
 
-func TestModeOfDerivesFromTheInterfaces(t *testing.T) {
-	cases := []struct {
-		projection Projection
-		want       Mode
-	}{
-		{&recorder{}, ModeRebuild},
-		{&resumableRecorder{}, ModeResumable},
-		{&batchedRecorder{}, ModeResumable},
-	}
-
-	for _, c := range cases {
-		if got := ModeOf(c.projection); got != c.want {
-			t.Fatalf("%T: got %q, want %q", c.projection, got, c.want)
+func TestModeOf(t *testing.T) {
+	t.Run("derives from the interfaces", func(t *testing.T) {
+		cases := []struct {
+			label      string
+			projection Projection
+			want       Mode
+		}{
+			{"recorder", &recorder{}, ModeRebuild},
+			{"resumableRecorder", &resumableRecorder{}, ModeResumable},
+			{"batchedRecorder", &batchedRecorder{}, ModeResumable},
 		}
-	}
+
+		for _, c := range cases {
+			t.Run(c.label, func(t *testing.T) {
+				assert.Equal(t, c.want, ModeOf(c.projection))
+			})
+		}
+	})
 }
 
-func TestBatchSizesDefaultToOneAndAreClamped(t *testing.T) {
-	if catchUp, live := batchSizesOf(&recorder{}); catchUp != 1 || live != 1 {
-		t.Fatalf("got %d and %d, want 1 and 1", catchUp, live)
-	}
+func TestBatchSizes(t *testing.T) {
+	t.Run("default to one and are clamped", func(t *testing.T) {
+		catchUp, live := batchSizesOf(&recorder{})
+		assert.Equal(t, 1, catchUp)
+		assert.Equal(t, 1, live)
 
-	// A projection that announces nonsense is corrected rather than trusted.
-	if catchUp, live := batchSizesOf(&batchedRecorder{catchUp: 0, live: -5}); catchUp != 1 || live != 1 {
-		t.Fatalf("got %d and %d, want 1 and 1", catchUp, live)
-	}
+		// A projection that announces nonsense is corrected rather than trusted.
+		catchUp, live = batchSizesOf(&batchedRecorder{catchUp: 0, live: -5})
+		assert.Equal(t, 1, catchUp)
+		assert.Equal(t, 1, live)
 
-	if catchUp, live := batchSizesOf(&batchedRecorder{catchUp: 500, live: 10}); catchUp != 500 || live != 10 {
-		t.Fatalf("got %d and %d, want 500 and 10", catchUp, live)
-	}
+		catchUp, live = batchSizesOf(&batchedRecorder{catchUp: 500, live: 10})
+		assert.Equal(t, 500, catchUp)
+		assert.Equal(t, 10, live)
+	})
 }
 
 // unverified is the verification of a store without any verification option,
 // which lets every event pass.
 var unverified = (&Store{}).verify
 
-func TestDriveInRebuildModeKeepsNoCheckpoint(t *testing.T) {
-	target := &recorder{}
+func TestDrive(t *testing.T) {
+	t.Run("in rebuild mode keeps no checkpoint", func(t *testing.T) {
+		target := &recorder{}
 
-	last, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), unverified, nil, 1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if last != "2" {
-		t.Fatalf("got %q, want 2", last)
-	}
+		last, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), unverified, nil, 1)
+		require.NoError(t, err)
+		assert.Equal(t, "2", last)
 
-	want := []string{"apply 0", "apply 1", "apply 2"}
-	assertLog(t, target.log, want)
-}
-
-func TestDriveInResumableModeWritesCheckpointAfterEveryEvent(t *testing.T) {
-	target := &resumableRecorder{}
-
-	if _, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, nil, 1); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	assertLog(t, target.log, []string{"apply 0", "checkpoint 0", "apply 1", "checkpoint 1"})
-	if target.saved != "1" {
-		t.Fatalf("got %q, want 1", target.saved)
-	}
-}
-
-func TestDriveHonoursTheBatchSize(t *testing.T) {
-	target := &resumableRecorder{}
-
-	if _, err := drive(context.Background(), writerFor(target), events("0", "1", "2", "3"), unverified, nil, 2); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	assertLog(t, target.log, []string{
-		"apply 0", "apply 1", "checkpoint 1",
-		"apply 2", "apply 3", "checkpoint 3",
+		want := []string{"apply 0", "apply 1", "apply 2"}
+		assertLog(t, target.log, want)
 	})
-}
 
-func TestDriveCommitsAnIncompleteFinalBatch(t *testing.T) {
-	target := &resumableRecorder{}
+	t.Run("in resumable mode writes checkpoint after every event", func(t *testing.T) {
+		target := &resumableRecorder{}
 
-	if _, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), unverified, nil, 2); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		_, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, nil, 1)
+		require.NoError(t, err)
 
-	assertLog(t, target.log, []string{
-		"apply 0", "apply 1", "checkpoint 1",
-		"apply 2", "checkpoint 2",
+		assertLog(t, target.log, []string{"apply 0", "checkpoint 0", "apply 1", "checkpoint 1"})
+		assert.Equal(t, "1", target.saved)
 	})
-}
 
-func TestDriveInTransactionalModeBracketsEachBatch(t *testing.T) {
-	target := &transactionalRecorder{}
+	t.Run("honours the batch size", func(t *testing.T) {
+		target := &resumableRecorder{}
 
-	if _, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), unverified, nil, 2); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		_, err := drive(context.Background(), writerFor(target), events("0", "1", "2", "3"), unverified, nil, 2)
+		require.NoError(t, err)
 
-	assertLog(t, target.log, []string{
-		"begin", "apply 0", "apply 1", "commit 1",
-		"begin", "apply 2", "commit 2",
+		assertLog(t, target.log, []string{
+			"apply 0", "apply 1", "checkpoint 1",
+			"apply 2", "apply 3", "checkpoint 3",
+		})
 	})
-	if len(target.committed) != 2 {
-		t.Fatalf("got %v", target.committed)
-	}
-}
 
-func TestDriveRollsBackWhenApplyFails(t *testing.T) {
-	target := &transactionalRecorder{}
-	target.failOn = "1"
+	t.Run("commits an incomplete final batch", func(t *testing.T) {
+		target := &resumableRecorder{}
 
-	_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), unverified, nil, 10)
+		_, err := drive(context.Background(), writerFor(target), events("0", "1", "2"), unverified, nil, 2)
+		require.NoError(t, err)
 
-	if !errors.Is(err, ErrPermanent) {
-		t.Fatalf("got %v", err)
-	}
-	assertLog(t, target.log, []string{"begin", "apply 0", "rollback"})
-}
+		assertLog(t, target.log, []string{
+			"apply 0", "apply 1", "checkpoint 1",
+			"apply 2", "checkpoint 2",
+		})
+	})
 
-func TestDriveRollsBackWhenAnEventFailsVerification(t *testing.T) {
-	target := &transactionalRecorder{}
-	failOnSecond := func(event eventsourcingdb.Event) error {
-		if event.ID == "1" {
-			return ErrUnverified
+	t.Run("in transactional mode brackets each batch", func(t *testing.T) {
+		target := &transactionalRecorder{}
+
+		_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), unverified, nil, 2)
+		require.NoError(t, err)
+
+		assertLog(t, target.log, []string{
+			"begin", "apply 0", "apply 1", "commit 1",
+			"begin", "apply 2", "commit 2",
+		})
+		assert.Len(t, target.committed, 2)
+	})
+
+	t.Run("rolls back when apply fails", func(t *testing.T) {
+		target := &transactionalRecorder{}
+		target.failOn = "1"
+
+		_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), unverified, nil, 10)
+
+		assert.ErrorIs(t, err, ErrPermanent)
+		assertLog(t, target.log, []string{"begin", "apply 0", "rollback"})
+	})
+
+	t.Run("rolls back when an event fails verification", func(t *testing.T) {
+		target := &transactionalRecorder{}
+		failOnSecond := func(event eventsourcingdb.Event) error {
+			if event.ID == "1" {
+				return ErrUnverified
+			}
+			return nil
 		}
-		return nil
-	}
 
-	_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), failOnSecond, nil, 10)
+		_, err := drive(context.Background(), inTransactions(target), events("0", "1", "2"), failOnSecond, nil, 10)
 
-	if !errors.Is(err, ErrUnverified) {
-		t.Fatalf("got %v", err)
-	}
-	// The event that failed is never applied, and neither is anything after it.
-	assertLog(t, target.log, []string{"begin", "apply 0", "rollback"})
+		assert.ErrorIs(t, err, ErrUnverified)
+		// The event that failed is never applied, and neither is anything after it.
+		assertLog(t, target.log, []string{"begin", "apply 0", "rollback"})
+	})
+
+	t.Run("rolls back when the stream fails", func(t *testing.T) {
+		target := &transactionalRecorder{}
+
+		_, err := drive(context.Background(), inTransactions(target),
+			failingEvents(2, errors.New("connection lost")), unverified, nil, 10)
+
+		assert.ErrorIs(t, err, ErrTransient, "a broken stream is transient")
+		assertLog(t, target.log, []string{"begin", "apply 0", "apply 1", "rollback"})
+	})
+
+	t.Run("reports a failing begin", func(t *testing.T) {
+		target := &transactionalRecorder{}
+		target.beginErr = errors.New("no connection")
+
+		_, err := drive(context.Background(), inTransactions(target), events("0"), unverified, nil, 1)
+		assert.Error(t, err, "expected the error from begin")
+	})
+
+	t.Run("reports a cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := drive(ctx, writerFor(&recorder{}), events(), unverified, nil, 1)
+
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("stops when commit fails", func(t *testing.T) {
+		target := &failingCommitRecorder{}
+
+		_, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, nil, 1)
+
+		assert.Error(t, err, "expected the error from commit")
+	})
+
+	t.Run("stops when the final commit fails", func(t *testing.T) {
+		target := &failingCommitRecorder{}
+
+		// The batch is larger than the stream, so the only commit is the one after
+		// the loop.
+		_, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, nil, 10)
+
+		assert.Error(t, err, "expected the error from the final commit")
+	})
+
+	t.Run("reports a failing rollback alongside the cause", func(t *testing.T) {
+		target := &transactionalRecorder{}
+		target.failOn = "1"
+		target.rollbackErr = errors.New("rollback did not work either")
+
+		_, err := drive(context.Background(), inTransactions(target), events("0", "1"), unverified, nil, 10)
+
+		// The failure that caused the rollback has to survive, and the rollback
+		// failure comes with it rather than replacing it.
+		assert.ErrorIs(t, err, ErrPermanent, "the cause must survive")
+		assert.ErrorContains(t, err, "rollback did not work either", "the rollback failure has to be reported too")
+	})
+
+	t.Run("reports a failing rollback after a broken stream", func(t *testing.T) {
+		target := &transactionalRecorder{}
+		target.rollbackErr = errors.New("rollback did not work either")
+
+		_, err := drive(context.Background(), inTransactions(target),
+			failingEvents(1, errors.New("connection lost")), unverified, nil, 10)
+
+		assert.ErrorIs(t, err, ErrTransient, "the cause must survive")
+		assert.ErrorContains(t, err, "rollback did not work either")
+	})
 }
 
-func TestDriveRollsBackWhenTheStreamFails(t *testing.T) {
-	target := &transactionalRecorder{}
+func TestBoundAfter(t *testing.T) {
+	t.Run("excludes the checkpoint", func(t *testing.T) {
+		assert.Nil(t, boundAfter(""), "an empty checkpoint means no bound")
 
-	_, err := drive(context.Background(), inTransactions(target),
-		failingEvents(2, errors.New("connection lost")), unverified, nil, 10)
-
-	if !errors.Is(err, ErrTransient) {
-		t.Fatalf("a broken stream is transient, got %v", err)
-	}
-	assertLog(t, target.log, []string{"begin", "apply 0", "apply 1", "rollback"})
-}
-
-func TestDriveReportsAFailingBegin(t *testing.T) {
-	target := &transactionalRecorder{}
-	target.beginErr = errors.New("no connection")
-
-	if _, err := drive(context.Background(), inTransactions(target), events("0"), unverified, nil, 1); err == nil {
-		t.Fatal("expected the error from begin")
-	}
-}
-
-func TestDriveReportsACancelledContext(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	_, err := drive(ctx, writerFor(&recorder{}), events(), unverified, nil, 1)
-
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestBoundAfterExcludesTheCheckpoint(t *testing.T) {
-	if bound := boundAfter(""); bound != nil {
-		t.Fatalf("an empty checkpoint means no bound, got %v", bound)
-	}
-
-	bound := boundAfter("7")
-	if bound == nil || bound.ID != "7" || bound.Type != eventsourcingdb.BoundTypeExclusive {
-		t.Fatalf("got %v", bound)
-	}
+		bound := boundAfter("7")
+		require.NotNil(t, bound)
+		assert.Equal(t, "7", bound.ID)
+		assert.Equal(t, eventsourcingdb.BoundTypeExclusive, bound.Type)
+	})
 }
 
 func assertLog(t *testing.T, got, want []string) {
 	t.Helper()
 
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("step %d: got %q, want %q (full: %v)", i, got[i], want[i], got)
-		}
-	}
+	require.Equal(t, want, got)
 }
 
-func TestWritersWithoutTransactionsAreHarmless(t *testing.T) {
-	ctx := context.Background()
+func TestWriters(t *testing.T) {
+	t.Run("without transactions are harmless", func(t *testing.T) {
+		ctx := context.Background()
 
-	// A rebuild writer keeps no checkpoint and has nothing to roll back.
-	rebuild := writerFor(&recorder{})
-	if checkpoint, err := rebuild.checkpoint(ctx); checkpoint != "" || err != nil {
-		t.Fatalf("got %q, %v", checkpoint, err)
-	}
-	if err := rebuild.rollback(ctx); err != nil {
-		t.Fatalf("nothing was begun, so nothing can fail: %v", err)
-	}
+		// A rebuild writer keeps no checkpoint and has nothing to roll back.
+		rebuild := writerFor(&recorder{})
+		checkpoint, err := rebuild.checkpoint(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, checkpoint)
+		assert.NoError(t, rebuild.rollback(ctx), "nothing was begun, so nothing can fail")
 
-	// A resumable writer reports where it stopped, but also cannot roll back.
-	resumable := writerFor(&resumableRecorder{start: "7"})
-	if checkpoint, err := resumable.checkpoint(ctx); checkpoint != "7" || err != nil {
-		t.Fatalf("got %q, %v", checkpoint, err)
-	}
-	if err := resumable.rollback(ctx); err != nil {
-		t.Fatalf("the data is already written, so nothing can fail: %v", err)
-	}
+		// A resumable writer reports where it stopped, but also cannot roll back.
+		resumable := writerFor(&resumableRecorder{start: "7"})
+		checkpoint, err = resumable.checkpoint(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "7", checkpoint)
+		assert.NoError(t, resumable.rollback(ctx), "the data is already written, so nothing can fail")
 
-	transactional := inTransactions(&transactionalRecorder{start: "9"})
-	if checkpoint, err := transactional.checkpoint(ctx); checkpoint != "9" || err != nil {
-		t.Fatalf("got %q, %v", checkpoint, err)
-	}
-	// Rolling back without an open transaction does nothing.
-	if err := transactional.rollback(ctx); err != nil {
-		t.Fatalf("got %v", err)
-	}
+		transactional := inTransactions(&transactionalRecorder{start: "9"})
+		checkpoint, err = transactional.checkpoint(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "9", checkpoint)
+		// Rolling back without an open transaction does nothing.
+		assert.NoError(t, transactional.rollback(ctx))
+	})
 }
 
-func TestIgnoreContextEndKeepsRealFailures(t *testing.T) {
-	if err := ignoreContextEnd(nil); err != nil {
-		t.Fatalf("got %v", err)
-	}
-	if err := ignoreContextEnd(context.Canceled); err != nil {
-		t.Fatalf("a cancelled run is not a failure, got %v", err)
-	}
-	if err := ignoreContextEnd(context.DeadlineExceeded); err != nil {
-		t.Fatalf("a deadline is not a failure, got %v", err)
-	}
+func TestIgnoreContextEnd(t *testing.T) {
+	t.Run("keeps real failures", func(t *testing.T) {
+		assert.NoError(t, ignoreContextEnd(nil))
+		assert.NoError(t, ignoreContextEnd(context.Canceled), "a cancelled run is not a failure")
+		assert.NoError(t, ignoreContextEnd(context.DeadlineExceeded), "a deadline is not a failure")
 
-	real := errors.New("disk on fire")
-	if err := ignoreContextEnd(real); !errors.Is(err, real) {
-		t.Fatalf("a real failure has to survive, got %v", err)
-	}
-}
-
-func TestDriveStopsWhenCommitFails(t *testing.T) {
-	target := &failingCommitRecorder{}
-
-	_, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, nil, 1)
-
-	if err == nil {
-		t.Fatal("expected the error from commit")
-	}
+		real := errors.New("disk on fire")
+		assert.ErrorIs(t, ignoreContextEnd(real), real, "a real failure has to survive")
+	})
 }
 
 // failingCommitRecorder refuses to save its checkpoint.
@@ -381,13 +383,14 @@ func (r *failingCommitRecorder) SaveCheckpoint(context.Context, string) error {
 	return errors.New("checkpoint storage is full")
 }
 
-func TestCheckpointFailureStopsTheRun(t *testing.T) {
-	// catchUp asks for the checkpoint first; if that fails, nothing is read.
-	writer := writerFor(&brokenCheckpointRecorder{})
+func TestCheckpointFailure(t *testing.T) {
+	t.Run("stops the run", func(t *testing.T) {
+		// catchUp asks for the checkpoint first; if that fails, nothing is read.
+		writer := writerFor(&brokenCheckpointRecorder{})
 
-	if _, err := writer.checkpoint(context.Background()); err == nil {
-		t.Fatal("expected the error from checkpoint")
-	}
+		_, err := writer.checkpoint(context.Background())
+		assert.Error(t, err, "expected the error from checkpoint")
+	})
 }
 
 type brokenCheckpointRecorder struct{ recorder }
@@ -398,74 +401,24 @@ func (r *brokenCheckpointRecorder) Checkpoint(context.Context) (string, error) {
 
 func (r *brokenCheckpointRecorder) SaveCheckpoint(context.Context, string) error { return nil }
 
-func TestProjectionFuncSatisfiesProjection(t *testing.T) {
-	seen := 0
-	projection := ProjectionFunc(func(context.Context, eventsourcingdb.Event) error {
-		seen++
-		return nil
+func TestProjectionFunc(t *testing.T) {
+	t.Run("satisfies Projection", func(t *testing.T) {
+		seen := 0
+		projection := ProjectionFunc(func(context.Context, eventsourcingdb.Event) error {
+			seen++
+			return nil
+		})
+
+		require.NoError(t, projection.Apply(context.Background(), eventsourcingdb.Event{ID: "0"}))
+		assert.Equal(t, 1, seen)
+		assert.Equal(t, ModeRebuild, ModeOf(projection), "a plain function is rebuilt")
 	})
 
-	if err := projection.Apply(context.Background(), eventsourcingdb.Event{ID: "0"}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if seen != 1 {
-		t.Fatalf("got %d, want 1", seen)
-	}
-	if ModeOf(projection) != ModeRebuild {
-		t.Fatalf("a plain function is rebuilt, got %q", ModeOf(projection))
-	}
-}
+	t.Run("reports its failure", func(t *testing.T) {
+		projection := ProjectionFunc(func(context.Context, eventsourcingdb.Event) error {
+			return errors.New("cannot apply this")
+		})
 
-func TestProjectionFuncReportsItsFailure(t *testing.T) {
-	projection := ProjectionFunc(func(context.Context, eventsourcingdb.Event) error {
-		return errors.New("cannot apply this")
+		assert.Error(t, projection.Apply(context.Background(), eventsourcingdb.Event{}), "expected the error from the function")
 	})
-
-	if err := projection.Apply(context.Background(), eventsourcingdb.Event{}); err == nil {
-		t.Fatal("expected the error from the function")
-	}
-}
-
-func TestDriveStopsWhenTheFinalCommitFails(t *testing.T) {
-	target := &failingCommitRecorder{}
-
-	// The batch is larger than the stream, so the only commit is the one after
-	// the loop.
-	_, err := drive(context.Background(), writerFor(target), events("0", "1"), unverified, nil, 10)
-
-	if err == nil {
-		t.Fatal("expected the error from the final commit")
-	}
-}
-
-func TestDriveReportsAFailingRollbackAlongsideTheCause(t *testing.T) {
-	target := &transactionalRecorder{}
-	target.failOn = "1"
-	target.rollbackErr = errors.New("rollback did not work either")
-
-	_, err := drive(context.Background(), inTransactions(target), events("0", "1"), unverified, nil, 10)
-
-	// The failure that caused the rollback has to survive, and the rollback
-	// failure comes with it rather than replacing it.
-	if !errors.Is(err, ErrPermanent) {
-		t.Fatalf("the cause must survive, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "rollback did not work either") {
-		t.Fatalf("the rollback failure has to be reported too, got %q", err.Error())
-	}
-}
-
-func TestDriveReportsAFailingRollbackAfterABrokenStream(t *testing.T) {
-	target := &transactionalRecorder{}
-	target.rollbackErr = errors.New("rollback did not work either")
-
-	_, err := drive(context.Background(), inTransactions(target),
-		failingEvents(1, errors.New("connection lost")), unverified, nil, 10)
-
-	if !errors.Is(err, ErrTransient) {
-		t.Fatalf("the cause must survive, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "rollback did not work either") {
-		t.Fatalf("got %q", err.Error())
-	}
 }
