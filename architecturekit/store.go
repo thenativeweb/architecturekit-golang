@@ -1,8 +1,10 @@
 package architecturekit
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -260,9 +262,13 @@ func (s *Store) write(
 		return written, nil
 	}
 
-	// The client exports no typed error, which leaves nothing but the status
-	// code inside the error text.
-	if strings.Contains(err.Error(), "'409'") {
+	// A failed precondition and an event that does not match its schema are
+	// both answered with 409. The client exports no typed error, so only the
+	// reason inside the error text tells them apart.
+	if isConflict(err) {
+		if strings.Contains(err.Error(), "schema conflict") {
+			return nil, fmt.Errorf("%w: writing %q: %v", ErrPermanent, subject, err)
+		}
 		return nil, fmt.Errorf("%w on %q: %v", ErrConflict, subject, err)
 	}
 
@@ -270,38 +276,145 @@ func (s *Store) write(
 }
 
 // RegisterSchemas registers the schemas of the given events with the database.
-// The call is idempotent: an already known event type counts as success,
-// because otherwise an application could not be started a second time.
+// It is meant to be called on every start: for an event type the database
+// knows already, it checks that the registered schema is the given one.
 //
-// The EventSourcingDB does not distinguish whether a re-registered schema is
-// the same or a different one; it answers 409 either way. A later change to a
-// schema therefore goes unnoticed here.
+// A registered schema cannot change. If it differs from the given one, or if
+// the database refuses the given one, e.g. because stored events of the type
+// do not match it, RegisterSchemas fails permanently. To change the shape of
+// an event, introduce a new event type and an upcaster instead.
 func (s *Store) RegisterSchemas(schemas ...[]EventSchema) error {
-	registered := map[string]bool{}
+	given, err := collectSchemas(schemas)
+	if err != nil {
+		return err
+	}
 
-	for _, group := range schemas {
-		for _, schema := range group {
-			if registered[schema.EventType] {
+	registered, err := s.readRegisteredSchemas()
+	if err != nil {
+		return err
+	}
+
+	for _, schema := range given {
+		current, isRegistered := registered[schema.EventType]
+
+		if !isRegistered {
+			refusal := s.client.RegisterEventSchema(schema.EventType, schema.Schema)
+			if refusal == nil {
 				continue
 			}
-			registered[schema.EventType] = true
-
-			err := s.client.RegisterEventSchema(schema.EventType, schema.Schema)
-			if err == nil || isAlreadyRegistered(err) {
-				continue
+			if !isConflict(refusal) {
+				return fmt.Errorf("%w: registering schema for %q: %v", ErrPermanent, schema.EventType, refusal)
 			}
 
-			return fmt.Errorf("%w: registering schema for %q: %v",
-				ErrPermanent, schema.EventType, err)
+			// Either another instance has registered the schema in the
+			// meantime, or the database refused it, e.g. because stored events
+			// of the type do not match it. Only the registered schemas tell the
+			// two apart.
+			registered, err = s.readRegisteredSchemas()
+			if err != nil {
+				return err
+			}
+
+			current, isRegistered = registered[schema.EventType]
+			if !isRegistered {
+				return fmt.Errorf("%w: the database refused the schema of %q: %v", ErrPermanent, schema.EventType, refusal)
+			}
+		}
+
+		if err := checkRegisteredSchema(schema, current); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-// isAlreadyRegistered reports whether the event type is known to the database
-// already. The client exports no typed error for this either.
-func isAlreadyRegistered(err error) bool {
+// collectSchemas flattens the given groups, leaving out event types that
+// appear more than once with the same schema.
+func collectSchemas(groups [][]EventSchema) ([]EventSchema, error) {
+	var collected []EventSchema
+	seen := map[string]map[string]any{}
+
+	for _, group := range groups {
+		for _, schema := range group {
+			if schema.Schema == nil {
+				return nil, fmt.Errorf("%w: event type %q has no schema", ErrPermanent, schema.EventType)
+			}
+
+			if earlier, isSeen := seen[schema.EventType]; isSeen {
+				same, err := isSameSchema(earlier, schema.Schema)
+				if err != nil {
+					return nil, fmt.Errorf("%w: comparing schemas for %q: %v", ErrPermanent, schema.EventType, err)
+				}
+				if !same {
+					return nil, fmt.Errorf("%w: event type %q has two different schemas", ErrPermanent, schema.EventType)
+				}
+				continue
+			}
+
+			seen[schema.EventType] = schema.Schema
+			collected = append(collected, schema)
+		}
+	}
+
+	return collected, nil
+}
+
+// readRegisteredSchemas reads the schemas the database holds, by event type.
+//
+// It reads all event types to the end, and deliberately does not ask for a
+// single one: after reading a single event type that further event types
+// follow, EventSourcingDB 1.2.0 stops answering writes.
+func (s *Store) readRegisteredSchemas() (map[string]map[string]any, error) {
+	registered := map[string]map[string]any{}
+
+	for eventType, err := range s.client.ReadEventTypes(context.Background()) {
+		if err != nil {
+			return nil, fmt.Errorf("%w: reading the registered schemas: %v", ErrTransient, err)
+		}
+		if eventType.Schema != nil {
+			registered[eventType.EventType] = *eventType.Schema
+		}
+	}
+
+	return registered, nil
+}
+
+// checkRegisteredSchema fails unless the registered schema of an event type is
+// exactly the given one.
+func checkRegisteredSchema(schema EventSchema, registered map[string]any) error {
+	same, err := isSameSchema(schema.Schema, registered)
+	if err != nil {
+		return fmt.Errorf("%w: comparing schemas for %q: %v", ErrPermanent, schema.EventType, err)
+	}
+	if !same {
+		return fmt.Errorf("%w: the schema of %q differs from the registered one, which cannot change; "+
+			"introduce a new event type and an upcaster instead", ErrPermanent, schema.EventType)
+	}
+
+	return nil
+}
+
+// isSameSchema compares two schemas by their JSON form. A schema from the code
+// may hold other Go types, such as []string, than the same schema decoded from
+// the database, but both encode alike, since maps are encoded with sorted keys.
+func isSameSchema(left, right map[string]any) (bool, error) {
+	encodedLeft, err := json.Marshal(left)
+	if err != nil {
+		return false, err
+	}
+	encodedRight, err := json.Marshal(right)
+	if err != nil {
+		return false, err
+	}
+
+	return bytes.Equal(encodedLeft, encodedRight), nil
+}
+
+// isConflict reports whether the database answered with 409. The client
+// exports no typed error, which leaves nothing but the status code inside the
+// error text.
+func isConflict(err error) bool {
 	return strings.Contains(err.Error(), "'409'")
 }
 

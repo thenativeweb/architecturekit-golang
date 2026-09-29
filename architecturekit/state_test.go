@@ -79,17 +79,19 @@ func TestEvolveIsChainable(t *testing.T) {
 	}
 }
 
-func TestSchemasCollectsOnlyEventsThatProvideOne(t *testing.T) {
+func TestSchemasCollectsTheSchemaOfEveryEvent(t *testing.T) {
 	schemas := counterState().Schemas()
 
-	if len(schemas) != 1 {
-		t.Fatalf("got %d schema(s), want 1", len(schemas))
+	if len(schemas) != 2 {
+		t.Fatalf("got %d schema(s), want 2", len(schemas))
 	}
-	if schemas[0].EventType != (incremented{}).EventType() {
-		t.Fatalf("got %q", schemas[0].EventType)
-	}
-	if schemas[0].Schema == nil {
-		t.Fatal("schema must not be nil")
+	for i, want := range []architecturekit.Event{incremented{}, reset{}} {
+		if schemas[i].EventType != want.EventType() {
+			t.Fatalf("schema %d: got %q, want %q", i, schemas[i].EventType, want.EventType())
+		}
+		if schemas[i].Schema == nil {
+			t.Fatalf("schema %d must not be nil", i)
+		}
 	}
 }
 

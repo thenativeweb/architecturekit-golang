@@ -23,6 +23,16 @@ type noted struct {
 
 func (noted) EventType() string { return "io.thenativeweb.httpapi.noted" }
 
+func (noted) Schema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"text": map[string]any{"type": "string"},
+		},
+	}
+}
+
 type notes struct {
 	Count int
 }

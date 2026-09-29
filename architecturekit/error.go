@@ -25,9 +25,9 @@ var (
 // ErrConflict means a precondition of the write did not hold. It is transient,
 // because the state it disagreed with has moved on.
 //
-// Note that the EventSourcingDB answers a violated precondition and a schema
-// violation with the same status, and its Go client exports no typed error. A
-// schema violation therefore also arrives here, although it is permanent.
+// An event that does not match its schema is not a conflict, although the
+// EventSourcingDB answers it with the same status. Writing it again yields the
+// same result, so it is reported as ErrPermanent.
 var ErrConflict = fmt.Errorf("%w: a precondition did not hold", ErrTransient)
 
 // ErrUnverified means that an event the store has read failed its

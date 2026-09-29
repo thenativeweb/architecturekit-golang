@@ -102,7 +102,7 @@ func (c ReturnBook) Preconditions() []architecturekit.Precondition {
 
 ### Defining Events
 
-An event describes what has happened. Define it as a struct with JSON annotations and implement the `EventType` function, which returns the event type. This makes the struct an `Event`:
+An event describes what has happened. Define it as a struct with JSON annotations and implement two functions: `EventType`, which returns the event type, and `Schema`, which returns a JSON schema for the event's data. This makes the struct an `Event`:
 
 ```go
 type BookAcquired struct {
@@ -115,6 +115,19 @@ func (BookAcquired) EventType() string {
   return "io.eventsourcingdb.library.book-acquired"
 }
 
+func (BookAcquired) Schema() map[string]any {
+  return map[string]any{
+    "type": "object",
+    "properties": map[string]any{
+      "title":  map[string]any{"type": "string"},
+      "author": map[string]any{"type": "string"},
+      "isbn":   map[string]any{"type": "string"},
+    },
+    "required":             []string{"title", "author", "isbn"},
+    "additionalProperties": false,
+  }
+}
+
 type BookBorrowed struct {
   BorrowedBy    string `json:"borrowedBy"`
   BorrowedUntil string `json:"borrowedUntil"`
@@ -124,14 +137,36 @@ func (BookBorrowed) EventType() string {
   return "io.eventsourcingdb.library.book-borrowed"
 }
 
+func (BookBorrowed) Schema() map[string]any {
+  return map[string]any{
+    "type": "object",
+    "properties": map[string]any{
+      "borrowedBy":    map[string]any{"type": "string"},
+      "borrowedUntil": map[string]any{"type": "string", "format": "date"},
+    },
+    "required":             []string{"borrowedBy", "borrowedUntil"},
+    "additionalProperties": false,
+  }
+}
+
 type BookReturned struct{}
 
 func (BookReturned) EventType() string {
   return "io.eventsourcingdb.library.book-returned"
 }
+
+func (BookReturned) Schema() map[string]any {
+  return map[string]any{
+    "type":                 "object",
+    "properties":           map[string]any{},
+    "additionalProperties": false,
+  }
+}
 ```
 
-The struct becomes the event's data. The subject is taken from the command, and the source from the store.
+The struct becomes the event's data. The subject is taken from the command, and the source from the store. The database checks every event against the schema of its type, once the schema is registered (see [Registering Event Schemas](#registering-event-schemas)).
+
+*Note that the schema is required, so that no event type can be forgotten. An event without a `Schema` function does not compile.*
 
 ### Defining State
 
@@ -361,7 +396,7 @@ Every error architecturekit returns belongs to one of four categories. Use `erro
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
 - `ErrTransient` means that trying again may help, for example if reading from the database failed.
-- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, or if a subject contains an event type the state has no `Evolve` rule for.
+- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if it does not match the schema of its type, or if a subject contains an event type the state has no `Evolve` rule for.
 
 ```go
 writtenEvents, err := architecturekit.Execute(
@@ -388,28 +423,7 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 ### Registering Event Schemas
 
-To have the database validate events of a type, implement the `Schema` function on the event and return a JSON schema. This makes the event a `SchemaProvider`:
-
-```go
-func (BookAcquired) Schema() map[string]any {
-  return map[string]any{
-    "type": "object",
-    "properties": map[string]any{
-      "title":  map[string]any{"type": "string"},
-      "author": map[string]any{"type": "string"},
-      "isbn":   map[string]any{"type": "string"},
-    },
-    "required": []string{
-      "title",
-      "author",
-      "isbn",
-    },
-    "additionalProperties": false,
-  }
-}
-```
-
-The `Evolve` function collects the schemas of all events that implement `Schema`. To get them as a slice of `EventSchema`, each with the fields `EventType` and `Schema`, call the `Schemas` function on the state. Then hand them over to the `RegisterSchemas` function of the store:
+The database only checks events against a schema once it is registered. The `Evolve` function collects the schemas of all events of a state. To get them as a slice of `EventSchema`, each with the fields `EventType` and `Schema`, call the `Schemas` function on the state. Then hand them over to the `RegisterSchemas` function of the store:
 
 ```go
 err := store.RegisterSchemas(bookState.Schemas())
@@ -418,7 +432,11 @@ if err != nil {
 }
 ```
 
-`RegisterSchemas` accepts the schemas of several states at once. Event types that are already registered count as success, so you can call the function on every start.
+`RegisterSchemas` accepts the schemas of several states at once. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code.
+
+A registered schema can not change. If it differs from the one from the code, `RegisterSchemas` returns an error of the category `ErrPermanent`, and so it does if the database refuses a schema, for example because stored events of the type do not match it. To change the shape of an event, introduce a new event type instead (see [Versioning Events](#versioning-events)).
+
+Once a schema is registered, the database rejects every event of the type that does not match it. `Execute` then returns an error of the category `ErrPermanent`, because writing the same event again gives the same result.
 
 ### Versioning Events
 
@@ -481,6 +499,18 @@ type BookAudited struct {
 
 func (BookAudited) EventType() string {
   return "io.eventsourcingdb.library.book-audited"
+}
+
+func (BookAudited) Schema() map[string]any {
+  return map[string]any{
+    "type": "object",
+    "properties": map[string]any{
+      "isAcquired": map[string]any{"type": "boolean"},
+      "isBorrowed": map[string]any{"type": "boolean"},
+    },
+    "required":             []string{"isAcquired", "isBorrowed"},
+    "additionalProperties": false,
+  }
 }
 ```
 
