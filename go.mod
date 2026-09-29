@@ -2,7 +2,7 @@ module github.com/thenativeweb/architecturekit-golang
 
 go 1.27.1
 
-require github.com/thenativeweb/eventsourcingdb-client-golang v1.5.6
+require github.com/thenativeweb/eventsourcingdb-client-golang v1.6.0
 
 require (
 	dario.cat/mergo v1.0.2 // indirect
