@@ -14,13 +14,12 @@ import (
 
 // Event binds a Go type to an event type of the EventSourcingDB, so that the
 // type string is written exactly once, on the event itself.
+//
+// Every event also describes its data as a JSON schema, which the database
+// checks each event of the type against (see RegisterSchemas). The schema is
+// required, so that no event type can be forgotten.
 type Event interface {
 	EventType() string
-}
-
-// SchemaProvider is optional. Events that implement it get their schema
-// registered with the EventSourcingDB on startup.
-type SchemaProvider interface {
 	Schema() map[string]any
 }
 
@@ -99,9 +98,7 @@ func (s *State[TState]) Evolve[TEvent Event](evolve func(TState, TEvent) TState)
 		return evolve(state, event), nil
 	}
 
-	if provider, ok := any(zero).(SchemaProvider); ok {
-		s.schemas = append(s.schemas, EventSchema{EventType: eventType, Schema: provider.Schema()})
-	}
+	s.schemas = append(s.schemas, EventSchema{EventType: eventType, Schema: zero.Schema()})
 
 	return s
 }
@@ -198,7 +195,8 @@ func (s *State[TState]) copyOf(state TState) TState {
 	return state
 }
 
-// Schemas returns the event schemas that can be registered.
+// Schemas returns the schemas of all events the state evolves by, for
+// registration with the database.
 func (s *State[TState]) Schemas() []EventSchema {
 	return s.schemas
 }

@@ -28,10 +28,20 @@ func (incremented) Schema() map[string]any {
 	}
 }
 
-// reset deliberately has no schema, to exercise the optional SchemaProvider.
 type reset struct{}
 
 func (reset) EventType() string { return "io.thenativeweb.test.reset" }
+
+func (reset) Schema() map[string]any { return objectSchema(map[string]any{}) }
+
+// objectSchema describes an object with exactly the given properties.
+func objectSchema(properties map[string]any) map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties":           properties,
+	}
+}
 
 type counter struct {
 	Total int
@@ -129,13 +139,20 @@ func subjectFor(t *testing.T) string {
 // All three report the same event type. That makes it possible to confront the
 // framework with data that does not match its rule.
 
-// annotated deliberately has no schema, so that the database does not validate
-// the payload and mismatching values can end up in the stream.
+// annotated's schema is deliberately never registered, so that the database
+// does not validate the payload and mismatching values can end up in the
+// stream.
 type annotated struct {
 	Note string `json:"note"`
 }
 
 func (annotated) EventType() string { return "io.thenativeweb.test.annotated" }
+
+func (annotated) Schema() map[string]any { return annotatedSchema() }
+
+func annotatedSchema() map[string]any {
+	return objectSchema(map[string]any{"note": map[string]any{"type": "string"}})
+}
 
 // annotatedBroken produces the same event type with a mismatching field type.
 type annotatedBroken struct {
@@ -144,12 +161,32 @@ type annotatedBroken struct {
 
 func (annotatedBroken) EventType() string { return "io.thenativeweb.test.annotated" }
 
+func (annotatedBroken) Schema() map[string]any { return annotatedSchema() }
+
 // annotatedUnmarshallable cannot be marshalled at all.
 type annotatedUnmarshallable struct {
 	Channel chan int `json:"channel"`
 }
 
 func (annotatedUnmarshallable) EventType() string { return "io.thenativeweb.test.annotated" }
+
+func (annotatedUnmarshallable) Schema() map[string]any { return annotatedSchema() }
+
+// labelled's schema is registered by the tests that use it, so that the
+// database rejects an empty label.
+type labelled struct {
+	Label string `json:"label"`
+}
+
+func (labelled) EventType() string { return "io.thenativeweb.test.labelled" }
+
+func (labelled) Schema() map[string]any {
+	schema := objectSchema(map[string]any{
+		"label": map[string]any{"type": "string", "minLength": 1},
+	})
+	schema["required"] = []string{"label"}
+	return schema
+}
 
 // note is a state whose rule expects annotated.
 type note struct {

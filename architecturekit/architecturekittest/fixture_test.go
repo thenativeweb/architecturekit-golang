@@ -57,13 +57,32 @@ type opened struct {
 
 func (opened) EventType() string { return "test.account.opened" }
 
+func (opened) Schema() map[string]any { return openedSchema() }
+
+func openedSchema() map[string]any {
+	return objectSchema(map[string]any{"owner": map[string]any{"type": "string"}})
+}
+
 type closed struct{}
 
 func (closed) EventType() string { return "test.account.closed" }
 
+func (closed) Schema() map[string]any { return objectSchema(map[string]any{}) }
+
 type unheardOf struct{}
 
 func (unheardOf) EventType() string { return "test.account.unheardOf" }
+
+func (unheardOf) Schema() map[string]any { return objectSchema(map[string]any{}) }
+
+// objectSchema describes an object with exactly the given properties.
+func objectSchema(properties map[string]any) map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties":           properties,
+	}
+}
 
 // unmarshallable reports the same type as opened but cannot be marshalled.
 type unmarshallable struct {
@@ -71,6 +90,8 @@ type unmarshallable struct {
 }
 
 func (unmarshallable) EventType() string { return "test.account.opened" }
+
+func (unmarshallable) Schema() map[string]any { return openedSchema() }
 
 type account struct {
 	IsOpen bool

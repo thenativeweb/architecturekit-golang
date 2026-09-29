@@ -17,6 +17,13 @@ type credited struct {
 
 func (credited) EventType() string { return "io.thenativeweb.test.credited.v3" }
 
+func (credited) Schema() map[string]any {
+	return objectSchema(map[string]any{
+		"amount":   map[string]any{"type": "number"},
+		"currency": map[string]any{"type": "string"},
+	})
+}
+
 type ledger struct {
 	Total    int
 	Currency string
