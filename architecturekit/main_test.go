@@ -12,6 +12,7 @@ import (
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdbtest"
 )
 
 // testStore is used by the integration tests and stays nil while they are
@@ -33,7 +34,7 @@ func TestMain(m *testing.M) {
 	}
 
 	ctx := context.Background()
-	container := eventsourcingdb.NewContainer().WithSigningKey()
+	container := eventsourcingdbtest.NewContainer().WithSigningKey()
 
 	if err := container.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start eventsourcingdb: %v\n", err)
