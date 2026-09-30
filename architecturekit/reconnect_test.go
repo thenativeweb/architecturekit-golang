@@ -3,8 +3,10 @@ package architecturekit_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,6 +84,23 @@ type failingCollector struct{}
 
 func (failingCollector) Apply(context.Context, eventsourcingdb.Event) error {
 	return errors.New("the view is broken")
+}
+
+// flakyCollector fails on the first attempts at one event with a transient
+// failure, as a publisher does whose target is unavailable for a moment.
+type flakyCollector struct {
+	collector
+
+	flakyID      string
+	failuresLeft atomic.Int32
+}
+
+func (c *flakyCollector) Apply(ctx context.Context, event eventsourcingdb.Event) error {
+	if event.ID == c.flakyID && c.failuresLeft.Add(-1) >= 0 {
+		return fmt.Errorf("%w: the target is unavailable", architecturekit.ErrTransient)
+	}
+
+	return c.collector.Apply(ctx, event)
 }
 
 func TestRunProjectionWithReconnects(t *testing.T) {
@@ -172,5 +191,31 @@ func TestRunProjectionWithReconnects(t *testing.T) {
 
 		assert.ErrorContains(t, err, "the view is broken", "expected the failure of Apply")
 		assert.Zero(t, observed.count(), "a failing Apply must not be retried")
+	})
+
+	t.Run("retries a failure of Apply that is transient", func(t *testing.T) {
+		database := &fakeDatabase{
+			events:       []int{0, 1, 2},
+			endObserving: func(int) bool { return false },
+		}
+		observed := &reconnects{}
+		target := &flakyCollector{flakyID: "1"}
+		target.failuresLeft.Store(2)
+
+		stop := runInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), target)
+
+		waitFor(t, func() bool { return len(target.IDs()) == 3 })
+		assert.NoError(t, stop(t), "ending through the context is not a failure")
+
+		// The failing event is tried again until it succeeds, and no event is
+		// skipped or applied twice on the way.
+		assert.Equal(t, []string{"0", "1", "2"}, target.IDs(), "want every event exactly once")
+
+		errs, _ := observed.recorded()
+		require.Len(t, errs, 2, "want two retries")
+		for _, err := range errs {
+			assert.ErrorIs(t, err, architecturekit.ErrTransient, "each retry follows a transient failure")
+			assert.ErrorContains(t, err, "the target is unavailable", "each retry follows the failure of Apply")
+		}
 	})
 }
