@@ -59,10 +59,16 @@ func Query[TUser any, TQuery any, TResult any](
 }
 
 // RespondResult writes a query result, or maps the error the way Respond does
-// for commands, logging an internal failure through the default logger of
-// log/slog.
-func RespondResult[TResult any](w http.ResponseWriter, result TResult, err error) {
-	respondResult(w, result, err, logInternalFailure)
+// for commands, logging an internal failure through the logger of the API,
+// with the route of the request (see WithLogger).
+func RespondResult[TUser any, TResult any](
+	w http.ResponseWriter,
+	r *http.Request,
+	api *API[TUser],
+	result TResult,
+	err error,
+) {
+	respondResult(w, result, err, api.logFailure(r))
 }
 
 // respondResult writes a query result, and logs an internal failure with

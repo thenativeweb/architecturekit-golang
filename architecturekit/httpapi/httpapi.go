@@ -63,10 +63,11 @@ type apiSettings struct {
 	logger *slog.Logger
 }
 
-// WithLogger has the routes the API wires up log every failure they do not
-// explain to the caller through the given logger, once, with the method and
-// the route of the request. Without it, they log through the default logger of
-// log/slog.
+// WithLogger has everything that answers through the API log every failure it
+// does not explain to the caller through the given logger, once, with the
+// method and the route of the request: the routes the API wires up, and
+// Respond, RespondResult and RespondResultAt in a handler of your own. Without
+// it, they log through the default logger of log/slog.
 //
 // A nil logger is a programming error, so WithLogger panics.
 func WithLogger(logger *slog.Logger) APIOption {
@@ -95,7 +96,14 @@ func NewAPI[TUser any](
 
 // logFailure logs a failure the caller is not told about, through the logger
 // of the API, and names the request it happened on.
+//
+// Answering without an API is a programming error, so it panics, and does so
+// on every answer rather than only on a failure, so that a test finds it.
 func (api *API[TUser]) logFailure(r *http.Request) func(status int, err error) {
+	if api == nil {
+		panic("architecturekit/httpapi: answering needs the API, not nil")
+	}
+
 	return func(status int, err error) {
 		logger := api.logger
 		if logger == nil {
@@ -300,12 +308,18 @@ func StatusFor(err error) int {
 // The revision is empty if the command wrote nothing. On failure, it is a
 // message, which explains a failure the caller can fix, and only says
 // "internal server error" otherwise, while the failure is logged through the
-// default logger of log/slog.
+// logger of the API, with the route of the request (see WithLogger).
 //
 // Replace it with your own writer if you need a different shape; StatusFor
 // stays usable either way.
-func Respond(w http.ResponseWriter, written []eventsourcingdb.Event, err error) {
-	respond(w, written, nil, err, logInternalFailure)
+func Respond[TUser any](
+	w http.ResponseWriter,
+	r *http.Request,
+	api *API[TUser],
+	written []eventsourcingdb.Event,
+	err error,
+) {
+	respond(w, written, nil, err, api.logFailure(r))
 }
 
 // respond writes the answer to a command, with the given fields next to the
@@ -364,17 +378,6 @@ func answerOf(written []eventsourcingdb.Event, fields any) (map[string]any, erro
 	answer["revision"] = architecturekit.RevisionOf(written)
 
 	return answer, nil
-}
-
-// logInternalFailure logs a failure the caller is not told about, so that it
-// does not vanish: the caller only learns that something went wrong, and
-// whoever runs the application has to be able to find out what. Respond and
-// RespondResult use it, since they do not know the API; the routes of an API
-// log through its logger instead (see WithLogger). It uses the default logger
-// of log/slog, which an application routes into its own logs with
-// slog.SetDefault.
-func logInternalFailure(status int, err error) {
-	slog.Error("httpapi: internal failure", "status", status, "error", err)
 }
 
 // categorise leaves an error that already says what kind it is alone, and

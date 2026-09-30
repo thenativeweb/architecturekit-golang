@@ -177,9 +177,11 @@ func TestStatusFor(t *testing.T) {
 
 func TestRespond(t *testing.T) {
 	t.Run("reports the revision on success", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		httpapi.Respond(recorder, []eventsourcingdb.Event{{ID: "0"}, {ID: "1"}}, nil)
+		httpapi.Respond(recorder, request, api, []eventsourcingdb.Event{{ID: "0"}, {ID: "1"}}, nil)
 
 		assert.Equal(t, http.StatusOK, recorder.Code)
 		assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
@@ -187,43 +189,56 @@ func TestRespond(t *testing.T) {
 	})
 
 	t.Run("reports an empty revision if nothing was written", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		httpapi.Respond(recorder, nil, nil)
+		httpapi.Respond(recorder, request, api, nil, nil)
 
 		assert.Equal(t, http.StatusOK, recorder.Code)
 		assert.JSONEq(t, `{"revision": ""}`, recorder.Body.String())
 	})
 
 	t.Run("keeps internal failures to itself", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		httpapi.Respond(recorder, nil, errors.New("the password is hunter2"))
+		httpapi.Respond(recorder, request, api, nil, errors.New("the password is hunter2"))
 
 		assert.Equal(t, http.StatusInternalServerError, recorder.Code)
 		assert.NotContains(t, recorder.Body.String(), "hunter2", "an internal failure must not be explained")
 	})
 
-	t.Run("logs internal failures", func(t *testing.T) {
-		logs := logsOf(func() {
-			httpapi.Respond(httptest.NewRecorder(), nil, errors.New("the database is gone"))
+	t.Run("logs internal failures once, through the logger of the API, with the route", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+
+		defaults := logsOf(func() {
+			httpapi.Respond(httptest.NewRecorder(), request, api, nil, errors.New("the database is gone"))
 		})
 
-		assert.Contains(t, logs, "the database is gone", "an internal failure must be logged")
+		assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
+		assert.Contains(t, logs.String(), "the database is gone", "an internal failure must be logged")
+		assert.Contains(t, logs.String(), `route="GET /notes"`)
+		assert.Empty(t, defaults, "nothing must go to the default logger as well")
 	})
 
 	t.Run("does not log failures the caller can fix", func(t *testing.T) {
-		logs := logsOf(func() {
-			httpapi.Respond(httptest.NewRecorder(), nil, architecturekit.NewDomainError("note 7 already exists"))
-		})
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 
-		assert.Empty(t, logs, "a failure the caller can fix must not be logged")
+		httpapi.Respond(httptest.NewRecorder(), request, api, nil, architecturekit.NewDomainError("note 7 already exists"))
+
+		assert.Empty(t, logs.String(), "a failure the caller can fix must not be logged")
 	})
 
 	t.Run("explains failures the caller can fix", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		httpapi.Respond(recorder, nil, architecturekit.NewDomainError("note 7 already exists"))
+		httpapi.Respond(recorder, request, api, nil, architecturekit.NewDomainError("note 7 already exists"))
 
 		assert.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
 		assert.Contains(t, recorder.Body.String(), "note 7 already exists")

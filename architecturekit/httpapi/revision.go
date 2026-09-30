@@ -102,16 +102,17 @@ func ServeUnchanged(
 }
 
 // RespondResultAt writes a query result and says which revision it shows. It
-// maps errors the way RespondResult does.
-func RespondResultAt[TResult any](
+// maps errors, and logs them, the way RespondResult does.
+func RespondResultAt[TUser any, TResult any](
 	w http.ResponseWriter,
 	r *http.Request,
+	api *API[TUser],
 	revision string,
 	result TResult,
 	err error,
 	varies Volatile,
 ) {
-	respondResultAt(w, r, revision, result, err, varies, logInternalFailure)
+	respondResultAt(w, r, revision, result, err, varies, api.logFailure(r))
 }
 
 func respondResultAt[TResult any](

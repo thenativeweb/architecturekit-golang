@@ -82,6 +82,15 @@ func writingStore(t *testing.T) *architecturekit.Store {
 	return architecturekit.NewStore(client, "https://thenativeweb.io")
 }
 
+// inAHandler returns what a handler of its own answers with: a request for
+// GET /notes, as a mux hands it over, and an API that logs into logs.
+func inAHandler(logs *bytes.Buffer) (*http.Request, *httpapi.API[user]) {
+	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+	request.Pattern = "GET /notes"
+
+	return request, httpapi.NewAPI(nil, userFrom, httpapi.WithLogger(loggerInto(logs)))
+}
+
 // loggerInto returns a logger that writes into the given buffer.
 func loggerInto(buffer *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buffer, nil))
@@ -318,9 +327,11 @@ func (r publicNoteRequest) ToCommand(httpapi.NoUser) (note, error) {
 
 func TestRespondResultAt(t *testing.T) {
 	t.Run("writes the result and the revision it shows", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		httpapi.RespondResultAt(recorder, httptest.NewRequest(http.MethodGet, "/notes", nil), "7", []int{1, 2}, nil, nil)
+		httpapi.RespondResultAt(recorder, request, api, "7", []int{1, 2}, nil, nil)
 
 		assert.Equal(t, http.StatusOK, recorder.Code)
 		assert.Equal(t, "7", recorder.Header().Get(httpapi.HeaderRevision))
@@ -328,16 +339,32 @@ func TestRespondResultAt(t *testing.T) {
 		assert.JSONEq(t, `[1, 2]`, recorder.Body.String())
 	})
 
-	t.Run("logs an internal failure through the default logger", func(t *testing.T) {
+	t.Run("logs an internal failure once, through the logger of the API, with the route", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		logs := logsOf(func() {
-			httpapi.RespondResultAt(recorder, httptest.NewRequest(http.MethodGet, "/notes", nil), "7", []int{},
-				errors.New("the index is gone"), nil)
-		})
+		httpapi.RespondResultAt(recorder, request, api, "7", []int{}, errors.New("the index is gone"), nil)
 
 		assert.Equal(t, http.StatusInternalServerError, recorder.Code)
 		assert.Empty(t, recorder.Header().Get(httpapi.HeaderRevision), "a failure shows no revision")
-		assert.Contains(t, logs, "the index is gone")
+		assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
+		assert.Contains(t, logs.String(), `route="GET /notes"`)
+		assert.Contains(t, logs.String(), "the index is gone")
 	})
+}
+
+func TestAnsweringWithoutAnAPI(t *testing.T) {
+	var noAPI *httpapi.API[user]
+	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+
+	for name, answer := range map[string]func(){
+		"Respond":         func() { httpapi.Respond(httptest.NewRecorder(), request, noAPI, nil, nil) },
+		"RespondResult":   func() { httpapi.RespondResult(httptest.NewRecorder(), request, noAPI, []int{}, nil) },
+		"RespondResultAt": func() { httpapi.RespondResultAt(httptest.NewRecorder(), request, noAPI, "7", []int{}, nil, nil) },
+	} {
+		t.Run(name+" panics, also on success", func(t *testing.T) {
+			assert.PanicsWithValue(t, "architecturekit/httpapi: answering needs the API, not nil", answer)
+		})
+	}
 }

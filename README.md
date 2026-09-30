@@ -1567,7 +1567,7 @@ For an application without authentication, call the `NewPublicAPI` function inst
 api := httpapi.NewPublicAPI(store)
 ```
 
-The routes of an API log every failure they do not explain to the caller, once, with the method and the route of the request. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
+Everything that answers through an API logs every failure it does not explain to the caller, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
 
 ```go
 api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
@@ -1642,7 +1642,7 @@ The revision is empty if the command did not write anything. A caller hands it t
 
 Otherwise, it answers with the status code that matches the error (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)) and the error message. For status codes of `500` and above, the message is `internal server error`, and the actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)).
 
-To answer this way in a handler of your own, call the `Respond` function with the response writer, the written events, and the error. Since it does not know the API, it logs with the default logger of `log/slog`.
+To answer this way in a handler of your own, call the `Respond` function with the response writer, the request, the API, the written events, and the error. Like the route, it logs through the logger of the API, with the route of the request.
 
 #### Adding to the Answer
 
@@ -1690,7 +1690,7 @@ To answer in a format of your own, for example with another status code, call th
 mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Request) {
   handled, err := httpapi.Handle[acquireBookRequest](r, api, acquireBook)
   if err != nil {
-    httpapi.Respond(w, nil, err)
+    httpapi.Respond(w, r, api, nil, err)
     return
   }
 
@@ -1753,7 +1753,7 @@ httpapi.Query(api, mux, "GET /api/books", toListBooks, listBooks(catalog))
 
 The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. Errors are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
 
-To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the result, and the error.
+To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error.
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 
@@ -1896,12 +1896,12 @@ The last argument of `ServeUnchanged` and `RespondResultAt` is a `Volatile` func
 ```go
 mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
   if _, err := httpapi.UserOf(r, api); err != nil {
-    httpapi.RespondResult(w, struct{}{}, err)
+    httpapi.RespondResult(w, r, api, struct{}{}, err)
     return
   }
 
   if err := httpapi.Await(r.Context(), r, catalog, httpapi.DefaultWait); err != nil {
-    httpapi.RespondResult(w, struct{}{}, err)
+    httpapi.RespondResult(w, r, api, struct{}{}, err)
     return
   }
 
@@ -1912,7 +1912,7 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
   }
 
   books, err := httpapi.Ask(r, api, toListBooks, listBooks(catalog))
-  httpapi.RespondResultAt(w, r, revision, books, err, nil)
+  httpapi.RespondResultAt(w, r, api, revision, books, err, nil)
 })
 ```
 
