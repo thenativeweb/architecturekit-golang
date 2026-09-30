@@ -116,6 +116,32 @@ func newFakeDatabase(t *testing.T, database *fakeDatabase) *eventsourcingdb.Clie
 	}))
 	t.Cleanup(server.Close)
 
+	return clientFor(t, server)
+}
+
+// refusingDatabase answers requests to the given path the way EventSourcingDB
+// refuses a request, with the given status and reason, and every other request
+// with an empty result. It returns a client for it.
+func refusingDatabase(t *testing.T, path string, status int, reason string) *eventsourcingdb.Client {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Server", "EventSourcingDB/test")
+
+		if request.URL.Path == path {
+			writer.WriteHeader(status)
+			_, _ = fmt.Fprint(writer, reason)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	return clientFor(t, server)
+}
+
+// clientFor returns a client for the given server.
+func clientFor(t *testing.T, server *httptest.Server) *eventsourcingdb.Client {
+	t.Helper()
+
 	serverURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
 

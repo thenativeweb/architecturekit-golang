@@ -333,7 +333,7 @@ func drive(
 
 	for event, err := range events {
 		if err != nil {
-			failure := fmt.Errorf("%w: reading %v", ErrTransient, err)
+			failure := databaseFailure(err, "reading events")
 			if open {
 				failure = errors.Join(failure, writer.rollback(ctx))
 			}

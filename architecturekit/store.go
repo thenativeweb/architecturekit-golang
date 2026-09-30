@@ -6,7 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"net/http"
 	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -181,7 +181,7 @@ func fold[TState any](
 
 	for event, err := range store.client.ReadEvents(ctx, subject, options) {
 		if err != nil {
-			return current, "", fmt.Errorf("%w: reading %q: %v", ErrTransient, subject, err)
+			return current, "", databaseFailure(err, fmt.Sprintf("reading %q", subject))
 		}
 
 		if err := store.verify(event); err != nil {
@@ -258,21 +258,11 @@ func (s *Store) write(
 	}
 
 	written, err := s.client.WriteEvents(candidates, preconditions)
-	if err == nil {
-		return written, nil
+	if err != nil {
+		return nil, databaseFailure(err, fmt.Sprintf("writing %q", subject))
 	}
 
-	// A failed precondition and an event that does not match its schema are
-	// both answered with 409. The client exports no typed error, so only the
-	// reason inside the error text tells them apart.
-	if isConflict(err) {
-		if strings.Contains(err.Error(), "schema conflict") {
-			return nil, fmt.Errorf("%w: writing %q: %v", ErrPermanent, subject, err)
-		}
-		return nil, fmt.Errorf("%w on %q: %v", ErrConflict, subject, err)
-	}
-
-	return nil, fmt.Errorf("%w: writing %q: %v", ErrPermanent, subject, err)
+	return written, nil
 }
 
 // RegisterSchemas registers the schemas of the given events with the database.
@@ -302,8 +292,8 @@ func (s *Store) RegisterSchemas(schemas ...[]EventSchema) error {
 			if refusal == nil {
 				continue
 			}
-			if !isConflict(refusal) {
-				return fmt.Errorf("%w: registering schema for %q: %v", ErrPermanent, schema.EventType, refusal)
+			if statusCodeOf(refusal) != http.StatusConflict {
+				return databaseFailure(refusal, fmt.Sprintf("registering schema for %q", schema.EventType))
 			}
 
 			// Either another instance has registered the schema in the
@@ -370,7 +360,7 @@ func (s *Store) readRegisteredSchemas() (map[string]map[string]any, error) {
 
 	for eventType, err := range s.client.ReadEventTypes(context.Background()) {
 		if err != nil {
-			return nil, fmt.Errorf("%w: reading the registered schemas: %v", ErrTransient, err)
+			return nil, databaseFailure(err, "reading the registered schemas")
 		}
 		if eventType.Schema != nil {
 			registered[eventType.EventType] = *eventType.Schema
@@ -409,13 +399,6 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 	}
 
 	return bytes.Equal(encodedLeft, encodedRight), nil
-}
-
-// isConflict reports whether the database answered with 409. The client
-// exports no typed error, which leaves nothing but the status code inside the
-// error text.
-func isConflict(err error) bool {
-	return strings.Contains(err.Error(), "'409'")
 }
 
 // Execute loads the state, lets the decider decide, and appends the resulting

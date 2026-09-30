@@ -395,8 +395,14 @@ Every error architecturekit returns belongs to one of four categories. Use `erro
 
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
-- `ErrTransient` means that trying again may help, for example if reading from the database failed.
+- `ErrTransient` means that trying again may help, for example if the database can not be reached.
 - `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if it does not match the schema of its type, or if a subject contains an event type the state has no `Evolve` rule for.
+
+A failure of the database is sorted by what its answer means, the same way for reading and for writing:
+
+- If the database can not be reached, if the connection breaks, if the database asks to slow down (`429`), or if it is unable to answer for now (`5xx`), for example because it is shutting down, the error belongs to `ErrTransient`.
+- If the database rejects the API token (`401`), if it rejects the request itself, for example because it is malformed (`400`) or too large (`413`), or if the address does not lead to an EventSourcingDB, the error belongs to `ErrPermanent`. For a rejected API token, the message says so.
+- If a precondition did not hold (`409`), the error belongs to `ErrConflict`. If an event does not match its schema, which the database answers with the same status, it belongs to `ErrPermanent`.
 
 ```go
 writtenEvents, err := architecturekit.Execute(
@@ -943,7 +949,7 @@ cancel()
 
 Canceling the context is not an error. If `Apply` returns an error, the function stops and returns it.
 
-If reading fails, or if the database ends the stream, for example because it restarts, the function waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again. To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
+If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the function waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again. To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
 
 ```go
 store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
@@ -956,7 +962,7 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
 
 The observer receives the reason, which is `nil` if the database ended the stream, and the delay before the next attempt.
 
-*Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable.*
+*Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable. A failure that trying again will not fix, for example a rejected API token, stops the function, which returns it (see [Handling Errors](#handling-errors)).*
 
 To only apply the events that are already stored, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied:
 
