@@ -70,6 +70,7 @@ func TestStartProjection(t *testing.T) {
 
 		status := run.Status()
 		assert.Equal(t, architecturekit.PhaseLive, status.Phase)
+		assert.True(t, status.HasCaughtUp)
 		assert.Equal(t, "2", status.Revision)
 		assert.NoError(t, status.Err)
 		assert.Equal(t, 0, status.Attempts)
@@ -89,6 +90,7 @@ func TestStartProjection(t *testing.T) {
 		status = run.Status()
 		assert.Equal(t, architecturekit.PhaseStopped, status.Phase)
 		assert.NoError(t, status.Err)
+		assert.True(t, status.HasCaughtUp, "a run that has caught up once keeps saying so after it stopped")
 	})
 
 	t.Run("refuses a projection that is transactional as well", func(t *testing.T) {
@@ -147,6 +149,7 @@ func TestProjectionRun(t *testing.T) {
 
 		// Having caught up once, the run does not take it back.
 		assert.True(t, isClosed(run.CaughtUp()), "CaughtUp must stay closed while the run reconnects")
+		assert.True(t, status.HasCaughtUp, "HasCaughtUp must stay true while the run reconnects")
 
 		stop(t)
 	})
@@ -187,6 +190,7 @@ func TestProjectionRun(t *testing.T) {
 			"the disruption began at %v, but the status says %v", first.Since, later.Since)
 		assert.ErrorIs(t, later.Err, architecturekit.ErrTransient, "an unreachable database is transient")
 		assert.False(t, isClosed(run.CaughtUp()), "a run that never read anything has not caught up")
+		assert.False(t, later.HasCaughtUp, "a run that never read anything has not caught up")
 
 		stop(t)
 
@@ -210,6 +214,7 @@ func TestProjectionRun(t *testing.T) {
 		assert.Equal(t, architecturekit.PhaseStopped, status.Phase)
 		assert.ErrorIs(t, status.Err, run.Err())
 		assert.False(t, isClosed(run.CaughtUp()), "a run that failed before catching up has not caught up")
+		assert.False(t, status.HasCaughtUp, "a run that failed before catching up has not caught up")
 	})
 }
 

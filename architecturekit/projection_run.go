@@ -45,6 +45,11 @@ type ProjectionStatus struct {
 	// Revision is the ID of the last event the run has applied and committed,
 	// or an empty string if there is none yet.
 	Revision string
+
+	// HasCaughtUp tells whether the run has caught up at least once. Like
+	// CaughtUp, it stays true while the run reconnects later on, which tells a
+	// run that is behind for a while from one that has never been up to date.
+	HasCaughtUp bool
 }
 
 // ProjectionRun is a projection that runs in the background, started with
@@ -168,6 +173,7 @@ func (r *ProjectionRun) caughtUpNow() {
 	r.status.Since = time.Now()
 	r.status.Err = nil
 	r.status.Attempts = 0
+	r.status.HasCaughtUp = true
 	r.mutex.Unlock()
 
 	r.caughtUpOnce.Do(func() { close(r.caughtUp) })
