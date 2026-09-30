@@ -15,12 +15,14 @@ import (
 // Event binds a Go type to an event type of the EventSourcingDB, so that the
 // type string is written exactly once, on the event itself.
 //
-// Every event also describes its data as a JSON schema, which the database
-// checks each event of the type against (see RegisterSchemas). The schema is
-// required, so that no event type can be forgotten.
+// Every event also has a JSON schema for its data, which the database checks
+// each event of the type against (see RegisterSchemas). The kit derives it
+// from the struct (see DeriveSchema), so that no event type can be forgotten.
+// An event that needs another schema, e.g. one with constraints the struct
+// can not express, returns it from a function Schema() map[string]any, which
+// takes precedence.
 type Event interface {
 	EventType() string
-	Schema() map[string]any
 }
 
 // Command knows the subject it acts on, and the conditions under which its
@@ -98,7 +100,12 @@ func (s *State[TState]) Evolve[TEvent Event](evolve func(TState, TEvent) TState)
 		return evolve(state, event), nil
 	}
 
-	s.schemas = append(s.schemas, EventSchema{EventType: eventType, Schema: zero.Schema()})
+	schema, err := eventSchemaOf[TEvent]()
+	if err != nil {
+		panic(fmt.Sprintf("architecturekit: event type %q: %v", eventType, err))
+	}
+
+	s.schemas = append(s.schemas, EventSchema{EventType: eventType, Schema: schema})
 
 	return s
 }

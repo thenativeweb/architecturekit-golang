@@ -102,7 +102,7 @@ func (c ReturnBook) Preconditions() []architecturekit.Precondition {
 
 ### Defining Events
 
-An event describes what has happened. Define it as a struct with JSON annotations and implement two functions: `EventType`, which returns the event type, and `Schema`, which returns a JSON schema for the event's data. This makes the struct an `Event`:
+An event describes what has happened. Define it as a struct with JSON annotations and implement the `EventType` function, which returns the event type. This makes the struct an `Event`:
 
 ```go
 type BookAcquired struct {
@@ -115,19 +115,6 @@ func (BookAcquired) EventType() string {
   return "io.eventsourcingdb.library.book-acquired"
 }
 
-func (BookAcquired) Schema() map[string]any {
-  return map[string]any{
-    "type": "object",
-    "properties": map[string]any{
-      "title":  map[string]any{"type": "string"},
-      "author": map[string]any{"type": "string"},
-      "isbn":   map[string]any{"type": "string"},
-    },
-    "required":             []string{"title", "author", "isbn"},
-    "additionalProperties": false,
-  }
-}
-
 type BookBorrowed struct {
   BorrowedBy    string `json:"borrowedBy"`
   BorrowedUntil string `json:"borrowedUntil"`
@@ -137,36 +124,81 @@ func (BookBorrowed) EventType() string {
   return "io.eventsourcingdb.library.book-borrowed"
 }
 
-func (BookBorrowed) Schema() map[string]any {
-  return map[string]any{
-    "type": "object",
-    "properties": map[string]any{
-      "borrowedBy":    map[string]any{"type": "string"},
-      "borrowedUntil": map[string]any{"type": "string", "format": "date"},
-    },
-    "required":             []string{"borrowedBy", "borrowedUntil"},
-    "additionalProperties": false,
-  }
-}
-
 type BookReturned struct{}
 
 func (BookReturned) EventType() string {
   return "io.eventsourcingdb.library.book-returned"
 }
+```
 
-func (BookReturned) Schema() map[string]any {
-  return map[string]any{
-    "type":                 "object",
-    "properties":           map[string]any{},
-    "additionalProperties": false,
-  }
+The struct becomes the event's data. The subject is taken from the command, and the source from the store.
+
+### Describing Events with Schemas
+
+Every event type has a JSON schema, which the database checks every event of the type against, once the schema is registered (see [Registering Event Schemas](#registering-event-schemas)). The kit derives it from the struct, so that it describes exactly what `encoding/json` writes for the event:
+
+- A struct is an object with the fields `encoding/json` writes: named by their `json` tags, without fields tagged `-` and unexported ones, and with the fields of embedded structs in place of the embedded struct. Fields with `omitempty` or `omitzero`, and fields of an embedded pointer, are optional, all others are required, and no other fields are allowed.
+- A `string` is a string, a `bool` a boolean, an integer an integer, and a floating-point number a number. The `string` option of a `json` tag turns such a field into a string.
+- A slice is an array, a `[]byte` a string, and an array an array of exactly its length. A map is an object whose values all have the same schema.
+- A pointer, a slice and a map may also be `null`, since `encoding/json` writes `null` for `nil`, unless a field of such a type is optional and therefore left out instead.
+- A `time.Time` is a string in the `date-time` format, and a type with a `MarshalText` function a string. An interface allows any value.
+
+For `BookBorrowed`, this yields the following schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "borrowedBy": { "type": "string" },
+    "borrowedUntil": { "type": "string" }
+  },
+  "required": ["borrowedBy", "borrowedUntil"],
+  "additionalProperties": false
 }
 ```
 
-The struct becomes the event's data. The subject is taken from the command, and the source from the store. The database checks every event against the schema of its type, once the schema is registered (see [Registering Event Schemas](#registering-event-schemas)).
+These rules do not change, since a registered schema can not change either.
 
-*Note that the schema is required, so that no event type can be forgotten. An event without a `Schema` function does not compile.*
+To constrain a value further than its Go type does, declare a type for it with a `Schema` function, which returns the JSON schema of the type. Wherever a field has that type, the derived schema takes it over. For example, to make sure that `borrowedUntil` is a date, declare a `Date` type and use it for the field:
+
+```go
+type Date string
+
+func (Date) Schema() map[string]any {
+  return map[string]any{"type": "string", "format": "date"}
+}
+
+type BookBorrowed struct {
+  BorrowedBy    string `json:"borrowedBy"`
+  BorrowedUntil Date   `json:"borrowedUntil"`
+}
+```
+
+A type that encodes itself with a `MarshalJSON` function needs such a `Schema` function, too, since the kit can not know what the function writes. If the schema of an event can not be derived, for example because of such a type, a recursive type, or a channel, `Evolve` panics and names the field.
+
+If an event needs a schema that its fields can not express, give the event itself a `Schema` function. It takes precedence over the derived schema. To start from the derived schema, call the `DeriveSchema` function, which derives the schema of a type without calling its own `Schema` function. For example, to require at least one of two optional fields:
+
+```go
+type BookCorrected struct {
+  Title  string `json:"title,omitempty"`
+  Author string `json:"author,omitempty"`
+}
+
+func (BookCorrected) EventType() string {
+  return "io.eventsourcingdb.library.book-corrected"
+}
+
+func (BookCorrected) Schema() map[string]any {
+  schema := architecturekit.DeriveSchema[BookCorrected]()
+  schema["minProperties"] = 1
+
+  return schema
+}
+```
+
+`DeriveSchema` returns a new schema on every call, with objects as `map[string]any` and arrays as `[]any`, as `encoding/json` decodes them.
+
+*Note that a json tag name that `encoding/json` considers invalid also makes `Evolve` panic, since `encoding/json` reads such a name differently depending on the Go version the application declares.*
 
 ### Defining State
 
@@ -430,7 +462,7 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 ### Registering Event Schemas
 
-The database only checks events against a schema once it is registered. The `Evolve` function collects the schemas of all events of a state. To get them as a slice of `EventSchema`, each with the fields `EventType` and `Schema`, call the `Schemas` function on the state. Then hand them over to the `RegisterSchemas` function of the store:
+The database only checks events against a schema once it is registered. The `Evolve` function collects the schemas of all events of a state, derived or their own (see [Describing Events with Schemas](#describing-events-with-schemas)). To get them as a slice of `EventSchema`, each with the fields `EventType` and `Schema`, call the `Schemas` function on the state. Then hand them over to the `RegisterSchemas` function of the store:
 
 ```go
 err := store.RegisterSchemas(bookState.Schemas())
@@ -442,6 +474,8 @@ if err != nil {
 `RegisterSchemas` accepts the schemas of several states at once. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code.
 
 A registered schema can not change. If it differs from the one from the code, `RegisterSchemas` returns an error of the category `ErrPermanent`, and so it does if the database refuses a schema, for example because stored events of the type do not match it. To change the shape of an event, introduce a new event type instead (see [Versioning Events](#versioning-events)).
+
+*Note that this also holds if you remove the `Schema` function of an event whose schema is registered already: the derived schema has to be exactly the registered one, or `RegisterSchemas` fails. Keep the `Schema` function of such an event, unless you have compared both.*
 
 Once a schema is registered, the database rejects every event of the type that does not match it. `Execute` then returns an error of the category `ErrPermanent`, because writing the same event again gives the same result.
 
@@ -506,18 +540,6 @@ type BookAudited struct {
 
 func (BookAudited) EventType() string {
   return "io.eventsourcingdb.library.book-audited"
-}
-
-func (BookAudited) Schema() map[string]any {
-  return map[string]any{
-    "type": "object",
-    "properties": map[string]any{
-      "isAcquired": map[string]any{"type": "boolean"},
-      "isBorrowed": map[string]any{"type": "boolean"},
-    },
-    "required":             []string{"isAcquired", "isBorrowed"},
-    "additionalProperties": false,
-  }
 }
 ```
 
