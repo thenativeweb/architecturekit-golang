@@ -421,6 +421,120 @@ func (c CommentOnBook) Preconditions() []architecturekit.Precondition {
 
 *Note that `Unconditionally` can not be combined with other preconditions.*
 
+### Sharing Code Between Commands
+
+The commands of one aggregate usually act on the same kind of subject, guarded by the same preconditions, and their deciders check the same things first. Write these once instead of for every command.
+
+#### Sharing Subjects and Preconditions
+
+Define `Subject` and `Preconditions` on a struct of their own, and embed it in every command. Go promotes the functions and fields of an embedded struct, so every command that embeds it is a `Command`:
+
+```go
+type BookTarget struct {
+  BookID string
+}
+
+func (t BookTarget) Subject() string {
+  return "/books/" + t.BookID
+}
+
+func (t BookTarget) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.OnStateRead(),
+  }
+}
+
+type AcquireBook struct {
+  BookTarget
+  Title  string
+  Author string
+  ISBN   string
+}
+
+type BorrowBook struct {
+  BookTarget
+  ReaderID      string
+  BorrowedUntil string
+}
+
+type ReturnBook struct {
+  BookTarget
+}
+```
+
+A command then names its book through the embedded struct, as in `BorrowBook{BookTarget: BookTarget{BookID: "42"}, ReaderID: "23"}`, and a decider reads it as `cmd.BookID`.
+
+The command that creates a book can embed the struct, too, since `OnStateRead` requires a subject without any events to still be pristine (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)). That is different if the struct checks the revision of the caller instead (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)): a new book has no revision yet. Then the creating command does not embed the struct, and prevents duplicates itself:
+
+```go
+type BookTarget struct {
+  BookID          string
+  ExpectedEventID string
+}
+
+func (t BookTarget) Subject() string {
+  return "/books/" + t.BookID
+}
+
+func (t BookTarget) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition(t.Subject(), t.ExpectedEventID)),
+  }
+}
+
+type AcquireBook struct {
+  BookID string
+  Title  string
+  Author string
+  ISBN   string
+}
+
+func (c AcquireBook) Subject() string {
+  return "/books/" + c.BookID
+}
+
+func (c AcquireBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition(c.Subject())),
+  }
+}
+```
+
+#### Sharing Checks
+
+Most deciders of an aggregate first check that it exists. Write that check once, as a function that returns a domain error, and call it at the beginning of every decider that needs it:
+
+```go
+func requireAcquired(book Book, bookID string) error {
+  if !book.IsAcquired {
+    return architecturekit.NewDomainError("book %s does not exist", bookID)
+  }
+
+  return nil
+}
+
+var borrowBook = architecturekit.Decider[BorrowBook, Book]{
+  State: bookState,
+  Decide: func(ctx context.Context, cmd BorrowBook, book Book) ([]architecturekit.Event, error) {
+    if err := requireAcquired(book, cmd.BookID); err != nil {
+      return nil, err
+    }
+    if book.IsBorrowed {
+      return nil, architecturekit.NewDomainError("book %s is already borrowed", cmd.BookID)
+    }
+
+    return []architecturekit.Event{
+      BookBorrowed{
+        BorrowedBy:    cmd.ReaderID,
+        BorrowedUntil: cmd.BorrowedUntil,
+      },
+    }, nil
+  },
+}
+```
+
+*Note that only the state knows what it means for an aggregate to exist, which is why the kit does not check it. The precondition that requires an existing subject protects the write (see [Requiring an Existing Subject](#requiring-an-existing-subject)), but it fails with an error of the category `ErrConflict`, which is transient. A check in the decider answers a command on a book that does not exist with a domain error instead.*
+
 ### Handling Errors
 
 Every error architecturekit returns belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
