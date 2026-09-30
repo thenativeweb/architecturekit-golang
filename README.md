@@ -1136,13 +1136,14 @@ case <-run.Done():
 
 *Note that if the database can not be reached at the start, the run keeps trying, and `CaughtUp` stays open. To wait for a limited time only, add a case with `time.After` to the `select` statement.*
 
-To find out where a run stands, for example for a health check, call the `Status` function. It returns a `ProjectionStatus` with these fields:
+To find out where a run stands, call the `Status` function. It returns a `ProjectionStatus` with these fields:
 
 - `Phase` is `PhaseCatchingUp`, `PhaseLive`, `PhaseReconnecting`, or `PhaseStopped`.
 - `Since` is when the phase began. For `PhaseReconnecting`, that is when the disruption began, not when the latest attempt did.
 - `Err` is why the run is reconnecting or has stopped. It is `nil` if the database ended the stream, or if the run stopped because its context ended.
 - `Attempts` counts the attempts to read again within the current disruption.
 - `Revision` is the ID of the last event the run has applied and committed.
+- `HasCaughtUp` tells whether the run has caught up at least once. Like `CaughtUp`, it stays `true` while the run reconnects later on.
 
 ```go
 status := run.Status()
@@ -1152,7 +1153,7 @@ if status.Phase == architecturekit.PhaseReconnecting && time.Since(status.Since)
 }
 ```
 
-For a transactional projection, call the `StartTransactionalProjection` function instead (see [Resuming Projections](#resuming-projections)).
+For health checks that answer by the status of the runs, see [Checking Health over HTTP](#checking-health-over-http). For a transactional projection, call the `StartTransactionalProjection` function instead (see [Resuming Projections](#resuming-projections)).
 
 ### Resuming Projections
 
@@ -1885,6 +1886,49 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
   httpapi.RespondResultAt(w, r, revision, books, err, nil)
 })
 ```
+
+### Checking Health over HTTP
+
+An orchestrator such as Kubernetes regularly asks an application whether it can serve requests, and whether it is alive. To answer both by the state of the projections, hand the runs started with `StartProjection` over to the `Readiness` and `Liveness` functions, by name, and serve the handlers they return on paths of your choice:
+
+```go
+run := architecturekit.StartProjection(ctx, store, "/books", true, catalogProjection)
+
+projections := map[string]*architecturekit.ProjectionRun{"catalog": run}
+
+mux.Handle("GET /ready", httpapi.Readiness(projections))
+mux.Handle("GET /live", httpapi.Liveness(projections))
+```
+
+Both answer with `200 OK` or `503 Service Unavailable`, depending on where the projections stand:
+
+| Projection | `Readiness` | `Liveness` |
+| --- | --- | --- |
+| catches up for the first time | `503` | `200` |
+| is live | `200` | `200` |
+| reconnects after it has caught up | `200` | `200` |
+| has stopped | `503` | `503` |
+
+The application is ready once every projection has caught up, since a half-built view answers wrongly. A projection that reconnects later on, for example because the database restarts, keeps it ready: its view is behind, but consistent, and every instance shares the database, so taking them all out would answer nothing instead of something that is behind. A projection that has stopped makes the application neither ready nor alive, since its view never changes again. The orchestrator then restarts the application, which builds the view anew, with a configuration that may have been fixed in the meantime. There is no time limit for reconnecting, since a restart does not bring the database back.
+
+The body tells where each projection stands:
+
+```json
+{
+  "isReady": true,
+  "projections": {
+    "catalog": {
+      "phase": "live",
+      "since": "2026-09-30T12:00:00Z",
+      "hasCaughtUp": true,
+      "attempts": 0,
+      "revision": "42"
+    }
+  }
+}
+```
+
+*Note that the body does not tell why a projection reconnects or has stopped, since health checks are usually reachable without signing in, and the reason may name internal addresses. Log it instead, for example by waiting for `Done` and calling `Err`.*
 
 ### Testing Deciders
 
