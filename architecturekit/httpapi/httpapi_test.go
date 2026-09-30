@@ -3,7 +3,6 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -177,21 +176,23 @@ func TestStatusFor(t *testing.T) {
 }
 
 func TestRespond(t *testing.T) {
-	t.Run("reports event IDs on success", func(t *testing.T) {
+	t.Run("reports the revision on success", func(t *testing.T) {
 		recorder := httptest.NewRecorder()
 
 		httpapi.Respond(recorder, []eventsourcingdb.Event{{ID: "0"}, {ID: "1"}}, nil)
 
 		assert.Equal(t, http.StatusOK, recorder.Code)
 		assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+		assert.JSONEq(t, `{"revision": "1"}`, recorder.Body.String(), "want the ID of the last event, and nothing else")
+	})
 
-		var body struct {
-			Message  string   `json:"message"`
-			EventIDs []string `json:"eventIds"`
-		}
-		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
-		assert.Equal(t, "ok", body.Message)
-		assert.Equal(t, []string{"0", "1"}, body.EventIDs)
+	t.Run("reports an empty revision if nothing was written", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+
+		httpapi.Respond(recorder, nil, nil)
+
+		assert.Equal(t, http.StatusOK, recorder.Code)
+		assert.JSONEq(t, `{"revision": ""}`, recorder.Body.String())
 	})
 
 	t.Run("keeps internal failures to itself", func(t *testing.T) {

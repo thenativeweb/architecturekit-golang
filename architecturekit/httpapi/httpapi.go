@@ -50,6 +50,31 @@ type ToCommand[TUser any, TCommand any] interface {
 type API[TUser any] struct {
 	store    *architecturekit.Store
 	userFrom func(*http.Request) (TUser, error)
+
+	// logger is nil unless the API was created with WithLogger, in which case
+	// the default logger of log/slog is used.
+	logger *slog.Logger
+}
+
+// APIOption configures an API.
+type APIOption func(*apiSettings)
+
+type apiSettings struct {
+	logger *slog.Logger
+}
+
+// WithLogger has the routes the API wires up log every failure they do not
+// explain to the caller through the given logger, once, with the method and
+// the route of the request. Without it, they log through the default logger of
+// log/slog.
+//
+// A nil logger is a programming error, so WithLogger panics.
+func WithLogger(logger *slog.Logger) APIOption {
+	if logger == nil {
+		panic("architecturekit/httpapi: WithLogger needs a logger, not nil")
+	}
+
+	return func(settings *apiSettings) { settings.logger = logger }
 }
 
 // NewAPI creates an API that determines the user with userFrom. A request
@@ -58,8 +83,28 @@ type API[TUser any] struct {
 func NewAPI[TUser any](
 	store *architecturekit.Store,
 	userFrom func(*http.Request) (TUser, error),
+	options ...APIOption,
 ) *API[TUser] {
-	return &API[TUser]{store: store, userFrom: userFrom}
+	var settings apiSettings
+	for _, option := range options {
+		option(&settings)
+	}
+
+	return &API[TUser]{store: store, userFrom: userFrom, logger: settings.logger}
+}
+
+// logFailure logs a failure the caller is not told about, through the logger
+// of the API, and names the request it happened on.
+func (api *API[TUser]) logFailure(r *http.Request) func(status int, err error) {
+	return func(status int, err error) {
+		logger := api.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+
+		logger.Error("httpapi: internal failure",
+			"method", r.Method, "route", r.Pattern, "status", status, "error", err)
+	}
 }
 
 // UserOf determines who is asking, the same way Handle and Ask do.
@@ -83,10 +128,10 @@ type NoUser struct{}
 
 // NewPublicAPI creates an API for an application without authentication.
 // Every request is served, and commands and queries receive NoUser.
-func NewPublicAPI(store *architecturekit.Store) *API[NoUser] {
+func NewPublicAPI(store *architecturekit.Store, options ...APIOption) *API[NoUser] {
 	return NewAPI(store, func(*http.Request) (NoUser, error) {
 		return NoUser{}, nil
-	})
+	}, options...)
 }
 
 // Handled is what a command did. It carries the command itself, so that a
@@ -148,9 +193,43 @@ func Handle[
 	return handled, err
 }
 
+// RouteOption configures a route that Route wires up.
+type RouteOption[TCommand any] func(*routeSettings[TCommand])
+
+type routeSettings[TCommand any] struct {
+	fields func(Handled[TCommand]) any
+}
+
+// Adding has a route answer with further fields next to the revision, such as
+// the ID of an aggregate the command created. The function receives what the
+// command did, and returns a value that encodes to a JSON object, usually a
+// struct with json tags. It is only called after the command has succeeded.
+//
+// The kit adds the revision itself, so the fields must not contain one. A
+// value that holds a revision, or that does not encode to a JSON object, is a
+// programming error: the route then answers 500, and logs why, although the
+// events have been written.
+//
+// A nil function, or giving Adding twice, is a programming error, so it
+// panics.
+func Adding[TCommand any](fields func(Handled[TCommand]) any) RouteOption[TCommand] {
+	if fields == nil {
+		panic("architecturekit/httpapi: Adding needs a function, not nil")
+	}
+
+	return func(settings *routeSettings[TCommand]) {
+		if settings.fields != nil {
+			panic("architecturekit/httpapi: Adding is given twice")
+		}
+
+		settings.fields = fields
+	}
+}
+
 // Route wires a request DTO to a decider, adds it to the mux and answers in
-// the kit's default format. Only TRequest has to be given: TUser comes
-// from the API, TCommand and TState come from the decider.
+// the kit's default format, which is the revision the command wrote (see
+// Respond), plus the fields of Adding, if given. Only TRequest has to be
+// given: TUser comes from the API, TCommand and TState come from the decider.
 func Route[
 	TRequest ToCommand[TUser, TCommand],
 	TUser any,
@@ -161,10 +240,22 @@ func Route[
 	mux *http.ServeMux,
 	pattern string,
 	decider architecturekit.Decider[TCommand, TState],
+	options ...RouteOption[TCommand],
 ) {
+	var settings routeSettings[TCommand]
+	for _, option := range options {
+		option(&settings)
+	}
+
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handled, err := Handle[TRequest](r, api, decider)
-		Respond(w, handled.Events, err)
+
+		var fields any
+		if err == nil && settings.fields != nil {
+			fields = settings.fields(handled)
+		}
+
+		respond(w, handled.Events, fields, err, api.logFailure(r))
 	}))
 }
 
@@ -200,21 +291,46 @@ func StatusFor(err error) int {
 	}
 }
 
-// Respond writes the kit's default answer. Replace it with your own writer if
-// you need a different shape; StatusFor stays usable either way.
+// Respond writes the kit's default answer to a command. On success, that is
+// the revision the command wrote, the ID of the last event, which a caller
+// hands to a query to read its own writes (see QueryRevisioned):
+//
+//	{"revision": "42"}
+//
+// The revision is empty if the command wrote nothing. On failure, it is a
+// message, which explains a failure the caller can fix, and only says
+// "internal server error" otherwise, while the failure is logged through the
+// default logger of log/slog.
+//
+// Replace it with your own writer if you need a different shape; StatusFor
+// stays usable either way.
 func Respond(w http.ResponseWriter, written []eventsourcingdb.Event, err error) {
-	status := StatusFor(err)
+	respond(w, written, nil, err, logInternalFailure)
+}
 
-	body := map[string]any{"message": "ok"}
+// respond writes the answer to a command, with the given fields next to the
+// revision, and logs an internal failure with logFailure.
+func respond(
+	w http.ResponseWriter,
+	written []eventsourcingdb.Event,
+	fields any,
+	err error,
+	logFailure func(status int, err error),
+) {
+	var body map[string]any
+	if err == nil {
+		body, err = answerOf(written, fields)
+	}
+
+	status := StatusFor(err)
 	switch {
 	case err == nil:
-		body["eventIds"] = idsOf(written)
 	case status < http.StatusInternalServerError:
-		body["message"] = err.Error()
+		body = map[string]any{"message": err.Error()}
 	default:
 		// Internal failures are not explained to the caller, but logged.
-		body["message"] = "internal server error"
-		logInternalFailure(status, err)
+		body = map[string]any{"message": "internal server error"}
+		logFailure(status, err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -222,21 +338,43 @@ func Respond(w http.ResponseWriter, written []eventsourcingdb.Event, err error) 
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// logInternalFailure logs a failure the caller is not told about, so that it
-// does not vanish: the caller only learns that something went wrong, and
-// whoever runs the application has to be able to find out what. It uses the
-// default logger of log/slog, which an application routes into its own logs
-// with slog.SetDefault.
-func logInternalFailure(status int, err error) {
-	slog.Error("httpapi: internal failure", "status", status, "error", err)
+// answerOf combines the revision with the fields of Adding. The fields are
+// decoded with numbers kept as they are, so that a large integer does not lose
+// digits on its way through a float.
+func answerOf(written []eventsourcingdb.Event, fields any) (map[string]any, error) {
+	answer := map[string]any{}
+
+	if fields != nil {
+		encoded, err := json.Marshal(fields)
+		if err != nil {
+			return nil, fmt.Errorf("httpapi: encoding the fields of the answer: %w", err)
+		}
+
+		decoder := json.NewDecoder(bytes.NewReader(encoded))
+		decoder.UseNumber()
+
+		if err := decoder.Decode(&answer); err != nil || answer == nil {
+			return nil, fmt.Errorf("httpapi: the fields of the answer must encode to a JSON object, not %s", encoded)
+		}
+		if _, hasRevision := answer["revision"]; hasRevision {
+			return nil, errors.New("httpapi: the fields of the answer must not contain a revision, which the kit adds itself")
+		}
+	}
+
+	answer["revision"] = architecturekit.RevisionOf(written)
+
+	return answer, nil
 }
 
-func idsOf(events []eventsourcingdb.Event) []string {
-	ids := make([]string, len(events))
-	for i, event := range events {
-		ids[i] = event.ID
-	}
-	return ids
+// logInternalFailure logs a failure the caller is not told about, so that it
+// does not vanish: the caller only learns that something went wrong, and
+// whoever runs the application has to be able to find out what. Respond and
+// RespondResult use it, since they do not know the API; the routes of an API
+// log through its logger instead (see WithLogger). It uses the default logger
+// of log/slog, which an application routes into its own logs with
+// slog.SetDefault.
+func logInternalFailure(status int, err error) {
+	slog.Error("httpapi: internal failure", "status", status, "error", err)
 }
 
 // categorise leaves an error that already says what kind it is alone, and

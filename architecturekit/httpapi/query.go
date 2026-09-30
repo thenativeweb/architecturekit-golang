@@ -54,13 +54,25 @@ func Query[TUser any, TQuery any, TResult any](
 ) {
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		result, err := Ask(r, api, toQuery, answer)
-		RespondResult(w, result, err)
+		respondResult(w, result, err, api.logFailure(r))
 	}))
 }
 
 // RespondResult writes a query result, or maps the error the way Respond does
-// for commands.
+// for commands, logging an internal failure through the default logger of
+// log/slog.
 func RespondResult[TResult any](w http.ResponseWriter, result TResult, err error) {
+	respondResult(w, result, err, logInternalFailure)
+}
+
+// respondResult writes a query result, and logs an internal failure with
+// logFailure.
+func respondResult[TResult any](
+	w http.ResponseWriter,
+	result TResult,
+	err error,
+	logFailure func(status int, err error),
+) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if err == nil {
@@ -74,7 +86,7 @@ func RespondResult[TResult any](w http.ResponseWriter, result TResult, err error
 	if status >= http.StatusInternalServerError {
 		// Internal failures are not explained to the caller, but logged.
 		message = "internal server error"
-		logInternalFailure(status, err)
+		logFailure(status, err)
 	}
 
 	w.WriteHeader(status)

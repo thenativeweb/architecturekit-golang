@@ -111,11 +111,23 @@ func RespondResultAt[TResult any](
 	err error,
 	varies Volatile,
 ) {
+	respondResultAt(w, r, revision, result, err, varies, logInternalFailure)
+}
+
+func respondResultAt[TResult any](
+	w http.ResponseWriter,
+	r *http.Request,
+	revision string,
+	result TResult,
+	err error,
+	varies Volatile,
+	logFailure func(status int, err error),
+) {
 	if err == nil {
 		writeRevision(w, r, revision, varies)
 	}
 
-	RespondResult(w, result, err)
+	respondResult(w, result, err, logFailure)
 }
 
 // QueryRevisioned wires a query that can be asked for a revision. It waits for
@@ -154,15 +166,17 @@ func QueryVarying[TUser any, TQuery any, TResult any](
 	varies Volatile,
 ) {
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		logFailure := api.logFailure(r)
+
 		// The caller is determined before anything waits, so that nobody can
 		// bind waiting time on the server without being allowed in.
 		if _, err := UserOf(r, api); err != nil {
-			RespondResult(w, struct{}{}, err)
+			respondResult(w, struct{}{}, err, logFailure)
 			return
 		}
 
 		if err := Await(r.Context(), r, view, wait); err != nil {
-			RespondResult(w, struct{}{}, err)
+			respondResult(w, struct{}{}, err, logFailure)
 			return
 		}
 
@@ -175,7 +189,7 @@ func QueryVarying[TUser any, TQuery any, TResult any](
 		}
 
 		result, err := Ask(r, api, toQuery, answer)
-		RespondResultAt(w, r, revision, result, err, varies)
+		respondResultAt(w, r, revision, result, err, varies, logFailure)
 	}))
 }
 

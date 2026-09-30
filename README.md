@@ -1567,6 +1567,12 @@ For an application without authentication, call the `NewPublicAPI` function inst
 api := httpapi.NewPublicAPI(store)
 ```
 
+The routes of an API log every failure they do not explain to the caller, once, with the method and the route of the request. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
+
+```go
+api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
+```
+
 #### Determining the User
 
 To determine the user in a handler of your own, call the `UserOf` function. If the user cannot be determined, it returns an error that wraps `httpapi.ErrUnauthorized`:
@@ -1626,21 +1632,21 @@ curl -X POST http://localhost:8080/api/borrow-book \
   -d '{"bookId":"42","borrowedUntil":"2026-10-24","expectedEventId":"0"}'
 ```
 
-If this succeeds, it answers with `200 OK` and the IDs of the written events:
+If this succeeds, it answers with `200 OK` and the revision it has written, which is the ID of the last written event:
 
 ```json
-{ "eventIds": [ "1" ], "message": "ok" }
+{ "revision": "1" }
 ```
 
-Otherwise, it answers with the status code that matches the error (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)) and the error message. For status codes of `500` and above, the message is `internal server error`, and the actual error is logged with the default logger of `log/slog`, so that it does not vanish. To route it into the logs of your application, call `slog.SetDefault` with your logger.
+The revision is empty if the command did not write anything. A caller hands it to a query to read its own writes (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)).
 
-To answer this way in a handler of your own, call the `Respond` function with the response writer, the written events, and the error.
+Otherwise, it answers with the status code that matches the error (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)) and the error message. For status codes of `500` and above, the message is `internal server error`, and the actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)).
 
-#### Answering Commands in Your Own Format
+To answer this way in a handler of your own, call the `Respond` function with the response writer, the written events, and the error. Since it does not know the API, it logs with the default logger of `log/slog`.
 
-To answer in a format of your own, call the `Handle` function in a handler of your own. It does the same as a route, but writes nothing to the response. Instead, it returns a `Handled` value with the command it has built and the written events.
+#### Adding to the Answer
 
-This allows you to answer with something that `ToCommand` has generated, for example the ID of a new book:
+To answer with more than the revision, for example with the ID of a new book that `ToCommand` has generated, hand over the `Adding` option. It takes a function that receives a `Handled` value with the command and the written events, and returns the fields to add, usually as a struct with JSON annotations:
 
 ```go
 type acquireBookRequest struct {
@@ -1658,6 +1664,29 @@ func (r acquireBookRequest) ToCommand(user User) (AcquireBook, error) {
   }, nil
 }
 
+httpapi.Route[acquireBookRequest](api, mux, "POST /api/acquire-book", acquireBook,
+  httpapi.Adding(func(handled httpapi.Handled[AcquireBook]) any {
+    return struct {
+      ID string `json:"id"`
+    }{handled.Command.BookID}
+  }))
+```
+
+The route then answers with both:
+
+```json
+{ "id": "…", "revision": "1" }
+```
+
+The function is only called if the command has succeeded. The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written.
+
+*Note that the written events are available in `Handled` as well. Add them only deliberately: they are the inner model of the application, every caller that reads them depends on their shape, and they may contain data that is not meant for the caller.*
+
+#### Answering Commands in Your Own Format
+
+To answer in a format of your own, for example with another status code, call the `Handle` function in a handler of your own. It does the same as a route, but writes nothing to the response. Instead, it returns a `Handled` value with the command it has built and the written events:
+
+```go
 mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Request) {
   handled, err := httpapi.Handle[acquireBookRequest](r, api, acquireBook)
   if err != nil {
@@ -1801,7 +1830,7 @@ httpapi.QueryRevisioned(
 )
 ```
 
-After sending a command, the caller takes the highest ID from `eventIds` and sends it in the `Wait-For-Revision` header of the query:
+After sending a command, the caller takes the revision from the answer and sends it in the `Wait-For-Revision` header of the query:
 
 ```shell
 curl http://localhost:8080/api/books \
