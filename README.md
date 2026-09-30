@@ -401,7 +401,8 @@ Every error architecturekit returns belongs to one of four categories. Use `erro
 A failure of the database is sorted by what its answer means, the same way for reading and for writing:
 
 - If the database can not be reached, if the connection breaks, if the database asks to slow down (`429`), or if it is unable to answer for now (`5xx`), for example because it is shutting down, the error belongs to `ErrTransient`.
-- If the database rejects the API token (`401`), if it rejects the request itself, for example because it is malformed (`400`) or too large (`413`), or if the address does not lead to an EventSourcingDB, the error belongs to `ErrPermanent`. For a rejected API token, the message says so.
+- If the answer does not come from an EventSourcingDB, the error belongs to `ErrTransient` as well, since a proxy in front of the database answers on its own while the database restarts. The message says so, so that a wrong address stands out in the log.
+- If the database rejects the API token (`401`), or if it rejects the request itself, for example because it is malformed (`400`) or too large (`413`), the error belongs to `ErrPermanent`. For a rejected API token, the message says so.
 - If a precondition did not hold (`409`), the error belongs to `ErrConflict`. If an event does not match its schema, which the database answers with the same status, it belongs to `ErrPermanent`.
 
 ```go

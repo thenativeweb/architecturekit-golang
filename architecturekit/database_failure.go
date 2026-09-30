@@ -31,8 +31,12 @@ func statusCodeOf(err error) int {
 //
 //   - Without an answer, the database is unreachable or the connection broke,
 //     which is transient.
-//   - An answer from a server that is not an EventSourcingDB means a wrong
-//     address, which is permanent.
+//   - An answer from a server that is not an EventSourcingDB is transient as
+//     well. It may come from a wrong address, but also from a proxy in front of
+//     the database, which answers on its own while the database restarts, and
+//     the client checks who answered before it checks the status code. A wrong
+//     address fails on start anyway, so it is named rather than made
+//     permanent.
 //   - 429 asks to slow down, and 5xx means that the database is unable to
 //     answer for now, e.g. because it is shutting down. Both are transient.
 //   - 409 means that a precondition did not hold, which is a conflict, or that
@@ -47,7 +51,7 @@ func databaseFailure(err error, doing string) error {
 	switch {
 	case status == 0:
 		if strings.Contains(err.Error(), "server must be EventSourcingDB") {
-			return fmt.Errorf("%w: %s: the address does not lead to an EventSourcingDB: %v", ErrPermanent, doing, err)
+			return fmt.Errorf("%w: %s: the answer does not come from an EventSourcingDB: %v", ErrTransient, doing, err)
 		}
 		return fmt.Errorf("%w: %s: %v", ErrTransient, doing, err)
 

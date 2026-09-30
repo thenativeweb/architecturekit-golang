@@ -62,17 +62,21 @@ func TestDatabaseFailures(t *testing.T) {
 		assert.ErrorContains(t, err, "the database rejected the API token")
 	})
 
-	t.Run("treat a server that is not an EventSourcingDB as permanent", func(t *testing.T) {
-		server := httptest.NewServer(http.NotFoundHandler())
+	t.Run("treat an answer that does not come from an EventSourcingDB as transient", func(t *testing.T) {
+		// A proxy in front of the database answers on its own while the
+		// database restarts, without saying that it is an EventSourcingDB.
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.WriteHeader(http.StatusBadGateway)
+		}))
 		t.Cleanup(server.Close)
 		store := architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io")
 
 		_, err := architecturekit.Execute(context.Background(), store, counterDecider(),
 			increment{subject: "/test", By: 1})
 
-		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a wrong address is permanent")
-		assert.NotErrorIs(t, err, architecturekit.ErrTransient)
-		assert.ErrorContains(t, err, "the address does not lead to an EventSourcingDB")
+		assert.ErrorIs(t, err, architecturekit.ErrTransient, "a proxy answering on its own is transient")
+		assert.NotErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, "the answer does not come from an EventSourcingDB", "want the reason named")
 	})
 
 	t.Run("are sorted by status when reading the registered schemas", func(t *testing.T) {
