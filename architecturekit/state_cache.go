@@ -2,21 +2,60 @@ package architecturekit
 
 import (
 	"container/list"
+	"maps"
+	"reflect"
+	"slices"
 	"sync"
 )
 
-// stateCacheKey names a cached state. The state is part of the key, because
-// two states can be built from the same subject, and each of them folds the
-// events into something else.
+// stateCacheKey names a cached state. Besides the subject, the type of the
+// state is part of the key, because two states can be built from the same
+// subject, and each of them folds the events into something else. It is the
+// type rather than the *State, since an application may build a new *State
+// for every command, e.g. in a function that returns it.
 type stateCacheKey struct {
-	state   any
-	subject string
+	stateType reflect.Type
+	subject   string
 }
 
 type stateCacheEntry struct {
 	key         stateCacheKey
+	shape       stateShape
 	state       any
 	lastEventID string
+}
+
+// stateShape describes how a state is built, as far as that can be seen from
+// outside: the functions themselves can not be compared. Two states of the
+// same type on the same subject have to be built alike to share a cached
+// state; if they are not, they are two different states, which need two
+// different types.
+type stateShape struct {
+	initial    any
+	evolved    []string
+	upcasted   []string
+	fromLatest string
+}
+
+// shapeOf describes how the given state is built.
+func shapeOf[TState any](state *State[TState]) stateShape {
+	shape := stateShape{
+		initial:    state.initial,
+		evolved:    slices.Sorted(maps.Keys(state.evolve)),
+		fromLatest: state.fromLatest,
+	}
+	if state.upcasters != nil {
+		shape.upcasted = slices.Sorted(maps.Keys(state.upcasters.byType))
+	}
+
+	return shape
+}
+
+func (s stateShape) equals(other stateShape) bool {
+	return reflect.DeepEqual(s.initial, other.initial) &&
+		slices.Equal(s.evolved, other.evolved) &&
+		slices.Equal(s.upcasted, other.upcasted) &&
+		s.fromLatest == other.fromLatest
 }
 
 // stateCache holds the states of the most recently used subjects, together
@@ -59,12 +98,18 @@ func (c *stateCache) get(key stateCacheKey) (stateCacheEntry, bool) {
 // put caches a state, unless a state built from a later event is cached
 // already. Two commands on the same subject may finish in any order, and the
 // one that read less must not replace the one that read more.
-func (c *stateCache) put(key stateCacheKey, state any, lastEventID string) {
+//
+// A state of another shape does not replace the cached one either. It is a
+// different state of the same type, which get reports the next time.
+func (c *stateCache) put(key stateCacheKey, shape stateShape, state any, lastEventID string) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
 	if element, isCached := c.entries[key]; isCached {
 		entry := element.Value.(*stateCacheEntry)
+		if !entry.shape.equals(shape) {
+			return
+		}
 		if isNewer, err := CompareRevisions(lastEventID, entry.lastEventID); err == nil && isNewer >= 0 {
 			entry.state = state
 			entry.lastEventID = lastEventID
@@ -76,6 +121,7 @@ func (c *stateCache) put(key stateCacheKey, state any, lastEventID string) {
 
 	c.entries[key] = c.order.PushFront(&stateCacheEntry{
 		key:         key,
+		shape:       shape,
 		state:       state,
 		lastEventID: lastEventID,
 	})

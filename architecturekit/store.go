@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -50,6 +51,11 @@ type StoreOption func(*Store)
 // cached (see State.Clone). The cache is correct with several processes
 // writing to the same subjects, because every command still reads all events
 // after the ones it has cached.
+//
+// The cache tells states apart by their type, so a state that is built anew
+// for every command is cached as well. Two different states that read the
+// same subject need two different types: if two states of the same type
+// differ in how they are built, reading fails with ErrPermanent.
 func WithStateCache(maxSubjects int) StoreOption {
 	return func(store *Store) {
 		store.states = newStateCache(maxSubjects)
@@ -159,12 +165,20 @@ func fold[TState any](
 	lastEventID := ""
 
 	isCached := store.states != nil && state.isCopyable()
-	key := stateCacheKey{state: state, subject: subject}
+	key := stateCacheKey{stateType: reflect.TypeFor[TState](), subject: subject}
 
+	var shape stateShape
 	options := eventsourcingdb.ReadEventsOptions{Recursive: false}
 
 	if isCached {
+		shape = shapeOf(state)
+
 		if entry, isFound := store.states.get(key); isFound {
+			if !entry.shape.equals(shape) {
+				return current, "", fmt.Errorf("%w: two different states of type %v read %q; "+
+					"give them different types to cache them", ErrPermanent, key.stateType, subject)
+			}
+
 			current = state.copyOf(entry.state.(TState))
 			lastEventID = entry.lastEventID
 			options.LowerBound = boundAfter(lastEventID)
@@ -214,7 +228,7 @@ func fold[TState any](
 	// The cache gets a copy, so that the caller can not change what the cache
 	// holds.
 	if isCached && lastEventID != "" {
-		store.states.put(key, state.copyOf(current), lastEventID)
+		store.states.put(key, shape, state.copyOf(current), lastEventID)
 	}
 
 	return current, lastEventID, nil

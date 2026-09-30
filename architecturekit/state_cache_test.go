@@ -52,6 +52,19 @@ func cloneHistory(current history) history {
 	return history{Values: slices.Clone(current.Values)}
 }
 
+// countState and sumState are two different states of the same type, int:
+// one counts the increments, the other one adds them up.
+func countState() *architecturekit.State[int] {
+	return architecturekit.NewState(0).
+		Evolve(func(count int, _ incremented) int { return count + 1 })
+}
+
+func sumState() *architecturekit.State[int] {
+	return architecturekit.NewState(0).
+		Evolve(func(sum int, event incremented) int { return sum + event.By }).
+		Evolve(func(int, reset) int { return 0 })
+}
+
 // cachedStore returns a store with a state cache on the test database.
 func cachedStore(t *testing.T, maxSubjects int) *architecturekit.Store {
 	t.Helper()
@@ -81,6 +94,16 @@ func TestLoad(t *testing.T) {
 }
 
 func TestLoadWithoutStateCache(t *testing.T) {
+	t.Run("allows two different states of the same type on the same subject", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+
+		assert.Equal(t, 2, load(t, store, countState(), subject))
+		assert.Equal(t, 7, load(t, store, sumState(), subject))
+	})
+
 	t.Run("reads all events every time", func(t *testing.T) {
 		store := requireStore(t)
 		subject := subjectFor(t)
@@ -114,6 +137,50 @@ func TestLoadWithStateCache(t *testing.T) {
 
 		assert.Equal(t, 12, current.Total)
 		assert.Equal(t, int64(3), evolved.Load())
+	})
+
+	t.Run("shares the cached state between states built alike", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
+
+		var evolved atomic.Int64
+
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+		load(t, store, countingState(&evolved), subject)
+
+		// A state built anew for every command, as a function that returns it
+		// does, is the same state as far as the cache is concerned.
+		writeRaw(t, subject, incremented{By: 5})
+		current := load(t, store, countingState(&evolved), subject)
+
+		assert.Equal(t, 12, current.Total)
+		assert.Equal(t, int64(3), evolved.Load(), "the second state must continue from the cached one")
+	})
+
+	t.Run("reports two different states of the same type on the same subject", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
+
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+		assert.Equal(t, 2, load(t, store, countState(), subject))
+
+		_, err := architecturekit.Load(context.Background(), store, sumState(), subject)
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, "two different states of type int")
+		assert.ErrorContains(t, err, subject, "the error must name the subject")
+	})
+
+	t.Run("keeps two different states of the same type on different subjects apart", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		counted := subjectFor(t) + "/counted"
+		summed := subjectFor(t) + "/summed"
+
+		writeRaw(t, counted, incremented{By: 3}, incremented{By: 4})
+		writeRaw(t, summed, incremented{By: 3}, incremented{By: 4})
+
+		assert.Equal(t, 2, load(t, store, countState(), counted))
+		assert.Equal(t, 7, load(t, store, sumState(), summed))
 	})
 
 	t.Run("skips a state with references and no clone function", func(t *testing.T) {
