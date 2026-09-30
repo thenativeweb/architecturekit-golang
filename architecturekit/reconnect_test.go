@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -177,6 +178,35 @@ func TestRunProjectionWithReconnects(t *testing.T) {
 
 		errs, _ := observed.recorded()
 		assert.ErrorIs(t, errs[0], architecturekit.ErrTransient, "an unreachable database is transient")
+	})
+
+	t.Run("retries a database that is unable to answer for now", func(t *testing.T) {
+		observed := &reconnects{}
+		client := refusingDatabase(t, "/api/v1/read-events", http.StatusServiceUnavailable, "shutting down")
+
+		stop := runInBackground(t, reconnectingStore(client, observed), &collector{})
+
+		waitFor(t, func() bool { return observed.count() >= 2 })
+		assert.NoError(t, stop(t), "ending through the context is not a failure")
+
+		errs, _ := observed.recorded()
+		assert.ErrorIs(t, errs[0], architecturekit.ErrTransient, "an unavailable database is transient")
+	})
+
+	t.Run("ends when the database rejects the API token", func(t *testing.T) {
+		observed := &reconnects{}
+		client := refusingDatabase(t, "/api/v1/read-events", http.StatusUnauthorized, "unauthorized")
+
+		// Retrying would go on until the context ends, which RunProjection
+		// reports without an error.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := architecturekit.RunProjection(ctx, reconnectingStore(client, observed), "/test", false, &collector{})
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a rejected API token is permanent")
+		assert.ErrorContains(t, err, "the database rejected the API token")
+		assert.Zero(t, observed.count(), "a rejected API token must not be retried")
 	})
 
 	t.Run("ends on a failure that retrying will not fix", func(t *testing.T) {
