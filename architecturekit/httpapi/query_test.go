@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -204,28 +205,34 @@ func TestPublicAPI(t *testing.T) {
 
 func TestRespondResult(t *testing.T) {
 	t.Run("writes the result", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		httpapi.RespondResult(recorder, []noteResponse{{Text: "only"}}, nil)
+		httpapi.RespondResult(recorder, request, api, []noteResponse{{Text: "only"}}, nil)
 
 		assert.Equal(t, http.StatusOK, recorder.Code)
 		assert.Contains(t, recorder.Body.String(), "only")
 	})
 
 	t.Run("answers an empty result with an empty list", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
 		// slices.Collect, which the kit suggests for turning items into a slice,
 		// returns nil when there are no items.
-		httpapi.RespondResult(recorder, slices.Collect(slices.Values([]noteResponse{})), nil)
+		httpapi.RespondResult(recorder, request, api, slices.Collect(slices.Values([]noteResponse{})), nil)
 
 		assert.Equal(t, "[]", strings.TrimSpace(recorder.Body.String()))
 	})
 
 	t.Run("explains failures the caller can fix", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		httpapi.RespondResult(recorder, []noteResponse(nil),
+		httpapi.RespondResult(recorder, request, api, []noteResponse(nil),
 			errors.Join(httpapi.ErrNotFound, errors.New("note 7 is unknown")))
 
 		assert.Equal(t, http.StatusNotFound, recorder.Code)
@@ -233,27 +240,36 @@ func TestRespondResult(t *testing.T) {
 	})
 
 	t.Run("keeps internal failures to itself", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		httpapi.RespondResult(recorder, []noteResponse(nil), errors.New("the password is hunter2"))
+		httpapi.RespondResult(recorder, request, api, []noteResponse(nil), errors.New("the password is hunter2"))
 
 		assert.Equal(t, http.StatusInternalServerError, recorder.Code)
 		assert.NotContains(t, recorder.Body.String(), "hunter2", "an internal failure must not be explained")
 	})
 
-	t.Run("logs internal failures", func(t *testing.T) {
-		logs := logsOf(func() {
-			httpapi.RespondResult(httptest.NewRecorder(), []noteResponse(nil), errors.New("the view is gone"))
+	t.Run("logs internal failures once, through the logger of the API, with the route", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+
+		defaults := logsOf(func() {
+			httpapi.RespondResult(httptest.NewRecorder(), request, api, []noteResponse(nil), errors.New("the view is gone"))
 		})
 
-		assert.Contains(t, logs, "the view is gone", "an internal failure must be logged")
+		assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
+		assert.Contains(t, logs.String(), "the view is gone", "an internal failure must be logged")
+		assert.Contains(t, logs.String(), `route="GET /notes"`)
+		assert.Empty(t, defaults, "nothing must go to the default logger as well")
 	})
 
 	t.Run("does not log failures the caller can fix", func(t *testing.T) {
-		logs := logsOf(func() {
-			httpapi.RespondResult(httptest.NewRecorder(), []noteResponse(nil), httpapi.ErrNotFound)
-		})
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
 
-		assert.Empty(t, logs, "a failure the caller can fix must not be logged")
+		httpapi.RespondResult(httptest.NewRecorder(), request, api, []noteResponse(nil), httpapi.ErrNotFound)
+
+		assert.Empty(t, logs.String(), "a failure the caller can fix must not be logged")
 	})
 }
