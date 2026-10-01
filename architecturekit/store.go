@@ -265,7 +265,7 @@ func fold[TState any](
 		options.FromLatestEvent = &eventsourcingdb.ReadFromLatestEvent{
 			Subject:          subject,
 			Type:             state.fromLatest,
-			IfEventIsMissing: eventsourcingdb.ReadEverythingIfEventIsMissing,
+			IfEventIsMissing: eventsourcingdb.ReadIfEventIsMissingReadEverything,
 		}
 	}
 
