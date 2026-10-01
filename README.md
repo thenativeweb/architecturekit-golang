@@ -229,6 +229,20 @@ The event type is taken from the event's `EventType` function, so it does not ha
 
 *Note that calling `Evolve` twice for the same event type panics.*
 
+Reading an event without a rule fails, since it usually points to a missing rule or a wrong subject. If a subject holds events that matter for no decision, such as `BookInspected`, which only records that somebody looked at a book, call the `Ignore` function for their type. The state then takes them without changing, and says so, rather than an `Evolve` function that returns the state unchanged and needs a comment to explain why:
+
+```go
+var bookState = architecturekit.NewState(Book{}).
+  Evolve(func(book Book, event BookAcquired) Book {
+    book.IsAcquired = true
+    return book
+  }).
+  // ...
+  Ignore[BookInspected]()
+```
+
+*Note that the data of an ignored event is not decoded, but its schema is still part of `Schemas`, since the event is still written. Ignoring an event type that has an `Evolve` rule, or ignoring it twice, panics, and so does calling `FromLatest` for it.*
+
 ### Making Decisions
 
 A decider connects a state with the decision made on it. Create a `Decider`, hand over the state, and provide a `Decide` function that receives the command and the current state, and returns the events to write:
@@ -316,6 +330,24 @@ if err != nil {
 ```
 
 `Execute` reads the events of the command's subject, evolves the state from them, calls the decider, and writes the events it returns. The function returns the written events, including the fields added by the server. If the decider returns no events, nothing is written, and the function returns `nil`.
+
+The written events come as they are stored, with their data as JSON. To read the data of one of them, call the `Decode` function with the type of the event. It returns an `Envelope`, the same a projection gets (see [Defining Projections](#defining-projections)), with the data in its `Data` field:
+
+```go
+for _, event := range writtenEvents {
+  switch event.Type {
+  case (BookAcquired{}).EventType():
+    acquired, err := architecturekit.Decode[BookAcquired](event)
+    if err != nil {
+      // ...
+    }
+
+    // acquired.Data.Title, acquired.ID, ...
+  }
+}
+```
+
+*Note that `Decode` fails with an error of the category `ErrPermanent` for an event of another type, rather than leaving the fields of the wrong struct empty, and for data that does not fit the type.*
 
 *Note that `Execute` only reads the events of the command's subject itself, not those of nested subjects.*
 
@@ -596,6 +628,27 @@ Only the decider reads the clock. Whatever it decides based on the time, such as
 
 To know when an event was written, use the time that the database records for every event, which a projection receives in the `Time` field of the envelope. A question that depends on the moment it is asked, such as which books are overdue, belongs into the query, which gets the current time as a parameter (see [Depending on More Than the Read Model](#depending-on-more-than-the-read-model)).
 
+### Writing to Several Subjects
+
+A command acts on a single subject, since it is a decision on the state of that subject. Some events are no such decision, for example a summary derived from many subjects, which has to be written together with a note on each of them, either all or none. To write events to several subjects at once, call the `Write` function with a context, the store, the events together with their subjects, and the preconditions:
+
+```go
+written, err := architecturekit.Write(context.TODO(), store, []architecturekit.EventOn{
+  {Subject: "/inventories/2026", Event: InventoryTaken{BookCount: 2}},
+  {Subject: "/books/42", Event: BookCounted{Inventory: "2026"}},
+  {Subject: "/books/23", Event: BookCounted{Inventory: "2026"}},
+}, architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/inventories/2026")))
+if errors.Is(err, architecturekit.ErrConflict) {
+  // Somebody else has taken the inventory already.
+}
+```
+
+`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
+
+Like a command, a write declares at least one precondition, made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state.
+
+*Note that `Write` never decides again, since there is nothing to decide. If nothing is to be written, call it with no events, which writes nothing.*
+
 ### Handling Errors
 
 Every error architecturekit returns belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
@@ -790,6 +843,28 @@ if err != nil {
 ```
 
 `Load` reads the events exactly the way `Execute` does before it decides, including `FromLatest` and the state cache. For a query across many subjects, use a view instead (see [Defining Views](#defining-views)).
+
+### Reading Events
+
+Some reads need the events themselves rather than a state, and fit neither `Load` nor a projection, for example one page of a long history, the events up to a certain one, or a single event. To read the events of a subject as they are stored, call the `Read` function with a context, the store, the subject, and the options of the client SDK. It returns an iterator over the events and errors:
+
+```go
+options := eventsourcingdb.ReadEventsOptions{
+  LowerBound: &eventsourcingdb.Bound{ID: afterEventID, Type: eventsourcingdb.BoundTypeExclusive},
+}
+
+for event, err := range architecturekit.Read(context.TODO(), store, "/books/42", options) {
+  if err != nil {
+    // ...
+  }
+
+  // ...
+}
+```
+
+Every event is verified, like everything else the store reads, before the loop sees it (see [Verifying Events](#verifying-events)). A failure belongs to a category, as with `Load` (see [Handling Errors](#handling-errors)), and ends the iteration. The store stops reading as soon as the loop ends, so breaking out of it after a page is fine.
+
+The events come as they are stored, without upcasters or rules, since there is no state. To get at the data of an event, call the `Decode` function (see [Executing Commands](#executing-commands)).
 
 ### Stepping Through States
 
