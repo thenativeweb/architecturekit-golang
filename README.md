@@ -837,6 +837,14 @@ values, ok := bookSubject.Match("/books/42")
 
 To get the pattern and the names of the placeholders, call the `Pattern` and the `Placeholders` function respectively.
 
+To read or observe the events of all books, for example in a projection, start from the subject that all of them lie under. Call the `Root` function to get it from the scheme, rather than writing it down a second time. It returns the literal segments before the first placeholder, here `/books`, or `/` if the pattern starts with a placeholder:
+
+```go
+run := architecturekit.StartProjection(ctx, store, bookSubject.Root(), true, projection)
+```
+
+*Note that other subjects may lie under the same root, such as `/books/42/reviews/7` under `/books`. Use `Match` in the projection to tell them apart.*
+
 *Note that a malformed pattern panics, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains a slash.*
 
 Values that come from outside, such as an ID in a request, may well be empty or contain a slash, and that is not a programming error. To check them before building a subject, call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, instead of panicking:
