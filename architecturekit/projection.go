@@ -516,3 +516,45 @@ func (f ProjectionFunc) Apply(ctx context.Context, event eventsourcingdb.Event) 
 type View[TItem any] interface {
 	All(ctx context.Context) (iter.Seq[TItem], error)
 }
+
+// KeyedView is a view that finds a single item by its key, without running
+// over all of them. Get returns false if there is no item with the key.
+// InMemoryView is one.
+type KeyedView[TKey comparable, TItem any] interface {
+	View[TItem]
+	Get(ctx context.Context, key TKey) (TItem, bool, error)
+}
+
+// Outcome tells what an operation on a single item of a view did with an
+// event. A projection needs to tell the cases apart when an event about an
+// item that does not exist means that something is wrong, while an event that
+// has been applied before is to be expected after a restart.
+//
+// The zero value is no outcome, which is what comes with an error.
+type Outcome int
+
+const (
+	// Applied means that the event changed or removed the item.
+	Applied Outcome = iota + 1
+
+	// Missing means that there is no item with the key.
+	Missing
+
+	// AlreadyApplied means that the item has seen the event, or a newer one,
+	// so the event changed nothing.
+	AlreadyApplied
+)
+
+// String names the outcome.
+func (o Outcome) String() string {
+	switch o {
+	case Applied:
+		return "applied"
+	case Missing:
+		return "missing"
+	case AlreadyApplied:
+		return "already applied"
+	default:
+		return fmt.Sprintf("Outcome(%d)", int(o))
+	}
+}

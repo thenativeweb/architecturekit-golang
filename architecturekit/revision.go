@@ -46,8 +46,9 @@ type RevisionSink interface {
 	Seen(eventID string)
 }
 
-// Tracking wraps a projection so that the view records every event that
-// reaches it.
+// Tracking wraps a projection so that the given views record every event that
+// reaches it. Hand over every view the projection writes to, so that each of
+// them can tell a reader how far it has come.
 //
 // It records the event even when the projection ignores it, and that is the
 // point: a projection skips what does not concern it, but a reader may be
@@ -62,11 +63,16 @@ type RevisionSink interface {
 // to become durable together, the revision belongs inside the transaction, and
 // the projection has to write it itself. That is why a transactional
 // projection cannot be tracked: it has no Apply to wrap, and a projection that
-// is transactional as well is a programming error and panics.
-func Tracking(sink RevisionSink, projection Projection) Projection {
+// is transactional as well is a programming error and panics. So does calling
+// Tracking without any view.
+func Tracking(projection Projection, sinks ...RevisionSink) Projection {
 	refuseTransactional(projection)
 
-	tracked := &trackedProjection{sink: sink, projection: projection}
+	if len(sinks) == 0 {
+		panic("architecturekit: Tracking needs at least one view to record the events in")
+	}
+
+	tracked := &trackedProjection{sinks: sinks, projection: projection}
 
 	if resumable, ok := projection.(Resumable); ok {
 		return &trackedResumable{trackedProjection: tracked, resumable: resumable}
@@ -75,9 +81,10 @@ func Tracking(sink RevisionSink, projection Projection) Projection {
 	return tracked
 }
 
-// trackedProjection records every event once the projection has applied it.
+// trackedProjection records every event in every view once the projection has
+// applied it.
 type trackedProjection struct {
-	sink       RevisionSink
+	sinks      []RevisionSink
 	projection Projection
 }
 
@@ -86,7 +93,9 @@ func (p *trackedProjection) Apply(ctx context.Context, event eventsourcingdb.Eve
 		return err
 	}
 
-	p.sink.Seen(event.ID)
+	for _, sink := range p.sinks {
+		sink.Seen(event.ID)
+	}
 
 	return nil
 }
