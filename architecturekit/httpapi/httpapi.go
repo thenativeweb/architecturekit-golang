@@ -38,6 +38,10 @@ var (
 	// ErrMalformed means the body could not be decoded, or not be turned into
 	// a command.
 	ErrMalformed = errors.New("httpapi: malformed request")
+
+	// errNoStore means a command reached an API that was created without a
+	// store. That is a mistake in the wiring, which the caller is not told.
+	errNoStore = errors.New("httpapi: the API has no store, so it can not execute commands")
 )
 
 // ToCommand is implemented by the request DTO. It is the single place where
@@ -82,6 +86,10 @@ func WithLogger(logger *slog.Logger) APIOption {
 // NewAPI creates an API that determines the user with userFrom. A request
 // whose user cannot be determined is answered with 401 and never reaches a
 // command or a query.
+//
+// Queries do not need the store, so an API without one, with nil, answers
+// them, for example in a test of the queries alone. A command on such an API
+// is answered with 500, and the failure says that there is no store.
 func NewAPI[TUser any](
 	store *architecturekit.Store,
 	userFrom func(*http.Request) (TUser, error),
@@ -183,6 +191,11 @@ func Handle[
 	// The command is handed back even when executing it fails, because a
 	// handler may want to name what it tried to do.
 	handled.Command = cmd
+
+	if api.store == nil {
+		return handled, errNoStore
+	}
+
 	handled.Events, err = architecturekit.Execute(r.Context(), api.store, decider, cmd)
 
 	return handled, err

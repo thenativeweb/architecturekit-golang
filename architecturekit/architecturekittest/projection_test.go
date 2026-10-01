@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -93,6 +94,32 @@ func TestStoredEvents(t *testing.T) {
 		for i, want := range []string{"0", "1", "2"} {
 			assert.Equal(t, want, stored[i].ID)
 		}
+	})
+}
+
+func TestStoredEventsAt(t *testing.T) {
+	t.Run("numbers from the given ID and times a minute apart", func(t *testing.T) {
+		noon := time.Date(2026, time.March, 2, 12, 0, 0, 0, time.UTC)
+
+		stored := architecturekittest.StoredEventsAt("/account/1", 7, noon,
+			opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})
+
+		require.Len(t, stored, 3)
+		for i, want := range []struct {
+			id   string
+			time time.Time
+		}{
+			{"7", noon},
+			{"8", noon.Add(time.Minute)},
+			{"9", noon.Add(2 * time.Minute)},
+		} {
+			assert.Equal(t, want.id, stored[i].ID)
+			assert.Equal(t, want.time, stored[i].Time)
+			assert.Equal(t, "/account/1", stored[i].Subject)
+		}
+
+		assert.Equal(t, "test.account.closed", stored[1].Type, "the events keep their order and types")
+		assert.JSONEq(t, `{"owner":"jane"}`, string(stored[2].Data))
 	})
 }
 

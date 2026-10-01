@@ -2254,6 +2254,17 @@ The `ExpectItems` function expects the view to hold exactly the given items, in 
 items := architecturekittest.ItemsOf(t, catalog)
 ```
 
+If a projection reads the time of an event, or the events of several subjects have to follow one another, call the `StoredEventsAt` function instead of `StoredEvents`. It numbers the events from the given ID on, and times them one minute apart from the given time on:
+
+```go
+noon := time.Date(2026, time.March, 2, 12, 0, 0, 0, time.UTC)
+
+events := append(
+  architecturekittest.StoredEventsAt("/books/42", 0, noon, BookAcquired{ /* ... */ }),
+  architecturekittest.StoredEventsAt("/books/23", 1, noon.Add(time.Minute), BookAcquired{ /* ... */ })...,
+)
+```
+
 To check how a projection will be run, call the `ExpectMode` function:
 
 ```go
@@ -2286,3 +2297,50 @@ if err != nil {
   // ...
 }
 ```
+
+To test the queries of an HTTP API without a database, create the API without a store, with `nil`. It answers queries, and answers a command with `500 Internal Server Error`, and logs that the API has no store:
+
+```go
+api := httpapi.NewAPI(nil, userFrom)
+```
+
+### Testing with a Database
+
+Some tests need a real database, for example to run commands from end to end. To get one, call the `Store` function with a `*testing.T`, the source, and the schemas to register. It returns a store on a database that all tests of the package share, which the first test that asks for it starts in a container:
+
+```go
+func TestAcquireBook(t *testing.T) {
+  store := architecturekittest.Store(t, "https://library.eventsourcingdb.io", bookState.Schemas())
+
+  _, err := architecturekit.Execute(context.TODO(), store, acquireBook, AcquireBook{
+    BookID: uuid.NewString(),
+    // ...
+  })
+  if err != nil {
+    t.Fatal(err)
+  }
+}
+```
+
+To stop the database once all tests have run, call the `Main` function from `TestMain`:
+
+```go
+func TestMain(m *testing.M) {
+  architecturekittest.Main(m)
+}
+```
+
+The tests share the events as well, so a test writes to subjects of its own, for example with a random ID in them, and reads only from those. A test that reads more than that, such as a projection from `/`, needs a database of its own. Call the `IsolatedStore` function to start one for the test alone, which is stopped once the test is over. It takes a few seconds, so use it only where the shared one would not do.
+
+For a test that connects by itself, such as one that starts a whole server, call the `SharedDatabase` or the `IsolatedDatabase` function. Each returns a `*Database`, whose `URL` and `APIToken` fields are what a client needs. Its `Client` function returns a client, for example to write an event that no command would, and its `Store` function returns a store, as above:
+
+```go
+database := architecturekittest.SharedDatabase(t)
+
+config := server.Config{
+  DatabaseURL: database.URL.String(),
+  APIToken:    database.APIToken,
+}
+```
+
+*Note that with `-short` every test that asks for a database is skipped, so that the other tests run without Docker.*
