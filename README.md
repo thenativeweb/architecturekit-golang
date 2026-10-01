@@ -888,6 +888,14 @@ values, ok := bookSubject.Match("/books/42")
 
 To get the pattern and the names of the placeholders, call the `Pattern` and the `Placeholders` function respectively.
 
+To read or observe the events of all books, for example in a projection, start from the subject that all of them lie under. Call the `Root` function to get it from the scheme, rather than writing it down a second time. It returns the literal segments before the first placeholder, here `/books`, or `/` if the pattern starts with a placeholder:
+
+```go
+run := architecturekit.StartProjection(ctx, store, bookSubject.Root(), true, projection)
+```
+
+*Note that other subjects may lie under the same root, such as `/books/42/reviews/7` under `/books`. Use `Match` in the projection to tell them apart.*
+
 *Note that a malformed pattern panics, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains a slash.*
 
 Values that come from outside, such as an ID in a request, may well be empty or contain a slash, and that is not a programming error. To check them before building a subject, call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, instead of panicking:
@@ -1780,6 +1788,8 @@ Before a request reaches `ToCommand`, it is validated:
 - The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`.
 - The body must be valid JSON without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`.
 
+To read a body by the same rules elsewhere, call the `BodyOf` function (see [Reading Queries from the Body](#reading-queries-from-the-body)).
+
 ### Handling Queries over HTTP
 
 To answer a query over HTTP, define a function that receives the request and the user, and returns the query:
@@ -1818,6 +1828,24 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
   // ...
 })
 ```
+
+#### Reading Queries from the Body
+
+Some queries need more input than fits into the query string, for example a list of books to check at once. Send such a query as the body of a `POST` request, and call the `BodyOf` function with the type of the body to read it:
+
+```go
+type CheckAvailability struct {
+  BookIDs []string `json:"bookIds"`
+}
+
+toCheckAvailability := func(r *http.Request, user User) (CheckAvailability, error) {
+  return httpapi.BodyOf[CheckAvailability](r)
+}
+
+httpapi.Query(api, mux, "POST /api/check-availability", toCheckAvailability, checkAvailability(catalog))
+```
+
+The function reads the body by the same rules as for a command (see [Validating Requests](#validating-requests)), and returns the same errors, so the request is answered with `415`, `413`, or `400` as a command would be. It works in a handler of your own as well.
 
 #### Reporting Missing Items
 

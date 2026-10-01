@@ -64,6 +64,26 @@ func NewSubjectScheme(pattern string) *SubjectScheme {
 // Pattern returns the pattern the scheme was built from.
 func (s *SubjectScheme) Pattern() string { return s.pattern }
 
+// Root returns the subject that every subject of the scheme lies under: the
+// literal segments before the first placeholder, as "/tenant" for
+// "/tenant/{tenant}/workshop/{workshop}", or "/" if the pattern starts with a
+// placeholder. Reading or observing recursively from it yields the events of
+// all subjects the scheme describes, and possibly of others under the same
+// root, which Match tells apart.
+func (s *SubjectScheme) Root() string {
+	var literals []string
+
+	for _, segment := range s.segments {
+		if strings.HasPrefix(segment, "{") {
+			break
+		}
+
+		literals = append(literals, segment)
+	}
+
+	return "/" + strings.Join(literals, "/")
+}
+
 // Placeholders returns the placeholder names, in the order Build expects them.
 func (s *SubjectScheme) Placeholders() []string {
 	names := make([]string, len(s.placeholders))
