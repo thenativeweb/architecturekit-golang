@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/stretchr/testify v1.12.1
-	github.com/thenativeweb/eventsourcingdb-client-golang v1.6.1
+	github.com/thenativeweb/eventsourcingdb-client-golang v1.6.2
 )
 
 require (
