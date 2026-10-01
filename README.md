@@ -813,6 +813,28 @@ if err != nil {
 
 `Load` reads the events exactly the way `Execute` does before it decides, including `FromLatest` and the state cache. For a query across many subjects, use a view instead (see [Defining Views](#defining-views)).
 
+### Reading Events
+
+Some reads need the events themselves rather than a state, and fit neither `Load` nor a projection, for example one page of a long history, the events up to a certain one, or a single event. To read the events of a subject as they are stored, call the `Read` function with a context, the store, the subject, and the options of the client SDK. It returns an iterator over the events and errors:
+
+```go
+options := eventsourcingdb.ReadEventsOptions{
+  LowerBound: &eventsourcingdb.Bound{ID: afterEventID, Type: eventsourcingdb.BoundTypeExclusive},
+}
+
+for event, err := range architecturekit.Read(context.TODO(), store, "/books/42", options) {
+  if err != nil {
+    // ...
+  }
+
+  // ...
+}
+```
+
+Every event is verified, like everything else the store reads, before the loop sees it (see [Verifying Events](#verifying-events)). A failure belongs to a category, as with `Load` (see [Handling Errors](#handling-errors)), and ends the iteration. The store stops reading as soon as the loop ends, so breaking out of it after a page is fine.
+
+The events come as they are stored, without upcasters or rules, since there is no state. To get at the data of an event, call the `Decode` function (see [Executing Commands](#executing-commands)).
+
 ### Stepping Through States
 
 Sometimes the states before and after an event are needed, not only the latest one, for example for a history that tells what each event changed. To advance a state by a single stored event, call the `StepStored` function with the state, the state so far, and the event. It runs the upcasters and the `Evolve` rules exactly as reading from the database does, and returns the next state:

@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"net/http"
 	"reflect"
 	"time"
@@ -155,6 +156,41 @@ func Load[TState any](
 ) (TState, error) {
 	current, _, err := fold(ctx, store, subject, state)
 	return current, err
+}
+
+// Read hands out the events of a subject as they are stored, for a read that
+// neither Load nor a projection fits: one page of a long stream, the events up
+// to a certain one, or a single event. Every event is verified like everything
+// else the store reads, before the caller sees it, and a failure is sorted
+// into a category like with Load. Neither upcasters nor rules apply, since
+// there is no state; to get at the data of an event, use Decode.
+//
+// The options are those of the client SDK, so bounds, recursion and order are
+// set there. The iteration ends with the first error, and stops reading as
+// soon as the caller stops iterating.
+func Read(
+	ctx context.Context,
+	store *Store,
+	subject string,
+	options eventsourcingdb.ReadEventsOptions,
+) iter.Seq2[eventsourcingdb.Event, error] {
+	return func(yield func(eventsourcingdb.Event, error) bool) {
+		for event, err := range store.client.ReadEvents(ctx, subject, options) {
+			if err != nil {
+				yield(eventsourcingdb.Event{}, databaseFailure(err, fmt.Sprintf("reading %q", subject)))
+				return
+			}
+
+			if err := store.verify(event); err != nil {
+				yield(eventsourcingdb.Event{}, err)
+				return
+			}
+
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
 }
 
 // fold reads the stream and folds it into a state as it goes. Events are not
