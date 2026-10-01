@@ -2,6 +2,9 @@ package architecturekit_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -206,5 +209,65 @@ func TestTheEndOfTheContext(t *testing.T) {
 
 		assert.ErrorIs(t, err, context.Canceled)
 		assert.Equal(t, 1, applied)
+	})
+}
+
+// silentClient is a client of a database that takes requests but never
+// answers them, until the test is over.
+func silentClient(t *testing.T) *eventsourcingdb.Client {
+	t.Helper()
+
+	released := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-released:
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	t.Cleanup(func() {
+		close(released)
+		server.Close()
+	})
+
+	silentURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	client, err := eventsourcingdb.NewClient(silentURL, "secret")
+	require.NoError(t, err)
+
+	return client
+}
+
+func TestADeadline(t *testing.T) {
+	// The client hands the context on to its requests, so a deadline ends a
+	// request that the database does not answer, rather than only taking effect
+	// between two events that never arrive.
+	t.Run("ends loading from a database that does not answer", func(t *testing.T) {
+		store := architecturekit.NewStore(silentClient(t), "https://thenativeweb.io")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		started := time.Now()
+		_, err := architecturekit.Load(ctx, store, counterState(), "/counter/1")
+
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.NotErrorIs(t, err, architecturekit.ErrTransient, "a deadline that ran out is no failure of the database")
+		assert.Less(t, time.Since(started), 2*time.Second, "the deadline did not end the request")
+	})
+
+	t.Run("ends executing against a database that does not answer", func(t *testing.T) {
+		store := architecturekit.NewStore(silentClient(t), "https://thenativeweb.io")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		started := time.Now()
+		_, err := architecturekit.Execute(ctx, store, counterDecider(), increment{subject: "/counter/1", By: 1})
+
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Less(t, time.Since(started), 2*time.Second, "the deadline did not end the request")
 	})
 }

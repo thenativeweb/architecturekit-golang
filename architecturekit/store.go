@@ -226,15 +226,15 @@ func Read(
 				return
 			}
 		}
-
-		if ctx.Err() != nil {
-			yield(eventsourcingdb.Event{}, contextEnded(ctx, doing))
-		}
 	}
 }
 
 // readFailure is what a read that failed reports: the end of the context if
 // that is what stopped it, and the failure of the database otherwise.
+//
+// A read that the context cut short has seen only some of the events, and the
+// client reports that as a failure, so that it never looks complete: a state
+// built from part of the history would let a command decide on it.
 func readFailure(ctx context.Context, err error, doing string) error {
 	if ctx.Err() != nil {
 		return contextEnded(ctx, doing)
@@ -319,13 +319,6 @@ func fold[TState any](
 		}
 
 		lastEventID = event.ID
-	}
-
-	// A read that the context cut short has seen only some of the events. The
-	// state built from them is not wrong, but it is not the current one either,
-	// so handing it out would let a command decide on part of the history.
-	if ctx.Err() != nil {
-		return current, "", contextEnded(ctx, fmt.Sprintf("reading %q", subject))
 	}
 
 	// The cache gets a copy, so that the caller can not change what the cache
