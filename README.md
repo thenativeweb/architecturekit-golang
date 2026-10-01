@@ -375,6 +375,16 @@ func (c ReturnBook) Preconditions() []architecturekit.Precondition {
 
 `Execute` fills in the ID of the last event it has read. For a subject without any events, it requires the subject to still be pristine instead. This also holds with several processes writing to the same subjects, and with a state cache (see [Caching States](#caching-states)).
 
+If something else was written in between, the command fails with an error of the category `ErrConflict`. Since the decider decided on the state that `Execute` read, deciding again on the new state is what would have happened had the command arrived a moment later. To have `Execute` do so, hand over the `WithConflictRetries` option when creating the store, with the number of times to decide again:
+
+```go
+store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", architecturekit.WithConflictRetries(4))
+```
+
+`Execute` then reads the state anew, and the decider decides on it, up to four more times. Once the retries are used up, the command fails with `ErrConflict`, as without the option.
+
+*Note that this only applies to commands whose preconditions include `OnStateRead`. A command that checks a revision the caller hands over is never decided again, since the caller has to learn about the conflict, and deciding again would fail the same way (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)).*
+
 #### Checking the Revision of the Caller
 
 If a command may only write events in case its subject has not changed since the caller last read it, for example in a user interface, use the `NewIsSubjectOnEventIDPrecondition` function of the client SDK, and wrap it with the `Require` function. For that, add a field for the ID of the last event the caller has seen:
@@ -676,7 +686,7 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 *Note that `ErrUnverified` is a special case of `ErrPermanent`, which means that an event failed its verification (see [Verifying Events](#verifying-events)). Since that may point to a security incident rather than a mistake, check for it before `ErrPermanent` if you want to treat it differently, for example to raise an alarm.*
 
-*Note that `Execute` does not retry. To try again, for example after a conflict, call `Execute` again.*
+*Note that `Execute` does not try again by itself, unless the store decides again on conflicts (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)). To try again, for example after a transient failure, call `Execute` again.*
 
 ### Registering Event Schemas
 

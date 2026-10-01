@@ -5,10 +5,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -32,6 +34,10 @@ type Store struct {
 	// WithSignatureVerification. Checking a signature includes the hash.
 	skipsHashes     bool
 	verificationKey ed25519.PublicKey
+
+	// conflictRetries is how often Execute decides again on a conflict, set
+	// by WithConflictRetries.
+	conflictRetries int
 }
 
 // The default delays of RunProjection before it observes again, for a store
@@ -60,6 +66,30 @@ type StoreOption func(*Store)
 func WithStateCache(maxSubjects int) StoreOption {
 	return func(store *Store) {
 		store.states = newStateCache(maxSubjects)
+	}
+}
+
+// WithConflictRetries has Execute decide again, up to the given number of
+// times, if a command could not be written because something else was written
+// to its subject after Execute had read the state. Execute then reads the
+// state anew and the decider decides on it, as if the command had arrived a
+// moment later. Without this option, Execute reports the conflict right away.
+//
+// This applies only to commands whose preconditions include OnStateRead, since
+// only then does the conflict come from the state Execute read. A command that
+// checks a revision the caller hands over is never decided again: the caller
+// has to learn about the conflict, and deciding again would fail the same way.
+// Once the retries are used up, Execute reports the conflict, an error of the
+// category ErrConflict. Write never decides again, since it decides nothing.
+//
+// A negative number of retries is a programming error, so it panics.
+func WithConflictRetries(retries int) StoreOption {
+	if retries < 0 {
+		panic(fmt.Sprintf("architecturekit: WithConflictRetries needs a number of retries that is not negative, not %d", retries))
+	}
+
+	return func(store *Store) {
+		store.conflictRetries = retries
 	}
 }
 
@@ -463,8 +493,9 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 }
 
 // Execute loads the state, lets the decider decide, and appends the resulting
-// events. It does not retry: a conflict is reported, and the caller decides
-// what to do about it.
+// events. A conflict is reported, and the caller decides what to do about it,
+// unless the store was created with WithConflictRetries and the command
+// decides on the state read, in which case Execute decides again first.
 //
 // All preconditions come from the command, which has to declare at least one.
 // OnStateRead is filled in with the last event Execute has read, so that the
@@ -475,12 +506,33 @@ func Execute[TCommand Command, TState any](
 	decider Decider[TCommand, TState],
 	cmd TCommand,
 ) ([]eventsourcingdb.Event, error) {
-	subject := cmd.Subject()
-
 	declared, err := checkPreconditions(cmd)
 	if err != nil {
 		return nil, err
 	}
+
+	retries := 0
+	if slices.ContainsFunc(declared, Precondition.IsOnStateRead) {
+		retries = store.conflictRetries
+	}
+
+	for attempt := 0; ; attempt++ {
+		written, err := executeOnce(ctx, store, decider, cmd, declared)
+		if !errors.Is(err, ErrConflict) || attempt == retries || ctx.Err() != nil {
+			return written, err
+		}
+	}
+}
+
+// executeOnce reads the state, decides, and writes, once.
+func executeOnce[TCommand Command, TState any](
+	ctx context.Context,
+	store *Store,
+	decider Decider[TCommand, TState],
+	cmd TCommand,
+	declared []Precondition,
+) ([]eventsourcingdb.Event, error) {
+	subject := cmd.Subject()
 
 	state, lastEventID, err := fold(ctx, store, subject, decider.State)
 	if err != nil {
