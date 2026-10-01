@@ -212,13 +212,17 @@ func (v *InMemoryView[TKey, TItem]) Insert(_ context.Context, eventID string, it
 	return nil
 }
 
-// Upsert changes the item with the key of the given item, or adds the given
-// item if there is none. An existing item is skipped if the event is not newer
-// than it.
+// Upsert changes the item with the given key, or adds one if there is none.
+// The change starts from the existing item, or from the zero value of TItem,
+// so a single function describes both, and it has to set the fields that make
+// up the key. An existing item is skipped if the event is not newer than it.
+//
+// An item whose key, after the change, differs from the given one is a mistake,
+// and makes Upsert fail with an error of the category ErrPermanent.
 func (v *InMemoryView[TKey, TItem]) Upsert(
 	_ context.Context,
+	key TKey,
 	eventID string,
-	item TItem,
 	change func(item *TItem),
 ) error {
 	if err := requireEventID(eventID); err != nil {
@@ -228,11 +232,17 @@ func (v *InMemoryView[TKey, TItem]) Upsert(
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
-	key := v.keyOf(item)
-
 	if _, isFound := v.entries[key]; isFound {
 		_, err := v.change(key, eventID, change)
 		return err
+	}
+
+	var item TItem
+	change(&item)
+
+	if itemKey := v.keyOf(item); itemKey != key {
+		return fmt.Errorf("%w: event %s upserts an item with the key %v under the key %v",
+			ErrPermanent, eventID, itemKey, key)
 	}
 
 	v.add(key, item, eventID)
@@ -240,10 +250,12 @@ func (v *InMemoryView[TKey, TItem]) Upsert(
 	return nil
 }
 
-// Update changes the item with the given key, and reports whether it did. It
-// changes nothing if there is no such item, or if the event is not newer than
-// the item. Neither is an error, since both happen when events are applied a
-// second time: a later event may have deleted the item already.
+// Update changes the item with the given key, and reports what it did: Applied
+// if it changed the item, Missing if there is no such item, and AlreadyApplied
+// if the event is not newer than the item. Neither of the latter is an error,
+// since both happen when events are applied a second time: a later event may
+// have deleted the item already. A projection for which a missing item means
+// that something is wrong says so itself.
 //
 // Changing the key of the item is a mistake, and makes Update fail with an
 // error of the category ErrPermanent.
@@ -252,9 +264,9 @@ func (v *InMemoryView[TKey, TItem]) Update(
 	key TKey,
 	eventID string,
 	change func(item *TItem),
-) (bool, error) {
+) (Outcome, error) {
 	if err := requireEventID(eventID); err != nil {
-		return false, err
+		return 0, err
 	}
 
 	v.mutex.Lock()
@@ -263,12 +275,12 @@ func (v *InMemoryView[TKey, TItem]) Update(
 	return v.change(key, eventID, change)
 }
 
-// Delete removes the item with the given key, and reports whether it did. Like
-// Update, it removes nothing if there is no such item, or if the event is not
-// newer than the item.
-func (v *InMemoryView[TKey, TItem]) Delete(_ context.Context, key TKey, eventID string) (bool, error) {
+// Delete removes the item with the given key, and reports what it did, like
+// Update: Applied if it removed the item, Missing if there is no such item, and
+// AlreadyApplied if the event is not newer than the item.
+func (v *InMemoryView[TKey, TItem]) Delete(_ context.Context, key TKey, eventID string) (Outcome, error) {
 	if err := requireEventID(eventID); err != nil {
-		return false, err
+		return 0, err
 	}
 
 	v.mutex.Lock()
@@ -342,22 +354,25 @@ func (v *InMemoryView[TKey, TItem]) add(key TKey, item TItem, eventID string) {
 
 // change applies a change to one item, if the event is newer. It expects the
 // lock to be held.
-func (v *InMemoryView[TKey, TItem]) change(key TKey, eventID string, change func(item *TItem)) (bool, error) {
+func (v *InMemoryView[TKey, TItem]) change(key TKey, eventID string, change func(item *TItem)) (Outcome, error) {
 	entry, isFound := v.entries[key]
 	if !isFound {
-		return false, nil
+		return Missing, nil
 	}
 
 	isNewer, err := isNewerThan(eventID, entry.revision)
-	if err != nil || !isNewer {
-		return false, err
+	if err != nil {
+		return 0, err
+	}
+	if !isNewer {
+		return AlreadyApplied, nil
 	}
 
 	changed := entry.item
 	change(&changed)
 
 	if newKey := v.keyOf(changed); newKey != key {
-		return false, fmt.Errorf("%w: event %s changes the key of an item from %v to %v",
+		return 0, fmt.Errorf("%w: event %s changes the key of an item from %v to %v",
 			ErrPermanent, eventID, key, newKey)
 	}
 
@@ -373,7 +388,7 @@ func (v *InMemoryView[TKey, TItem]) change(key TKey, eventID string, change func
 	entry.item = changed
 	entry.revision = eventID
 
-	return true, nil
+	return Applied, nil
 }
 
 // changeAll applies a change to the items with the given keys, and counts the
@@ -381,11 +396,11 @@ func (v *InMemoryView[TKey, TItem]) change(key TKey, eventID string, change func
 func (v *InMemoryView[TKey, TItem]) changeAll(keys []TKey, eventID string, change func(item *TItem)) (int, error) {
 	changed := 0
 	for _, key := range keys {
-		isChanged, err := v.change(key, eventID, change)
+		outcome, err := v.change(key, eventID, change)
 		if err != nil {
 			return changed, err
 		}
-		if isChanged {
+		if outcome == Applied {
 			changed++
 		}
 	}
@@ -395,15 +410,18 @@ func (v *InMemoryView[TKey, TItem]) changeAll(keys []TKey, eventID string, chang
 
 // delete removes one item, if the event is newer. It expects the lock to be
 // held.
-func (v *InMemoryView[TKey, TItem]) delete(key TKey, eventID string) (bool, error) {
+func (v *InMemoryView[TKey, TItem]) delete(key TKey, eventID string) (Outcome, error) {
 	entry, isFound := v.entries[key]
 	if !isFound {
-		return false, nil
+		return Missing, nil
 	}
 
 	isNewer, err := isNewerThan(eventID, entry.revision)
-	if err != nil || !isNewer {
-		return false, err
+	if err != nil {
+		return 0, err
+	}
+	if !isNewer {
+		return AlreadyApplied, nil
 	}
 
 	for _, index := range v.indexes {
@@ -413,7 +431,7 @@ func (v *InMemoryView[TKey, TItem]) delete(key TKey, eventID string) (bool, erro
 	delete(v.entries, key)
 	v.compact()
 
-	return true, nil
+	return Applied, nil
 }
 
 // deleteAll removes the items with the given keys, and counts the ones it
@@ -421,11 +439,11 @@ func (v *InMemoryView[TKey, TItem]) delete(key TKey, eventID string) (bool, erro
 func (v *InMemoryView[TKey, TItem]) deleteAll(keys []TKey, eventID string) (int, error) {
 	removed := 0
 	for _, key := range keys {
-		isRemoved, err := v.delete(key, eventID)
+		outcome, err := v.delete(key, eventID)
 		if err != nil {
 			return removed, err
 		}
-		if isRemoved {
+		if outcome == Applied {
 			removed++
 		}
 	}

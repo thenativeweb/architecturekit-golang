@@ -214,12 +214,12 @@ func TestTracking(t *testing.T) {
 		view := intView()
 
 		applied := 0
-		projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
+		projection := architecturekit.Tracking(architecturekit.ProjectionFunc(
 			func(context.Context, eventsourcingdb.Event) error {
 				applied++
 				return nil
 			},
-		))
+		), view)
 
 		architecturekittest.Project(t, projection,
 			architecturekittest.StoredEvent("/counter/a", "0", incremented{By: 1}),
@@ -236,9 +236,9 @@ func TestTracking(t *testing.T) {
 		// not concern it, but a reader may be waiting for exactly that event.
 		view := intView()
 
-		projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
+		projection := architecturekit.Tracking(architecturekit.ProjectionFunc(
 			func(context.Context, eventsourcingdb.Event) error { return nil },
-		))
+		), view)
 
 		architecturekittest.Project(t, projection,
 			architecturekittest.StoredEvent("/somewhere/else", "42", incremented{By: 1}),
@@ -247,13 +247,38 @@ func TestTracking(t *testing.T) {
 		assert.Equal(t, "42", view.Revision())
 	})
 
+	t.Run("records every event in every view", func(t *testing.T) {
+		books, shelves, readers := intView(), intView(), intView()
+
+		projection := architecturekit.Tracking(architecturekit.ProjectionFunc(
+			func(context.Context, eventsourcingdb.Event) error { return nil },
+		), books, shelves, readers)
+
+		architecturekittest.Project(t, projection,
+			architecturekittest.StoredEvent("/counter/a", "3", incremented{By: 1}),
+			architecturekittest.StoredEvent("/counter/b", "4", incremented{By: 1}),
+		)
+
+		for name, view := range map[string]*architecturekit.InMemoryView[int, int]{
+			"books": books, "shelves": shelves, "readers": readers,
+		} {
+			assert.Equal(t, "4", view.Revision(), "the view %s has to record the events", name)
+		}
+	})
+
+	t.Run("refuses to track without a view", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: Tracking needs at least one view to record the events in", func() {
+			architecturekit.Tracking(&collector{})
+		})
+	})
+
 	t.Run("does not record a failed event", func(t *testing.T) {
 		view := intView()
 		failed := errors.New("could not apply")
 
-		projection := architecturekit.Tracking(view, architecturekit.ProjectionFunc(
+		projection := architecturekit.Tracking(architecturekit.ProjectionFunc(
 			func(context.Context, eventsourcingdb.Event) error { return failed },
-		))
+		), view)
 
 		err := projection.Apply(t.Context(),
 			architecturekittest.StoredEvent("/counter/a", "7", incremented{By: 1}))
@@ -264,7 +289,7 @@ func TestTracking(t *testing.T) {
 	})
 
 	t.Run("keeps a projection that is rebuilt as it is", func(t *testing.T) {
-		projection := architecturekit.Tracking(intView(), &collector{})
+		projection := architecturekit.Tracking(&collector{}, intView())
 
 		architecturekittest.ExpectMode(t, projection, architecturekit.ModeRebuild)
 
@@ -280,7 +305,7 @@ func TestTracking(t *testing.T) {
 		// A wrapper that dropped the checkpoint would silently turn this into a
 		// projection that is rebuilt on every start.
 		target := &batchedResumingCollector{resumingCollector: resumingCollector{checkpoint: "7"}}
-		projection := architecturekit.Tracking(intView(), target)
+		projection := architecturekit.Tracking(target, intView())
 
 		architecturekittest.ExpectMode(t, projection, architecturekit.ModeResumable)
 
@@ -300,7 +325,7 @@ func TestTracking(t *testing.T) {
 
 	t.Run("refuses a projection that is transactional as well", func(t *testing.T) {
 		assert.Panics(t, func() {
-			architecturekit.Tracking(intView(), &transactionalWithApply{})
+			architecturekit.Tracking(&transactionalWithApply{}, intView())
 		}, "tracking would bypass the transactions")
 	})
 
@@ -313,7 +338,7 @@ func TestTracking(t *testing.T) {
 		target := &resumingCollector{}
 
 		require.NoError(t, architecturekit.CatchUpProjection(t.Context(), store, subject, false,
-			architecturekit.Tracking(view, target)))
+			architecturekit.Tracking(target, view)))
 
 		require.NotEmpty(t, target.checkpoint, "a tracked resumable projection has to save its checkpoint")
 		assert.Equal(t, target.checkpoint, view.Revision())

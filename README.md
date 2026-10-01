@@ -951,16 +951,16 @@ if err != nil {
 }
 ```
 
-If the key of the item is already taken, and the event is newer than the item with that key, `Insert` fails with an error of the category `ErrPermanent`, since two items with the same key point to a mistake in the events or in the key. To add an item or change the existing one, call the `Upsert` function instead, and additionally hand over a function that changes the existing item:
+If the key of the item is already taken, and the event is newer than the item with that key, `Insert` fails with an error of the category `ErrPermanent`, since two items with the same key point to a mistake in the events or in the key. To add an item or change the existing one, call the `Upsert` function instead, with the key and a function that changes the item. It starts from the existing item, or from an empty one if there is none, so it has to set the fields that make up the key:
 
 ```go
-err := catalog.Upsert(ctx, event.ID, BookItem{
-  ID:         "42",
-  IsBorrowed: true,
-}, func(item *BookItem) {
+err := catalog.Upsert(ctx, "42", event.ID, func(item *BookItem) {
+  item.ID = "42"
   item.IsBorrowed = true
 })
 ```
+
+*Note that an item whose key, after the change, differs from the given one fails with an error of the category `ErrPermanent`, which also catches a function that forgets to set the key.*
 
 #### Reading Items
 
@@ -988,17 +988,35 @@ for item := range items {
 
 #### Changing and Removing Items
 
-To change the item with a given key, call the `Update` function with a function that changes it. To remove it, call the `Delete` function. Both report whether they changed anything:
+To change the item with a given key, call the `Update` function with a function that changes it. To remove it, call the `Delete` function. Both return an `Outcome`, which tells what they did:
 
 ```go
-isChanged, err := catalog.Update(ctx, "42", event.ID, func(item *BookItem) {
+outcome, err := catalog.Update(ctx, "42", event.ID, func(item *BookItem) {
   item.IsBorrowed = true
 })
 
-isRemoved, err := catalog.Delete(ctx, "42", event.ID)
+outcome, err := catalog.Delete(ctx, "42", event.ID)
 ```
 
-Neither changes anything if there is no such item, or if the event is not newer than the item. Neither is an error, since both happen when events are applied a second time, as a later event may have removed the item already.
+| Outcome | Meaning |
+|---|---|
+| `architecturekit.Applied` | The item was changed or removed. |
+| `architecturekit.Missing` | There is no item with the key. |
+| `architecturekit.AlreadyApplied` | The item has seen the event, or a newer one, so nothing was changed. |
+
+Neither of the latter is an error, since both happen when events are applied a second time, as a later event may have removed the item already. If an event about an item that does not exist means that the view and the database disagree, say so in the projection:
+
+```go
+outcome, err := catalog.Update(ctx, bookID, event.ID, func(item *BookItem) {
+  item.IsBorrowed = true
+})
+if err != nil {
+  return err
+}
+if outcome == architecturekit.Missing {
+  return fmt.Errorf("event %s is about book %s, which was never acquired", event.ID, bookID)
+}
+```
 
 *Note that changing the key of an item fails with an error of the category `ErrPermanent`.*
 
@@ -1047,6 +1065,16 @@ func (t *BookTable) All(ctx context.Context) (iter.Seq[BookItem], error) {
   // ...
 }
 ```
+
+If the view can find a single item by its key, also implement the `Get` function, which makes it a `KeyedView`:
+
+```go
+func (t *BookTable) Get(ctx context.Context, id string) (BookItem, bool, error) {
+  // ...
+}
+```
+
+A query that reads a single item can then take an `architecturekit.KeyedView[string, BookItem]` instead of running over all items, and work with the view in memory and the one in a database alike. `InMemoryView` is a `KeyedView`, too.
 
 ### Defining Projections
 
@@ -1519,7 +1547,7 @@ func getBook(catalog architecturekit.View[BookItem]) func(context.Context, GetBo
 }
 ```
 
-*Note that the query package reads every item it is handed. To get an item by its key, call the `Get` function of the view instead, and to get items by the value of a secondary index, call the `Lookup` function of the index (see [Defining Views](#defining-views)).*
+*Note that the query package reads every item it is handed. To get an item by its key, call the `Get` function of a `KeyedView` instead, and to get items by the value of a secondary index, call the `Lookup` function of the index (see [Defining Views](#defining-views)).*
 
 #### Counting Items
 
@@ -1544,12 +1572,20 @@ The ID of the last event a view has seen is its revision. Since the database ass
 To track the revision of a view, wrap the projection with the `Tracking` function and hand over the view. It records every event that reaches the projection, including the ones the projection ignores:
 
 ```go
-trackedProjection := architecturekit.Tracking(catalog, catalogProjection)
+trackedProjection := architecturekit.Tracking(catalogProjection, catalog)
+```
+
+If the projection writes to several views, hand over all of them, so that each one knows how far it has come:
+
+```go
+trackedProjection := architecturekit.Tracking(libraryProjection, catalog, readers, loans)
 ```
 
 Then run `trackedProjection` instead of `catalogProjection` (see [Running Projections](#running-projections)).
 
 `Tracking` accepts every view that implements the `RevisionSink` interface, which consists of the `Seen` function. `InMemoryView` implements it.
+
+*Note that calling `Tracking` without any view panics.*
 
 The tracked projection keeps the mode and the batch sizes of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
 

@@ -124,12 +124,12 @@ func TestInMemoryView(t *testing.T) {
 		view := bookView()
 		mustInsert(t, view, "1", book{ID: "42", Title: "draft"})
 
-		isChanged, err := view.Update(context.Background(), "42", "2", func(item *book) {
+		outcome, err := view.Update(context.Background(), "42", "2", func(item *book) {
 			item.Title = "final"
 			item.Revision = "made up by the handler"
 		})
 		require.NoError(t, err)
-		assert.True(t, isChanged)
+		assert.Equal(t, architecturekit.Applied, outcome)
 
 		// The view sets the revision, whatever the handler wrote.
 		got := mustGet(t, view, "42")
@@ -141,9 +141,9 @@ func TestInMemoryView(t *testing.T) {
 		view := bookView()
 		mustInsert(t, view, "2", book{ID: "42", Title: "current"})
 
-		isChanged, err := view.Update(context.Background(), "42", "2", func(item *book) { item.Title = "replayed" })
+		outcome, err := view.Update(context.Background(), "42", "2", func(item *book) { item.Title = "replayed" })
 		require.NoError(t, err)
-		assert.False(t, isChanged)
+		assert.Equal(t, architecturekit.AlreadyApplied, outcome)
 
 		got := mustGet(t, view, "42")
 		assert.Equal(t, "current", got.Title)
@@ -152,59 +152,83 @@ func TestInMemoryView(t *testing.T) {
 	t.Run("changes nothing for a missing item", func(t *testing.T) {
 		view := bookView()
 
-		isChanged, err := view.Update(context.Background(), "42", "1", func(item *book) { item.Title = "x" })
+		outcome, err := view.Update(context.Background(), "42", "1", func(item *book) { item.Title = "x" })
 		require.NoError(t, err, "updating a missing book")
-		assert.False(t, isChanged, "updating a missing book")
+		assert.Equal(t, architecturekit.Missing, outcome, "updating a missing book")
 
-		isRemoved, err := view.Delete(context.Background(), "42", "1")
+		outcome, err = view.Delete(context.Background(), "42", "1")
 		require.NoError(t, err, "deleting a missing book")
-		assert.False(t, isRemoved, "deleting a missing book")
+		assert.Equal(t, architecturekit.Missing, outcome, "deleting a missing book")
 	})
 
 	t.Run("refuses to change the key", func(t *testing.T) {
 		view := bookView()
 		mustInsert(t, view, "1", book{ID: "42", Title: "kept"})
 
-		_, err := view.Update(context.Background(), "42", "2", func(item *book) {
+		outcome, err := view.Update(context.Background(), "42", "2", func(item *book) {
 			item.ID = "23"
 			item.Title = "moved"
 		})
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "changing the key is permanent")
+		assert.Zero(t, outcome, "an error comes without an outcome")
 		got := mustGet(t, view, "42")
 		assert.Equal(t, "kept", got.Title, "a refused change must not be kept")
 	})
 
 	t.Run("upserts", func(t *testing.T) {
 		view := bookView()
-		rename := func(item *book) { item.Title = "renamed" }
+		shelve := func(title string) func(item *book) {
+			return func(item *book) {
+				item.ID = "42"
+				item.Title = title
+				item.Shelf = item.Shelf + "|" + title
+			}
+		}
 
-		require.NoError(t, view.Upsert(context.Background(), "1", book{ID: "42", Title: "new"}, rename))
+		require.NoError(t, view.Upsert(context.Background(), "42", "1", shelve("new")))
 		got := mustGet(t, view, "42")
-		assert.Equal(t, "new", got.Title, "a missing book is inserted as given")
-		assert.Equal(t, "1", got.Revision, "a missing book is inserted as given")
+		assert.Equal(t, "new", got.Title, "a missing book is added")
+		assert.Equal(t, "|new", got.Shelf, "a missing book starts from the zero value")
+		assert.Equal(t, "1", got.Revision, "a missing book is added with the event")
 
-		require.NoError(t, view.Upsert(context.Background(), "2", book{ID: "42", Title: "ignored"}, rename))
+		require.NoError(t, view.Upsert(context.Background(), "42", "2", shelve("renamed")))
 		got = mustGet(t, view, "42")
 		assert.Equal(t, "renamed", got.Title, "an existing book is changed")
-		assert.Equal(t, "2", got.Revision, "an existing book is changed")
+		assert.Equal(t, "|new|renamed", got.Shelf, "an existing book is changed, not replaced")
+		assert.Equal(t, "2", got.Revision, "an existing book is changed with the event")
 
-		require.NoError(t, view.Upsert(context.Background(), "2", book{ID: "42"}, func(item *book) { item.Title = "replayed" }))
+		require.NoError(t, view.Upsert(context.Background(), "42", "2", shelve("replayed")))
 		got = mustGet(t, view, "42")
 		assert.Equal(t, "renamed", got.Title, "an event that is not newer is skipped")
+	})
+
+	t.Run("refuses to upsert an item under another key", func(t *testing.T) {
+		view := bookView()
+
+		err := view.Upsert(context.Background(), "42", "1", func(item *book) { item.Title = "no key set" })
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a missing key is permanent")
+		assert.ErrorContains(t, err, "42", "the error has to name the key")
+		assert.ErrorContains(t, err, "event 1", "the error has to name the event")
+		assert.Empty(t, idsIn(t, view), "a refused item must not be added")
+
+		mustInsert(t, view, "2", book{ID: "42"})
+		err = view.Upsert(context.Background(), "42", "3", func(item *book) { item.ID = "23" })
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "changing the key of an existing item is permanent")
 	})
 
 	t.Run("deletes an item", func(t *testing.T) {
 		view := bookView()
 		mustInsert(t, view, "5", book{ID: "42"})
 
-		isRemoved, err := view.Delete(context.Background(), "42", "3")
+		outcome, err := view.Delete(context.Background(), "42", "3")
 		require.NoError(t, err)
-		assert.False(t, isRemoved, "an older event must not delete")
+		assert.Equal(t, architecturekit.AlreadyApplied, outcome, "an older event must not delete")
 
-		isRemoved, err = view.Delete(context.Background(), "42", "6")
+		outcome, err = view.Delete(context.Background(), "42", "6")
 		require.NoError(t, err)
-		assert.True(t, isRemoved)
+		assert.Equal(t, architecturekit.Applied, outcome)
 
 		_, isFound, _ := view.Get(context.Background(), "42")
 		assert.False(t, isFound, "the book is still there")
@@ -236,9 +260,9 @@ func TestInMemoryView(t *testing.T) {
 		view := architecturekit.NewInMemoryView(func(item book) string { return item.ID })
 		mustInsert(t, view, "5", book{ID: "42", Title: "current"})
 
-		isChanged, err := view.Update(context.Background(), "42", "5", func(item *book) { item.Title = "replayed" })
+		outcome, err := view.Update(context.Background(), "42", "5", func(item *book) { item.Title = "replayed" })
 		require.NoError(t, err)
-		assert.False(t, isChanged, "the replayed event has to be skipped")
+		assert.Equal(t, architecturekit.AlreadyApplied, outcome, "the replayed event has to be skipped")
 		got := mustGet(t, view, "42")
 		assert.Empty(t, got.Revision, "without a field, the item carries no revision")
 	})
@@ -252,7 +276,7 @@ func TestInMemoryView(t *testing.T) {
 
 		operations := map[string]func() error{
 			"Insert": func() error { return view.Insert(ctx, "", book{ID: "42"}) },
-			"Upsert": func() error { return view.Upsert(ctx, "", book{ID: "42"}, noChange) },
+			"Upsert": func() error { return view.Upsert(ctx, "42", "", noChange) },
 			"Update": func() error { _, err := view.Update(ctx, "42", "", noChange); return err },
 			"Delete": func() error { _, err := view.Delete(ctx, "42", ""); return err },
 			"UpdateWhere": func() error {
@@ -279,6 +303,17 @@ func TestInMemoryView(t *testing.T) {
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
 		assert.ErrorIs(t, err, architecturekit.ErrNotARevision)
+
+		outcome, err := view.Update(context.Background(), "42", "not a revision", func(*book) {})
+		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "updating")
+		assert.Zero(t, outcome, "an error comes without an outcome")
+
+		outcome, err = view.Delete(context.Background(), "42", "not a revision")
+		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "deleting")
+		assert.Zero(t, outcome, "an error comes without an outcome")
+
+		err = view.Upsert(context.Background(), "42", "not a revision", func(*book) {})
+		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "upserting an existing item")
 	})
 
 	t.Run("reports a failure among several items", func(t *testing.T) {
@@ -371,5 +406,37 @@ func TestInMemoryIndex(t *testing.T) {
 
 		assert.Empty(t, lookedUp(t, byShelf, "left"))
 		assert.Equal(t, []string{"b"}, idsIn(t, view))
+	})
+}
+
+func TestKeyedView(t *testing.T) {
+	t.Run("finds an item by its key through the interface", func(t *testing.T) {
+		// A query takes the interface rather than the view, so that a view in a
+		// database can stand in for the one in memory later on.
+		titleOf := func(view architecturekit.KeyedView[string, book], id string) (string, bool) {
+			item, isFound, err := view.Get(context.Background(), id)
+			require.NoError(t, err)
+
+			return item.Title, isFound
+		}
+
+		view := bookView()
+		mustInsert(t, view, "1", book{ID: "42", Title: "Rendezvous with Rama"})
+
+		title, isFound := titleOf(view, "42")
+		assert.True(t, isFound)
+		assert.Equal(t, "Rendezvous with Rama", title)
+
+		_, isFound = titleOf(view, "23")
+		assert.False(t, isFound, "a missing key has to be reported as missing")
+	})
+}
+
+func TestOutcome(t *testing.T) {
+	t.Run("names itself", func(t *testing.T) {
+		assert.Equal(t, "applied", architecturekit.Applied.String())
+		assert.Equal(t, "missing", architecturekit.Missing.String())
+		assert.Equal(t, "already applied", architecturekit.AlreadyApplied.String())
+		assert.Equal(t, "Outcome(0)", architecturekit.Outcome(0).String(), "the zero value is no outcome")
 	})
 }
