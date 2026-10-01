@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -158,6 +159,8 @@ func TestStatusFor(t *testing.T) {
 			{"permanent", architecturekit.ErrPermanent, http.StatusInternalServerError},
 			{"unverified", architecturekit.ErrUnverified, http.StatusInternalServerError},
 			{"anything else", errors.New("who knows"), http.StatusInternalServerError},
+			{"a caller who went away", fmt.Errorf("architecturekit: reading: %w", context.Canceled), 499},
+			{"a deadline that ran out", fmt.Errorf("architecturekit: reading: %w", context.DeadlineExceeded), http.StatusServiceUnavailable},
 		}
 
 		for _, c := range cases {

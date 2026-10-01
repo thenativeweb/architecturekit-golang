@@ -368,3 +368,28 @@ func TestAnsweringWithoutAnAPI(t *testing.T) {
 		})
 	}
 }
+
+func TestAnsweringWhenTheContextEnded(t *testing.T) {
+	t.Run("a caller who went away gets 499, which is not logged", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+		recorder := httptest.NewRecorder()
+
+		httpapi.Respond(recorder, request, api, nil, fmt.Errorf("architecturekit: reading %q: %w", "/notes/1", context.Canceled))
+
+		assert.Equal(t, 499, recorder.Code)
+		assert.Empty(t, logs.String(), "a caller who went away is no failure of the server")
+	})
+
+	t.Run("a deadline that ran out gets 503, which is logged", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+		recorder := httptest.NewRecorder()
+
+		httpapi.Respond(recorder, request, api, nil, fmt.Errorf("architecturekit: reading %q: %w", "/notes/1", context.DeadlineExceeded))
+
+		assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+		assert.Contains(t, logs.String(), "httpapi: internal failure")
+		assert.Contains(t, logs.String(), "context deadline exceeded")
+	})
+}

@@ -363,17 +363,6 @@ func TestWriters(t *testing.T) {
 	})
 }
 
-func TestIgnoreContextEnd(t *testing.T) {
-	t.Run("keeps real failures", func(t *testing.T) {
-		assert.NoError(t, ignoreContextEnd(nil))
-		assert.NoError(t, ignoreContextEnd(context.Canceled), "a cancelled run is not a failure")
-		assert.NoError(t, ignoreContextEnd(context.DeadlineExceeded), "a deadline is not a failure")
-
-		real := errors.New("disk on fire")
-		assert.ErrorIs(t, ignoreContextEnd(real), real, "a real failure has to survive")
-	})
-}
-
 // failingCommitRecorder refuses to save its checkpoint.
 type failingCommitRecorder struct{ recorder }
 

@@ -114,6 +114,9 @@ func batchSizesOf(projection any) (catchUp, live int) {
 // Use it to build a read model once, for a batch job or in a test, instead of
 // following the stream.
 //
+// If the context ends first, it returns the context's error, so that a read
+// model that is only partly built does not look complete.
+//
 // A projection that is transactional as well is a programming error and
 // panics; use CatchUpTransactionalProjection for it.
 func CatchUpProjection(
@@ -128,7 +131,7 @@ func CatchUpProjection(
 	catchUpSize, _ := batchSizesOf(projection)
 	_, err := catchUp(ctx, store, subject, recursive, writerFor(projection), catchUpSize, nil)
 
-	return ignoreContextEnd(err)
+	return err
 }
 
 // RunProjection drives a projection until the context ends. It first catches
@@ -170,7 +173,7 @@ func CatchUpTransactionalProjection(
 	_, err := catchUp(ctx, store, subject, recursive,
 		&transactionalWriter{projection: projection}, catchUpSize, nil)
 
-	return ignoreContextEnd(err)
+	return err
 }
 
 // RunTransactionalProjection is RunProjection for a transactional projection.
@@ -297,15 +300,6 @@ func catchUp(
 	return lastEventID, nil
 }
 
-// ignoreContextEnd turns the expected end of a run into a clean return.
-func ignoreContextEnd(err error) error {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return nil
-	}
-
-	return err
-}
-
 // boundAfter turns a checkpoint into a lower bound that excludes the event the
 // checkpoint names, because that one has already been applied.
 func boundAfter(eventID string) *eventsourcingdb.Bound {
@@ -333,7 +327,7 @@ func drive(
 
 	for event, err := range events {
 		if err != nil {
-			failure := databaseFailure(err, "reading events")
+			failure := readFailure(ctx, err, "reading events")
 			if open {
 				failure = errors.Join(failure, writer.rollback(ctx))
 			}
@@ -384,7 +378,11 @@ func drive(
 		progress.committed(lastEventID)
 	}
 
-	return lastEventID, ctx.Err()
+	if ctx.Err() != nil {
+		return lastEventID, contextEnded(ctx, "reading events")
+	}
+
+	return lastEventID, nil
 }
 
 // projectionWriter hides the three kinds of projection behind one shape, so

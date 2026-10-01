@@ -128,7 +128,10 @@ func TestWithConflictRetries(t *testing.T) {
 		_, err := architecturekit.Execute(ctx, retryingStore(t, 2), decider,
 			increment{subject: subjectFor(t), By: 1}.onStateRead())
 
-		assert.ErrorIs(t, err, architecturekit.ErrConflict)
+		// The context ended while deciding, so nothing is written at all, and
+		// there is no conflict left to decide again on.
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.NotErrorIs(t, err, architecturekit.ErrConflict)
 		assert.Equal(t, 1, counted.decisions)
 	})
 
