@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -39,6 +40,21 @@ func StoredEvents(subject string, events ...architecturekit.Event) []eventsourci
 	stored := make([]eventsourcingdb.Event, len(events))
 	for i, event := range events {
 		stored[i] = StoredEvent(subject, strconv.Itoa(i), event)
+	}
+
+	return stored
+}
+
+// StoredEventsAt turns typed events into stored ones for the same subject, the
+// way the database continues a history: numbered from firstID on, and written
+// one minute apart from the given time on. Use it where a projection reads the
+// time of an event, or where the events of several subjects have to follow
+// one another, as they do in the database.
+func StoredEventsAt(subject string, firstID int, at time.Time, events ...architecturekit.Event) []eventsourcingdb.Event {
+	stored := make([]eventsourcingdb.Event, len(events))
+	for i, event := range events {
+		stored[i] = StoredEvent(subject, strconv.Itoa(firstID+i), event)
+		stored[i].Time = at.Add(time.Duration(i) * time.Minute)
 	}
 
 	return stored
