@@ -2035,13 +2035,23 @@ curl http://localhost:8080/api/books \
 
 The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. If the header does not contain a revision, the request is answered with `400 Bad Request`.
 
-Once the view has seen at least one event, the response contains the revision it shows in the `X-Revision` header, as well as an `ETag` header and `Cache-Control: no-cache`. If the caller sends the `ETag` in the `If-None-Match` header and the view has not changed since, the request is answered with `304 Not Modified`.
+Once the view has seen at least one event, the response contains the revision it shows in the `X-Revision` header, as well as an `ETag` header and `Cache-Control: private, no-cache`. If the caller sends the `ETag` in the `If-None-Match` header, asks the same, and the view has not changed since, the request is answered with `304 Not Modified`. `private` keeps shared caches, such as proxies, from keeping the answer.
+
+The `ETag` holds the query that was asked, with every field. So two callers get the same `ETag` only if their queries are equal: a query that holds the user, or anything else that tells callers apart, gets an `ETag` of its own for each of them. That matters as soon as callers share a browser one after the other, since the browser asks with the `ETag` it kept for the one before. The query is built before the route waits or answers `304 Not Modified`, so a caller who may not ask is refused first.
+
+This holds as long as the answer depends on nothing but the query and the view, which is why the answer sees neither the request nor the user. Three things get past it:
+
+- The clock, or anything else outside the events. See [Depending on More Than the Read Model](#depending-on-more-than-the-read-model).
+- Another view. The revision is that of the view handed over, so an answer that also reads from another view does not notice when that one changes.
+- The context. A value that a middleware puts into the context, such as the user, never shows up in the `ETag`. Put it into the query instead.
+
+A query that holds a function or a channel can not be written into an `ETag`, and its answer goes without one.
 
 *Note that the constants `httpapi.HeaderWaitFor` and `httpapi.HeaderRevision` contain the names of the two headers.*
 
 #### Depending on More Than the Read Model
 
-If an answer depends on more than the view, for example on the current date, call the `QueryVarying` function instead, and additionally hand over a function of the type `httpapi.Volatile`. It receives the request and returns a value that changes whenever the answer would, and that becomes part of the `ETag`:
+If an answer depends on more than the view, for example on the current date, the simplest way is to put that value into the query, as `Today` below. Since the query is part of the `ETag`, the `ETag` changes with it, and `QueryRevisioned` is all it takes:
 
 ```go
 type ListOverdueBooks struct {
@@ -2061,6 +2071,22 @@ func listOverdueBooks(catalog architecturekit.View[BookItem]) func(context.Conte
   }
 }
 
+httpapi.QueryRevisioned(
+  api,
+  mux,
+  "GET /api/overdue-books",
+  catalog,
+  func(r *http.Request, user User) (ListOverdueBooks, error) {
+    return ListOverdueBooks{Today: time.Now().Format(time.DateOnly)}, nil
+  },
+  listOverdueBooks(catalog),
+  httpapi.DefaultWait,
+)
+```
+
+If the answer takes such a value from elsewhere instead, for example because it reads the clock itself, call the `QueryVarying` function, and additionally hand over a function of the type `httpapi.Volatile`. It receives the request and returns a value that changes whenever the answer would, and that becomes part of the `ETag` as well:
+
+```go
 func today(*http.Request) string {
   return time.Now().Format(time.DateOnly)
 }
@@ -2068,12 +2094,10 @@ func today(*http.Request) string {
 httpapi.QueryVarying(
   api,
   mux,
-  "GET /api/overdue-books",
+  "GET /api/books-due-today",
   catalog,
-  func(r *http.Request, user User) (ListOverdueBooks, error) {
-    return ListOverdueBooks{Today: today(r)}, nil
-  },
-  listOverdueBooks(catalog),
+  toListBooksDueToday,
+  listBooksDueToday(catalog),
   httpapi.DefaultWait,
   today,
 )
@@ -2111,6 +2135,8 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
   httpapi.RespondResultAt(w, r, api, revision, books, err, nil)
 })
 ```
+
+*Note that these functions never see the query, so unlike `QueryRevisioned` their `ETag` does not hold it. Use them only for an answer that is the same for every caller, or let the `Volatile` function return whatever tells callers apart, otherwise one caller can be told that nothing has changed and keep the answer of another.*
 
 ### Checking Health over HTTP
 
