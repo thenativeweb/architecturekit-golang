@@ -35,7 +35,8 @@ var (
 	// ErrForbidden means the user is known but not allowed to do this.
 	ErrForbidden = errors.New("httpapi: forbidden")
 
-	// ErrMalformed means the body could not be turned into a command.
+	// ErrMalformed means the body could not be decoded, or not be turned into
+	// a command.
 	ErrMalformed = errors.New("httpapi: malformed request")
 )
 
@@ -169,23 +170,9 @@ func Handle[
 		return handled, err
 	}
 
-	if err := requireJSON(r); err != nil {
-		return handled, err
-	}
-
-	body, err := readBody(r)
+	request, err := BodyOf[TRequest](r)
 	if err != nil {
 		return handled, err
-	}
-
-	// Unknown fields are rejected rather than dropped, so that a misspelled
-	// field cannot silently turn into a zero value.
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-
-	var request TRequest
-	if err := decoder.Decode(&request); err != nil {
-		return handled, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
 
 	cmd, err := request.ToCommand(user)
@@ -401,6 +388,37 @@ func categorise(err error) error {
 	}
 
 	return fmt.Errorf("%w: %v", ErrMalformed, err)
+}
+
+// BodyOf decodes the JSON body of a request by the rules that Route applies to
+// a command, for a handler of your own or a query whose input does not fit
+// into the query string. The Content-Type has to be application/json, or it is
+// ErrUnsupportedMediaType. The body may hold at most MaxRequestBody bytes, or
+// it is ErrTooLarge. JSON that does not fit TBody, including a field that TBody
+// does not have, is ErrMalformed.
+func BodyOf[TBody any](r *http.Request) (TBody, error) {
+	var value TBody
+
+	if err := requireJSON(r); err != nil {
+		return value, err
+	}
+
+	body, err := readBody(r)
+	if err != nil {
+		return value, err
+	}
+
+	// Unknown fields are rejected rather than dropped, so that a misspelled
+	// field cannot silently turn into a zero value.
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&value); err != nil {
+		var zero TBody
+		return zero, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+
+	return value, nil
 }
 
 // requireJSON insists on application/json. That is not pedantry: a browser
