@@ -47,6 +47,9 @@ type State[TState any] struct {
 	evolve  map[string]func(TState, json.RawMessage) (TState, error)
 	schemas []EventSchema
 
+	// ignored holds the event types the state takes without changing.
+	ignored map[string]bool
+
 	// upcasters is the shared set the state refers to, or nil if it has none.
 	upcasters *Upcasters
 
@@ -75,6 +78,7 @@ func NewState[TState any](initial TState) *State[TState] {
 	return &State[TState]{
 		initial: initial,
 		evolve:  map[string]func(TState, json.RawMessage) (TState, error){},
+		ignored: map[string]bool{},
 	}
 }
 
@@ -100,14 +104,50 @@ func (s *State[TState]) Evolve[TEvent Event](evolve func(TState, TEvent) TState)
 		return evolve(state, event), nil
 	}
 
+	s.schemas = append(s.schemas, schemaFor[TEvent](eventType))
+
+	return s
+}
+
+// Ignore lets the state take events of type TEvent without changing, for an
+// event that belongs to the subject but matters for no decision, such as one
+// that only records what happened. It says so, where an Evolve rule that
+// returns the state unchanged would need a comment. Without either, reading
+// such an event fails, since an event type without a rule usually points to a
+// missing rule or a wrong subject.
+//
+// The data of an ignored event is not decoded. Its schema is still part of
+// Schemas, since the event is still written to the subject.
+//
+// Ignoring an event type that has an Evolve rule, or ignoring it twice, is a
+// programming error, so it panics while the state is being built.
+func (s *State[TState]) Ignore[TEvent Event]() *State[TState] {
+	var zero TEvent
+	eventType := zero.EventType()
+
+	if _, exists := s.evolve[eventType]; exists {
+		panic(fmt.Sprintf("architecturekit: event type %q is already registered on this state", eventType))
+	}
+
+	s.evolve[eventType] = func(state TState, _ json.RawMessage) (TState, error) {
+		return state, nil
+	}
+	s.ignored[eventType] = true
+	s.schemas = append(s.schemas, schemaFor[TEvent](eventType))
+
+	return s
+}
+
+// schemaFor returns the schema of an event type for registration. An event
+// type whose schema can not be derived is a programming error, so it panics
+// while the state is being built.
+func schemaFor[TEvent Event](eventType string) EventSchema {
 	schema, err := eventSchemaOf[TEvent]()
 	if err != nil {
 		panic(fmt.Sprintf("architecturekit: event type %q: %v", eventType, err))
 	}
 
-	s.schemas = append(s.schemas, EventSchema{EventType: eventType, Schema: schema})
-
-	return s
+	return EventSchema{EventType: eventType, Schema: schema}
 }
 
 // UpcastWith runs the stored events through the given set of upcasters before
@@ -144,13 +184,14 @@ func (s *State[TState]) UpcastWith(upcasters *Upcasters) *State[TState] {
 // is the result of an upcaster, stored events of the older type are not found,
 // and the state is built from the first event.
 //
-// Calling FromLatest for an event type without an Evolve rule, or calling it
-// twice, is a programming error, so it panics while the state is being built.
+// Calling FromLatest for an event type without an Evolve rule, for one the
+// state ignores, or calling it twice, is a programming error, so it panics
+// while the state is being built.
 func (s *State[TState]) FromLatest[TEvent Event]() *State[TState] {
 	var zero TEvent
 	eventType := zero.EventType()
 
-	if _, isKnown := s.evolve[eventType]; !isKnown {
+	if _, isKnown := s.evolve[eventType]; !isKnown || s.ignored[eventType] {
 		panic(fmt.Sprintf("architecturekit: event type %q has no Evolve rule on this state", eventType))
 	}
 	if s.fromLatest != "" {
