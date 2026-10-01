@@ -33,6 +33,7 @@ type stateCacheEntry struct {
 type stateShape struct {
 	initial    any
 	evolved    []string
+	ignored    []string
 	upcasted   []string
 	fromLatest string
 }
@@ -42,6 +43,7 @@ func shapeOf[TState any](state *State[TState]) stateShape {
 	shape := stateShape{
 		initial:    state.initial,
 		evolved:    slices.Sorted(maps.Keys(state.evolve)),
+		ignored:    slices.Sorted(maps.Keys(state.ignored)),
 		fromLatest: state.fromLatest,
 	}
 	if state.upcasters != nil {
@@ -54,6 +56,7 @@ func shapeOf[TState any](state *State[TState]) stateShape {
 func (s stateShape) equals(other stateShape) bool {
 	return reflect.DeepEqual(s.initial, other.initial) &&
 		slices.Equal(s.evolved, other.evolved) &&
+		slices.Equal(s.ignored, other.ignored) &&
 		slices.Equal(s.upcasted, other.upcasted) &&
 		s.fromLatest == other.fromLatest
 }

@@ -97,7 +97,8 @@ func TestStateShape(t *testing.T) {
 
 	base := stateShape{
 		initial:    book{},
-		evolved:    []string{"acquired", "borrowed"},
+		evolved:    []string{"acquired", "borrowed", "reviewed"},
+		ignored:    []string{"reviewed"},
 		upcasted:   []string{"lent"},
 		fromLatest: "acquired",
 	}
@@ -109,7 +110,7 @@ func TestStateShape(t *testing.T) {
 	}{
 		{"is equal to itself", func(shape stateShape) stateShape { return shape }, true},
 		{"is equal to one built alike", func(shape stateShape) stateShape {
-			shape.evolved = []string{"acquired", "borrowed"}
+			shape.evolved = []string{"acquired", "borrowed", "reviewed"}
 			return shape
 		}, true},
 		{"differs by the initial value", func(shape stateShape) stateShape {
@@ -118,6 +119,11 @@ func TestStateShape(t *testing.T) {
 		}, false},
 		{"differs by the evolved event types", func(shape stateShape) stateShape {
 			shape.evolved = []string{"acquired", "returned"}
+			return shape
+		}, false},
+		{"differs by the ignored event types", func(shape stateShape) stateShape {
+			// One state ignores what the other evolves by.
+			shape.ignored = nil
 			return shape
 		}, false},
 		{"differs by the upcasted event types", func(shape stateShape) stateShape {
@@ -141,12 +147,15 @@ func TestStateShape(t *testing.T) {
 		state := NewState(book{IsBorrowed: true})
 		state.evolve["borrowed"] = nil
 		state.evolve["acquired"] = nil
+		state.evolve["reviewed"] = nil
+		state.ignored["reviewed"] = true
 		state.fromLatest = "acquired"
 		state.UpcastWith(upcasters)
 
 		assert.Equal(t, stateShape{
 			initial:    book{IsBorrowed: true},
-			evolved:    []string{"acquired", "borrowed"},
+			evolved:    []string{"acquired", "borrowed", "reviewed"},
+			ignored:    []string{"reviewed"},
 			upcasted:   []string{"lent"},
 			fromLatest: "acquired",
 		}, shapeOf(state))
