@@ -160,9 +160,9 @@ func TestBatchSizes(t *testing.T) {
 	})
 }
 
-// unverified is the verification of a store without any verification option,
-// which lets every event pass.
-var unverified = (&Store{}).verify
+// unverified is the verification of a store created with
+// WithoutHashVerification, which lets every event pass.
+var unverified = (&Store{skipsHashes: true}).verify
 
 func TestDrive(t *testing.T) {
 	t.Run("in rebuild mode keeps no checkpoint", func(t *testing.T) {

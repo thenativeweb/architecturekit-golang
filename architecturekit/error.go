@@ -35,7 +35,7 @@ var ErrConflict = fmt.Errorf("%w: a precondition did not hold", ErrTransient)
 // missing or does not match the verification key. It is permanent, because
 // reading the same event again yields the same result, but it may point to a
 // security incident rather than a mistake, which is why it can be told apart
-// (see WithHashVerification and WithSignatureVerification).
+// (see NewStore and WithSignatureVerification).
 var ErrUnverified = fmt.Errorf("%w: an event could not be verified", ErrPermanent)
 
 // DomainError means that a business rule applies. It is not a failure in the

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,8 +47,9 @@ func expectUnverified(t *testing.T, err error) {
 	require.ErrorIs(t, err, architecturekit.ErrPermanent, "ErrUnverified is permanent")
 }
 
-// The fake database hands out events with made-up hashes and without any
-// signatures, which is what a tampered or unsigned database looks like.
+// The fake database hands out events without any signatures, which is what an
+// unsigned database looks like, and, if asked to, with hashes that do not match,
+// which is what a tampered one looks like.
 
 func TestSignatureVerification(t *testing.T) {
 	t.Run("accepts what the database signed", func(t *testing.T) {
@@ -105,7 +107,7 @@ func TestSignatureVerification(t *testing.T) {
 
 func TestHashVerification(t *testing.T) {
 	t.Run("accepts what the database stored", func(t *testing.T) {
-		store := verifyingStore(t, architecturekit.WithHashVerification())
+		store := verifyingStore(t)
 		subject := subjectFor(t)
 		seed(t, subject, 2)
 
@@ -114,14 +116,49 @@ func TestHashVerification(t *testing.T) {
 		assert.Equal(t, 2, current.Total)
 	})
 
-	t.Run("rejects a hash that does not match", func(t *testing.T) {
-		client := newFakeDatabase(t, &fakeDatabase{events: []int{0}})
-		store := architecturekit.NewStore(client, "https://thenativeweb.io", architecturekit.WithHashVerification())
+	t.Run("accepts the events of the fake database", func(t *testing.T) {
+		// The counterpart to the cases below: the fake computes its hashes the
+		// way the database does, so only tampering makes them fail.
+		client := newFakeDatabase(t, &fakeDatabase{events: []int{0, 1, 2}})
+		store := architecturekit.NewStore(client, "https://thenativeweb.io")
+
+		current, err := architecturekit.Load(context.Background(), store, counterState(), "/test")
+		require.NoError(t, err)
+		assert.Equal(t, 3, current.Total)
+	})
+
+	t.Run("rejects a hash that does not match without being asked to", func(t *testing.T) {
+		client := newFakeDatabase(t, &fakeDatabase{events: []int{0}, tampered: true})
+		store := architecturekit.NewStore(client, "https://thenativeweb.io")
 
 		_, err := architecturekit.Load(context.Background(), store, counterState(), "/test")
 
 		expectUnverified(t, err)
 		assert.ErrorContains(t, err, `event 0 on "/test"`, "the error has to name the event and its subject")
+	})
+
+	t.Run("accepts a hash that does not match if turned off", func(t *testing.T) {
+		client := newFakeDatabase(t, &fakeDatabase{events: []int{0, 1}, tampered: true})
+		store := architecturekit.NewStore(client, "https://thenativeweb.io",
+			architecturekit.WithoutHashVerification())
+
+		current, err := architecturekit.Load(context.Background(), store, counterState(), "/test")
+		require.NoError(t, err)
+		assert.Equal(t, 2, current.Total)
+	})
+}
+
+func TestWithoutHashVerification(t *testing.T) {
+	t.Run("panics together with signature verification, in either order", func(t *testing.T) {
+		client := newFakeDatabase(t, &fakeDatabase{})
+		signatures := architecturekit.WithSignatureVerification(anotherVerificationKey(t))
+		withoutHashes := architecturekit.WithoutHashVerification()
+
+		assert.PanicsWithValue(t,
+			"architecturekit: WithoutHashVerification contradicts WithSignatureVerification, which checks the hash as well",
+			func() { architecturekit.NewStore(client, "https://thenativeweb.io", withoutHashes, signatures) })
+		assert.Panics(t,
+			func() { architecturekit.NewStore(client, "https://thenativeweb.io", signatures, withoutHashes) })
 	})
 }
 
@@ -199,15 +236,20 @@ func TestRunProjectionWithVerification(t *testing.T) {
 		database := &fakeDatabase{
 			events:       []int{0, 1},
 			endObserving: func(int) bool { return true },
+			tampered:     true,
 		}
 		observed := &reconnects{}
 		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io",
-			architecturekit.WithHashVerification(),
 			architecturekit.WithReconnectObserver(observed.observe),
 		)
 		target := &collector{}
 
-		err := architecturekit.RunProjection(context.Background(), store, "/test", false, target)
+		// Without the verification, the run would follow the stream forever,
+		// so the deadline turns that into a failure rather than a hang.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		err := architecturekit.RunProjection(ctx, store, "/test", false, target)
 
 		expectUnverified(t, err)
 		assert.Zero(t, observed.count(), "an unverified event must not be retried")
