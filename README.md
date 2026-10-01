@@ -535,6 +535,57 @@ var borrowBook = architecturekit.Decider[BorrowBook, Book]{
 
 *Note that only the state knows what it means for an aggregate to exist, which is why the kit does not check it. The precondition that requires an existing subject protects the write (see [Requiring an Existing Subject](#requiring-an-existing-subject)), but it fails with an error of the category `ErrConflict`, which is transient. A check in the decider answers a command on a book that does not exist with a domain error instead.*
 
+### Using the Current Time
+
+Some rules depend on the current time. For example, a reader may borrow a book for at most four weeks, so the decider has to know what day it is. Rather than calling `time.Now` in the decider, hand a clock to a function that creates the decider:
+
+```go
+type Clock func() time.Time
+
+func borrowBookDecider(now Clock) architecturekit.Decider[BorrowBook, Book] {
+  return architecturekit.Decider[BorrowBook, Book]{
+    State: bookState,
+    Decide: func(ctx context.Context, cmd BorrowBook, book Book) ([]architecturekit.Event, error) {
+      // ...
+
+      today := now()
+      if cmd.BorrowedUntil < today.Format(time.DateOnly) ||
+        cmd.BorrowedUntil > today.AddDate(0, 0, 28).Format(time.DateOnly) {
+        return nil, architecturekit.NewDomainError("book %s can be borrowed for at most four weeks", cmd.BookID)
+      }
+
+      return []architecturekit.Event{
+        BookBorrowed{
+          BorrowedBy:    cmd.ReaderID,
+          BorrowedUntil: cmd.BorrowedUntil,
+        },
+      }, nil
+    },
+  }
+}
+```
+
+The application hands over the real clock, and a test a fixed one, so that it does not have to compute around the actual date:
+
+```go
+borrowBook := borrowBookDecider(time.Now)
+
+borrowBookOnFirstOfOctober := borrowBookDecider(func() time.Time {
+  return time.Date(2026, time.October, 1, 0, 0, 0, 0, time.UTC)
+})
+```
+
+The parameter shows which deciders depend on the time, and the clock can return what the domain thinks in, such as a date in a particular time zone instead of a moment.
+
+#### Keeping the Time in Events
+
+Only the decider reads the clock. Whatever it decides based on the time, such as the day a book was borrowed until, it writes into the event. Everything that comes after relies on the event, not on the clock:
+
+- `Evolve` never reads the clock. It runs again every time the state is loaded, so a state that depends on the clock would be different tomorrow from what it is today, for the very same events.
+- A projection never reads the clock either. It runs again whenever the read model is rebuilt, which would turn yesterday's events into today's answers.
+
+To know when an event was written, use the time that the database records for every event, which a projection receives in the `Time` field of the envelope. A question that depends on the moment it is asked, such as which books are overdue, belongs into the query, which gets the current time as a parameter (see [Depending on More Than the Read Model](#depending-on-more-than-the-read-model)).
+
 ### Handling Errors
 
 Every error architecturekit returns belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
