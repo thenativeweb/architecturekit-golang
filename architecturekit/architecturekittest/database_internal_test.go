@@ -184,3 +184,30 @@ func TestFinish(t *testing.T) {
 		assert.Contains(t, log.String(), "stopping the shared database: container is stuck")
 	})
 }
+
+func TestStopSharedDatabase(t *testing.T) {
+	t.Run("does nothing without a shared database", func(t *testing.T) {
+		replace(t, &shared, &sharedDatabase{})
+
+		assert.NoError(t, StopSharedDatabase())
+	})
+
+	t.Run("stops the shared database", func(t *testing.T) {
+		stopped := false
+		replace(t, &shared, &sharedDatabase{container: stopperFunc(func(context.Context) error {
+			stopped = true
+			return nil
+		})})
+
+		require.NoError(t, StopSharedDatabase())
+		assert.True(t, stopped)
+	})
+
+	t.Run("reports a shared database that could not be stopped", func(t *testing.T) {
+		replace(t, &shared, &sharedDatabase{container: stopperFunc(func(context.Context) error {
+			return errors.New("container is stuck")
+		})})
+
+		assert.EqualError(t, StopSharedDatabase(), "container is stuck")
+	})
+}
