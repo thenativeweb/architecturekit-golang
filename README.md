@@ -618,6 +618,27 @@ Only the decider reads the clock. Whatever it decides based on the time, such as
 
 To know when an event was written, use the time that the database records for every event, which a projection receives in the `Time` field of the envelope. A question that depends on the moment it is asked, such as which books are overdue, belongs into the query, which gets the current time as a parameter (see [Depending on More Than the Read Model](#depending-on-more-than-the-read-model)).
 
+### Writing to Several Subjects
+
+A command acts on a single subject, since it is a decision on the state of that subject. Some events are no such decision, for example a summary derived from many subjects, which has to be written together with a note on each of them, either all or none. To write events to several subjects at once, call the `Write` function with a context, the store, the events together with their subjects, and the preconditions:
+
+```go
+written, err := architecturekit.Write(context.TODO(), store, []architecturekit.EventOn{
+  {Subject: "/inventories/2026", Event: InventoryTaken{BookCount: 2}},
+  {Subject: "/books/42", Event: BookCounted{Inventory: "2026"}},
+  {Subject: "/books/23", Event: BookCounted{Inventory: "2026"}},
+}, architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/inventories/2026")))
+if errors.Is(err, architecturekit.ErrConflict) {
+  // Somebody else has taken the inventory already.
+}
+```
+
+`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
+
+Like a command, a write declares at least one precondition, made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state.
+
+*Note that `Write` never decides again, since there is nothing to decide. If nothing is to be written, call it with no events, which writes nothing.*
+
 ### Handling Errors
 
 Every error architecturekit returns belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
