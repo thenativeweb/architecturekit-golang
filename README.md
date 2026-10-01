@@ -2330,6 +2330,22 @@ func TestMain(m *testing.M) {
 }
 ```
 
+If `TestMain` has more to do once the tests have run, such as closing a browser, run the tests yourself, and call the `StopSharedDatabase` function afterwards. It does nothing if no test has started the database:
+
+```go
+func TestMain(m *testing.M) {
+  code := m.Run()
+  closeBrowser()
+
+  if err := architecturekittest.StopSharedDatabase(); err != nil {
+    fmt.Fprintln(os.Stderr, err)
+    code = 1
+  }
+
+  os.Exit(code)
+}
+```
+
 The tests share the events as well, so a test writes to subjects of its own, for example with a random ID in them, and reads only from those. A test that reads more than that, such as a projection from `/`, needs a database of its own. Call the `IsolatedStore` function to start one for the test alone, which is stopped once the test is over. It takes a few seconds, so use it only where the shared one would not do.
 
 For a test that connects by itself, such as one that starts a whole server, call the `SharedDatabase` or the `IsolatedDatabase` function. Each returns a `*Database`, whose `URL` and `APIToken` fields are what a client needs. Its `Client` function returns a client, for example to write an event that no command would, and its `Store` function returns a store, as above:

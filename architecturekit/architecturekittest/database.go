@@ -143,18 +143,30 @@ func IsolatedStore(t testing.TB, source string, schemas ...[]architecturekit.Eve
 //	func TestMain(m *testing.M) {
 //		architecturekittest.Main(m)
 //	}
+//
+// A TestMain that has more to do once the tests have run, such as closing a
+// browser, runs the tests itself and calls StopSharedDatabase instead.
 func Main(m *testing.M) {
 	os.Exit(finish(m.Run(), os.Stderr))
 }
 
-// finish stops the shared database, and turns a failure to do so into a failed
-// run, since a container left behind is a mistake somebody has to look at.
-func finish(code int, log io.Writer) int {
+// StopSharedDatabase stops the shared database, if a test has started it, and
+// does nothing otherwise. Main calls it once all tests have run. Call it
+// yourself from a TestMain that does not use Main, after the tests and
+// whatever else it has to clean up, and fail the run if it returns an error,
+// since a container left behind is a mistake somebody has to look at.
+func StopSharedDatabase() error {
 	if shared.container == nil {
-		return code
+		return nil
 	}
 
-	if err := shared.container.Stop(context.Background()); err != nil {
+	return shared.container.Stop(context.Background())
+}
+
+// finish stops the shared database, and turns a failure to do so into a failed
+// run.
+func finish(code int, log io.Writer) int {
+	if err := StopSharedDatabase(); err != nil {
 		_, _ = fmt.Fprintf(log, "architecturekittest: stopping the shared database: %v\n", err)
 		return 1
 	}
