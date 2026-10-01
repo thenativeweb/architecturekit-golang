@@ -9,8 +9,9 @@ import (
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// Envelope carries an event to a handler of a TypedProjection: the metadata of
-// the event as the database recorded it, and its data, decoded into TEvent.
+// Envelope carries an event to a handler of a TypedProjection, or out of
+// Decode: the metadata of the event as the database recorded it, and its data,
+// decoded into TEvent.
 //
 // The integrity fields of the database, such as the hash and the signature,
 // are deliberately missing, because they describe the stored data, and an
@@ -74,24 +75,49 @@ func (p *TypedProjection) On[TEvent Event](
 	}
 
 	p.handlers[eventType] = func(ctx context.Context, event eventsourcingdb.Event) error {
-		var data TEvent
-		if err := json.Unmarshal(event.Data, &data); err != nil {
-			return fmt.Errorf("%w: decoding %q: %v", ErrPermanent, eventType, err)
+		envelope, err := Decode[TEvent](event)
+		if err != nil {
+			return err
 		}
 
-		return handle(ctx, Envelope[TEvent]{
-			ID:          event.ID,
-			Time:        event.Time,
-			Source:      event.Source,
-			Subject:     event.Subject,
-			Type:        event.Type,
-			TraceParent: event.TraceParent,
-			TraceState:  event.TraceState,
-			Data:        data,
-		})
+		return handle(ctx, envelope)
 	}
 
 	return p
+}
+
+// Decode turns a stored event into an envelope of the given type, the same one
+// a typed projection hands to its handler: the metadata of the event, and its
+// data decoded into TEvent. Use it wherever events come as they are stored,
+// such as the ones Execute returns.
+//
+// An event of another type than TEvent, or one whose data can not be decoded
+// into it, makes Decode fail with an error of the category ErrPermanent, since
+// decoding it again yields the same result. Checking the type matters: decoding
+// into the wrong struct would otherwise quietly leave its fields empty.
+func Decode[TEvent Event](event eventsourcingdb.Event) (Envelope[TEvent], error) {
+	var data TEvent
+
+	if eventType := data.EventType(); event.Type != eventType {
+		return Envelope[TEvent]{}, fmt.Errorf("%w: event %s is of type %q, not %q",
+			ErrPermanent, event.ID, event.Type, eventType)
+	}
+
+	if err := json.Unmarshal(event.Data, &data); err != nil {
+		return Envelope[TEvent]{}, fmt.Errorf("%w: decoding event %s of type %q: %v",
+			ErrPermanent, event.ID, event.Type, err)
+	}
+
+	return Envelope[TEvent]{
+		ID:          event.ID,
+		Time:        event.Time,
+		Source:      event.Source,
+		Subject:     event.Subject,
+		Type:        event.Type,
+		TraceParent: event.TraceParent,
+		TraceState:  event.TraceState,
+		Data:        data,
+	}, nil
 }
 
 // UpcastWith runs the stored events through the given set of upcasters before

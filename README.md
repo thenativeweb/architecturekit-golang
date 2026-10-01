@@ -331,6 +331,24 @@ if err != nil {
 
 `Execute` reads the events of the command's subject, evolves the state from them, calls the decider, and writes the events it returns. The function returns the written events, including the fields added by the server. If the decider returns no events, nothing is written, and the function returns `nil`.
 
+The written events come as they are stored, with their data as JSON. To read the data of one of them, call the `Decode` function with the type of the event. It returns an `Envelope`, the same a projection gets (see [Defining Projections](#defining-projections)), with the data in its `Data` field:
+
+```go
+for _, event := range writtenEvents {
+  switch event.Type {
+  case (BookAcquired{}).EventType():
+    acquired, err := architecturekit.Decode[BookAcquired](event)
+    if err != nil {
+      // ...
+    }
+
+    // acquired.Data.Title, acquired.ID, ...
+  }
+}
+```
+
+*Note that `Decode` fails with an error of the category `ErrPermanent` for an event of another type, rather than leaving the fields of the wrong struct empty, and for data that does not fit the type.*
+
 *Note that `Execute` only reads the events of the command's subject itself, not those of nested subjects.*
 
 ### Using Preconditions
