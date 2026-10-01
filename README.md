@@ -229,6 +229,20 @@ The event type is taken from the event's `EventType` function, so it does not ha
 
 *Note that calling `Evolve` twice for the same event type panics.*
 
+Reading an event without a rule fails, since it usually points to a missing rule or a wrong subject. If a subject holds events that matter for no decision, such as `BookInspected`, which only records that somebody looked at a book, call the `Ignore` function for their type. The state then takes them without changing, and says so, rather than an `Evolve` function that returns the state unchanged and needs a comment to explain why:
+
+```go
+var bookState = architecturekit.NewState(Book{}).
+  Evolve(func(book Book, event BookAcquired) Book {
+    book.IsAcquired = true
+    return book
+  }).
+  // ...
+  Ignore[BookInspected]()
+```
+
+*Note that the data of an ignored event is not decoded, but its schema is still part of `Schemas`, since the event is still written. Ignoring an event type that has an `Evolve` rule, or ignoring it twice, panics, and so does calling `FromLatest` for it.*
+
 ### Making Decisions
 
 A decider connects a state with the decision made on it. Create a `Decider`, hand over the state, and provide a `Decide` function that receives the command and the current state, and returns the events to write:
