@@ -1,6 +1,7 @@
 package architecturekit_test
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -27,6 +28,10 @@ type fakeDatabase struct {
 	// open.
 	endObserving func(connection int) bool
 	connections  int
+
+	// tampered hands out events whose hash does not match their content, as if
+	// they had been changed after they were written.
+	tampered bool
 }
 
 func (d *fakeDatabase) add(ids ...int) {
@@ -76,7 +81,7 @@ func newFakeDatabase(t *testing.T, database *fakeDatabase) *eventsourcingdb.Clie
 		database.mutex.Unlock()
 
 		for _, id := range ids {
-			writeEvent(writer, id)
+			writeEvent(writer, id, database.tampered)
 			after = id
 		}
 
@@ -107,7 +112,7 @@ func newFakeDatabase(t *testing.T, database *fakeDatabase) *eventsourcingdb.Clie
 			database.mutex.Unlock()
 
 			for _, id := range added {
-				writeEvent(writer, id)
+				writeEvent(writer, id, database.tampered)
 				after = id
 			}
 
@@ -151,8 +156,40 @@ func clientFor(t *testing.T, server *httptest.Server) *eventsourcingdb.Client {
 	return client
 }
 
-func writeEvent(writer http.ResponseWriter, id int) {
-	writeLine(writer, fmt.Sprintf(`{"type":"event","payload":{"specversion":"1.0","id":"%d","time":"2026-01-01T00:00:00Z","source":"https://thenativeweb.io","subject":"/test","type":"io.thenativeweb.test.incremented","datacontenttype":"application/json","data":{"by":1},"hash":"hash-%d","predecessorhash":"hash-%d"}}`, id, id, id-1))
+// The fields of every event the fake hands out, apart from its ID and hashes.
+const (
+	fakeEventTime     = "2026-01-01T00:00:00Z"
+	fakeEventSource   = "https://thenativeweb.io"
+	fakeEventSubject  = "/test"
+	fakeEventType     = "io.thenativeweb.test.incremented"
+	fakeEventDataType = "application/json"
+	fakeEventData     = `{"by":1}`
+)
+
+func writeEvent(writer http.ResponseWriter, id int, tampered bool) {
+	hash := fakeHashOf(id)
+	if tampered {
+		hash = fmt.Sprintf("%064x", id)
+	}
+
+	writeLine(writer, fmt.Sprintf(`{"type":"event","payload":{"specversion":"1.0","id":"%d","time":%q,"source":%q,"subject":%q,"type":%q,"datacontenttype":%q,"data":%s,"hash":%q,"predecessorhash":%q}}`,
+		id, fakeEventTime, fakeEventSource, fakeEventSubject, fakeEventType, fakeEventDataType, fakeEventData, hash, fakeHashOf(id-1)))
+}
+
+// fakeHashOf computes the hash of the event with the given ID the way
+// EventSourcingDB does, chained to the hash of the event before it. The first
+// event follows a hash of zeros.
+func fakeHashOf(id int) string {
+	if id < 0 {
+		return fmt.Sprintf("%064x", 0)
+	}
+
+	metadata := fmt.Sprintf("1.0|%d|%s|%s|%s|%s|%s|%s",
+		id, fakeHashOf(id-1), fakeEventTime, fakeEventSource, fakeEventSubject, fakeEventType, fakeEventDataType)
+	metadataHash := sha256.Sum256([]byte(metadata))
+	dataHash := sha256.Sum256([]byte(fakeEventData))
+
+	return fmt.Sprintf("%x", sha256.Sum256(fmt.Appendf(nil, "%x%x", metadataHash, dataHash)))
 }
 
 func writeLine(writer http.ResponseWriter, line string) {

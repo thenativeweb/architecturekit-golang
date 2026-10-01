@@ -27,9 +27,9 @@ type Store struct {
 	reconnectMaxDelay     time.Duration
 	reconnectObserver     func(err error, delay time.Duration)
 
-	// verifiesHashes and verificationKey are set by WithHashVerification and
-	// WithSignatureVerification. A verification key implies checking hashes.
-	verifiesHashes  bool
+	// skipsHashes is set by WithoutHashVerification, and verificationKey by
+	// WithSignatureVerification. Checking a signature includes the hash.
+	skipsHashes     bool
 	verificationKey ed25519.PublicKey
 }
 
@@ -85,21 +85,21 @@ func WithReconnectObserver(observe func(err error, delay time.Duration)) StoreOp
 	}
 }
 
-// WithHashVerification checks the hash of every event the store reads, before
-// any upcaster, Evolve rule, or projection sees it. An event whose hash does
-// not match its content makes reading fail with ErrUnverified.
+// WithoutHashVerification turns off checking the hash of every event the store
+// reads, which a store does unless told otherwise. Checking a hash takes about
+// a microsecond per event, so there is rarely a reason to, and an event that
+// was changed after it had been written goes unnoticed then.
 //
-// This applies to Execute, Load, and every kind of projection. The events that
-// Execute has just written are not checked, since they are not read.
-func WithHashVerification() StoreOption {
+// It contradicts WithSignatureVerification, since checking a signature
+// includes checking the hash, so a store with both panics.
+func WithoutHashVerification() StoreOption {
 	return func(store *Store) {
-		store.verifiesHashes = true
+		store.skipsHashes = true
 	}
 }
 
-// WithSignatureVerification checks the hash and the signature of every event
-// the store reads, like WithHashVerification, against the verification key of
-// the database. An event without a signature, or with one that does not match
+// WithSignatureVerification checks the signature of every event the store
+// reads, besides its hash, against the verification key of the database. An event without a signature, or with one that does not match
 // the key, makes reading fail with ErrUnverified.
 //
 // The database signs events only if it runs with a signing key, and it signs
@@ -114,12 +114,18 @@ func WithSignatureVerification(verificationKey ed25519.PublicKey) StoreOption {
 	}
 
 	return func(store *Store) {
-		store.verifiesHashes = true
 		store.verificationKey = verificationKey
 	}
 }
 
 // NewStore creates a store that writes events with the given source.
+//
+// The store checks the hash of every event it reads, before any upcaster,
+// Evolve rule, or projection sees it, and an event whose hash does not match
+// its content makes reading fail with ErrUnverified. This applies to Execute,
+// Load, and every kind of projection. The events that Execute has just written
+// are not checked, since they are not read. To turn this off, hand over
+// WithoutHashVerification.
 func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOption) *Store {
 	store := &Store{
 		client:                client,
@@ -129,6 +135,10 @@ func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOpt
 	}
 	for _, option := range options {
 		option(store)
+	}
+
+	if store.skipsHashes && store.verificationKey != nil {
+		panic("architecturekit: WithoutHashVerification contradicts WithSignatureVerification, which checks the hash as well")
 	}
 
 	return store
@@ -234,16 +244,17 @@ func fold[TState any](
 	return current, lastEventID, nil
 }
 
-// verify checks an event the store has read, as far as the store was told to
-// with WithHashVerification or WithSignatureVerification. It has to run on the
-// event as stored, before any upcaster changes it.
+// verify checks an event the store has read: its hash, unless the store was
+// created with WithoutHashVerification, and its signature as well, if it was
+// created with WithSignatureVerification. It has to run on the event as stored,
+// before any upcaster changes it.
 func (s *Store) verify(event eventsourcingdb.Event) error {
 	var err error
 
 	switch {
 	case s.verificationKey != nil:
 		err = event.VerifySignature(s.verificationKey)
-	case s.verifiesHashes:
+	case !s.skipsHashes:
 		err = event.VerifyHash()
 	}
 

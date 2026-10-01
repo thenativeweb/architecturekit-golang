@@ -762,13 +762,9 @@ The given state stays unchanged, so both states are at hand afterwards. For a st
 
 ### Verifying Events
 
-EventSourcingDB gives every event a hash, which covers its metadata, its data, and the hash of the event before it. If the database runs with a signing key, it also signs every event it hands out. To have the store check the hash of every event it reads, hand over the `WithHashVerification` option when creating the store:
+EventSourcingDB gives every event a hash, which covers its metadata, its data, and the hash of the event before it. If the database runs with a signing key, it also signs every event it hands out. The store checks the hash of every event it reads, without being asked to.
 
-```go
-store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", architecturekit.WithHashVerification())
-```
-
-To check the signatures as well, hand over the `WithSignatureVerification` option with the verification key of the database instead. It checks the hashes, too:
+To check the signatures as well, hand over the `WithSignatureVerification` option with the verification key of the database:
 
 ```go
 store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", architecturekit.WithSignatureVerification(verificationKey))
@@ -800,9 +796,9 @@ The two checks prove different things:
 - A matching hash proves that an event is what was written. It proves no more than that, since whoever can change the stored data can compute a new hash as well.
 - A matching signature proves that an event comes from a database that holds the signing key. The database signs events when handing them out, so the signature guards the way from the database to your application, but not the stored data itself.
 
-Check the hashes wherever reading is under your control, and the signatures where events cross a trust boundary, for example when reading from a database that another organization runs. For details, see [Verifying Event Signatures](https://www.eventfoundation.io/docs/eventsourcingdb/verifying-event-signatures).
+The hashes are enough wherever reading is under your control. Check the signatures as well where events cross a trust boundary, for example when reading from a database that another organization runs. For details, see [Verifying Event Signatures](https://www.eventfoundation.io/docs/eventsourcingdb/verifying-event-signatures).
 
-*Note that checking a signature takes some tens of microseconds per event, which adds up when a projection catches up on millions of events.*
+*Note that checking a hash takes about a microsecond per event, so there is rarely a reason to turn it off. If there is one, hand over the `WithoutHashVerification` option, which can not be combined with `WithSignatureVerification`. Checking a signature, on the other hand, takes some tens of microseconds per event, which adds up when a projection catches up on millions of events.*
 
 *Note that the database signs with the key it has at the moment, so after the signing key is rotated, the store needs the new verification key.*
 
