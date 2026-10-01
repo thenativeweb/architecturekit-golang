@@ -1737,6 +1737,8 @@ Before a request reaches `ToCommand`, it is validated:
 - The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`.
 - The body must be valid JSON without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`.
 
+To read a body by the same rules elsewhere, call the `BodyOf` function (see [Reading Queries from the Body](#reading-queries-from-the-body)).
+
 ### Handling Queries over HTTP
 
 To answer a query over HTTP, define a function that receives the request and the user, and returns the query:
@@ -1775,6 +1777,24 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
   // ...
 })
 ```
+
+#### Reading Queries from the Body
+
+Some queries need more input than fits into the query string, for example a list of books to check at once. Send such a query as the body of a `POST` request, and call the `BodyOf` function with the type of the body to read it:
+
+```go
+type CheckAvailability struct {
+  BookIDs []string `json:"bookIds"`
+}
+
+toCheckAvailability := func(r *http.Request, user User) (CheckAvailability, error) {
+  return httpapi.BodyOf[CheckAvailability](r)
+}
+
+httpapi.Query(api, mux, "POST /api/check-availability", toCheckAvailability, checkAvailability(catalog))
+```
+
+The function reads the body by the same rules as for a command (see [Validating Requests](#validating-requests)), and returns the same errors, so the request is answered with `415`, `413`, or `400` as a command would be. It works in a handler of your own as well.
 
 #### Reporting Missing Items
 
