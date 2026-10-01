@@ -5,6 +5,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -267,8 +268,19 @@ func Route[
 	}))
 }
 
+// statusClientClosedRequest is what a request gets whose caller went away
+// before it was answered. HTTP has no status for it, so this is the one nginx
+// introduced, and which logs and metrics commonly know. Nobody reads the answer,
+// so it is there for them only.
+const statusClientClosedRequest = 499
+
 // StatusFor maps an error to an HTTP status. It asks for error categories
 // rather than concrete errors, so new failures do not need a new case here.
+//
+// An error because the context ended belongs to no category. If the request
+// was canceled, which happens when the caller goes away, it maps to 499, which
+// is not logged, since nothing failed. If its deadline ran out, the server
+// took too long, which maps to 503 and is logged.
 func StatusFor(err error) int {
 	switch {
 	case err == nil:
@@ -293,6 +305,10 @@ func StatusFor(err error) int {
 	case errors.Is(err, architecturekit.ErrConflict):
 		return http.StatusConflict
 	case errors.Is(err, architecturekit.ErrTransient):
+		return http.StatusServiceUnavailable
+	case errors.Is(err, context.Canceled):
+		return statusClientClosedRequest
+	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError

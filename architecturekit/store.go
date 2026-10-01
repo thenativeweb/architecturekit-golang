@@ -178,6 +178,9 @@ func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOpt
 // Load reads the state of a subject exactly the way Execute does before it
 // decides, including the state cache of the store. Use it for a query that
 // needs the state of a single subject, rather than a view across many.
+//
+// If the context ends before the state is read completely, Load fails with
+// the context's error rather than handing out part of the state.
 func Load[TState any](
 	ctx context.Context,
 	store *Store,
@@ -197,7 +200,8 @@ func Load[TState any](
 //
 // The options are those of the client SDK, so bounds, recursion and order are
 // set there. The iteration ends with the first error, and stops reading as
-// soon as the caller stops iterating.
+// soon as the caller stops iterating. If the context ends first, it ends with
+// the context's error, so that a read that was cut short never looks complete.
 func Read(
 	ctx context.Context,
 	store *Store,
@@ -205,9 +209,11 @@ func Read(
 	options eventsourcingdb.ReadEventsOptions,
 ) iter.Seq2[eventsourcingdb.Event, error] {
 	return func(yield func(eventsourcingdb.Event, error) bool) {
+		doing := fmt.Sprintf("reading %q", subject)
+
 		for event, err := range store.client.ReadEvents(ctx, subject, options) {
 			if err != nil {
-				yield(eventsourcingdb.Event{}, databaseFailure(err, fmt.Sprintf("reading %q", subject)))
+				yield(eventsourcingdb.Event{}, readFailure(ctx, err, doing))
 				return
 			}
 
@@ -220,7 +226,21 @@ func Read(
 				return
 			}
 		}
+
+		if ctx.Err() != nil {
+			yield(eventsourcingdb.Event{}, contextEnded(ctx, doing))
+		}
 	}
+}
+
+// readFailure is what a read that failed reports: the end of the context if
+// that is what stopped it, and the failure of the database otherwise.
+func readFailure(ctx context.Context, err error, doing string) error {
+	if ctx.Err() != nil {
+		return contextEnded(ctx, doing)
+	}
+
+	return databaseFailure(err, doing)
 }
 
 // fold reads the stream and folds it into a state as it goes. Events are not
@@ -271,7 +291,7 @@ func fold[TState any](
 
 	for event, err := range store.client.ReadEvents(ctx, subject, options) {
 		if err != nil {
-			return current, "", databaseFailure(err, fmt.Sprintf("reading %q", subject))
+			return current, "", readFailure(ctx, err, fmt.Sprintf("reading %q", subject))
 		}
 
 		if err := store.verify(event); err != nil {
@@ -299,6 +319,13 @@ func fold[TState any](
 		}
 
 		lastEventID = event.ID
+	}
+
+	// A read that the context cut short has seen only some of the events. The
+	// state built from them is not wrong, but it is not the current one either,
+	// so handing it out would let a command decide on part of the history.
+	if ctx.Err() != nil {
+		return current, "", contextEnded(ctx, fmt.Sprintf("reading %q", subject))
 	}
 
 	// The cache gets a copy, so that the caller can not change what the cache
@@ -500,6 +527,11 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // All preconditions come from the command, which has to declare at least one.
 // OnStateRead is filled in with the last event Execute has read, so that the
 // events are only written if the state they were decided on still holds.
+//
+// If the context ends before the events are written, Execute writes nothing
+// and fails with the context's error, also if it ends while the decider
+// decides. Once the write has begun, it is finished, since the client writes
+// without a context.
 func Execute[TCommand Command, TState any](
 	ctx context.Context,
 	store *Store,
@@ -545,6 +577,12 @@ func executeOnce[TCommand Command, TState any](
 	}
 	if len(events) == 0 {
 		return nil, nil
+	}
+
+	// The client writes without a context, so a context that has ended by now,
+	// for example while deciding, must not lead to a write anyway.
+	if ctx.Err() != nil {
+		return nil, contextEnded(ctx, fmt.Sprintf("writing to %q", subject))
 	}
 
 	return store.write(subject, events, resolvePreconditions(subject, declared, lastEventID))

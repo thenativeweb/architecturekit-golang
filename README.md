@@ -684,6 +684,8 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 *Note that `ErrConflict` is a special case of `ErrTransient`, so check for it first.*
 
+If the context ends, reading and writing stop, and the error is the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides.
+
 *Note that `ErrUnverified` is a special case of `ErrPermanent`, which means that an event failed its verification (see [Verifying Events](#verifying-events)). Since that may point to a security incident rather than a mistake, check for it before `ErrPermanent` if you want to treat it differently, for example to raise an alarm.*
 
 *Note that `Execute` does not try again by itself, unless the store decides again on conflicts (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)). To try again, for example after a transient failure, call `Execute` again.*
@@ -1273,7 +1275,7 @@ The observer receives the reason, which is `nil` if the database ended the strea
 
 *Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable. A failure that trying again will not fix, for example a rejected API token, stops the function, which returns it (see [Handling Errors](#handling-errors)).*
 
-To only apply the events that are already stored, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied:
+To only apply the events that are already stored, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied. If the context ends before that, it returns the error of the context, so that a read model that is only partly built does not look complete:
 
 ```go
 err := architecturekit.CatchUpProjection(context.TODO(), store, "/books", true, catalogProjection)
@@ -2008,7 +2010,11 @@ It checks the categories in this order:
 | `architecturekit.ErrDomain` | `422 Unprocessable Entity` |
 | `architecturekit.ErrConflict` | `409 Conflict` |
 | `architecturekit.ErrTransient` | `503 Service Unavailable` |
+| `context.Canceled` | `499 Client Closed Request` |
+| `context.DeadlineExceeded` | `503 Service Unavailable` |
 | any other error | `500 Internal Server Error` |
+
+*Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged.*
 
 ### Reading Your Own Writes over HTTP
 

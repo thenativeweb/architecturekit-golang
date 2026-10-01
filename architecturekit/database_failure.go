@@ -1,6 +1,7 @@
 package architecturekit
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -24,6 +25,18 @@ func statusCodeOf(err error) int {
 	status, _ := strconv.Atoi(match[1])
 
 	return status
+}
+
+// contextEnded reports that reading or writing stopped because the context
+// ended, and keeps the context's error, so that a caller can tell it from a
+// failure of the database with errors.Is. It belongs to no category: nothing
+// went wrong that trying again could fix, and nothing the request could have
+// avoided -- the caller stopped waiting, or ran out of time.
+//
+// Whatever the client reports once the context has ended is a consequence of
+// that, so it is the context's error that counts, not the client's.
+func contextEnded(ctx context.Context, doing string) error {
+	return fmt.Errorf("architecturekit: %s: %w", doing, ctx.Err())
 }
 
 // databaseFailure sorts a failure the database reported into a category, by
