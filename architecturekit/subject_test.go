@@ -1,6 +1,7 @@
 package architecturekit_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -127,6 +128,44 @@ func TestSubjectScheme(t *testing.T) {
 
 		err := scheme.Check("acme", "")
 		assert.ErrorContains(t, err, `"workshop"`)
+	})
+
+	t.Run("reports its root", func(t *testing.T) {
+		for _, test := range []struct {
+			pattern string
+			root    string
+		}{
+			{pattern: "/instances/{instance}", root: "/instances"},
+			{pattern: "/tenant/{tenant}/workshop/{workshop}", root: "/tenant"},
+			{pattern: "/system/tenants/{tenant}", root: "/system/tenants"},
+			{pattern: "/{tenant}/orders/{order}", root: "/"},
+			{pattern: "/system/health", root: "/system/health"},
+		} {
+			t.Run(test.pattern, func(t *testing.T) {
+				assert.Equal(t, test.root, architecturekit.NewSubjectScheme(test.pattern).Root())
+			})
+		}
+	})
+
+	t.Run("builds every subject under its root", func(t *testing.T) {
+		// A recursive read from a subject covers that subject and every one below
+		// it, so this is what makes reading from the root complete.
+		for _, scheme := range []*architecturekit.SubjectScheme{
+			architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}"),
+			architecturekit.NewSubjectScheme("/{tenant}/orders/{order}"),
+			architecturekit.NewSubjectScheme("/system/health"),
+		} {
+			values := make([]string, len(scheme.Placeholders()))
+			for i := range values {
+				values[i] = "value"
+			}
+
+			subject := scheme.Build(values...)
+			root := scheme.Root()
+
+			isUnder := subject == root || root == "/" || strings.HasPrefix(subject, root+"/")
+			assert.True(t, isUnder, "%q is not under %q", subject, root)
+		}
 	})
 
 	t.Run("reports its pattern", func(t *testing.T) {
