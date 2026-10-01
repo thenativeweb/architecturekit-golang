@@ -165,6 +165,12 @@ func TestSharedDatabase(t *testing.T) {
 
 func TestIsolatedDatabase(t *testing.T) {
 	t.Run("is a database of the test's own, which is stopped afterwards", func(t *testing.T) {
+		// The inner test is skipped with -short, so this one would find nothing
+		// to check.
+		if testing.Short() {
+			t.Skip("skipping a test that needs a database in short mode")
+		}
+
 		var isolated *architecturekittest.Database
 
 		t.Run("in a test", func(t *testing.T) {
