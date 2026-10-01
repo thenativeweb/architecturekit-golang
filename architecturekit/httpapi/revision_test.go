@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -259,6 +260,172 @@ func TestQueryRevisioned(t *testing.T) {
 	})
 }
 
+// The read side for callers who are told apart: everybody owns notes, and
+// asks for their own. This is how an application with users usually reads,
+// and why a tag must not be shared between them.
+
+type ownNotes struct {
+	Owner string
+}
+
+type ownedNote struct {
+	Owner string
+	Text  string
+}
+
+func ownedNoteView() *architecturekit.InMemoryView[string, ownedNote] {
+	return architecturekit.NewInMemoryView(func(item ownedNote) string { return item.Owner + "/" + item.Text })
+}
+
+// askOwnNotes builds the query from the caller, and refuses the one caller who
+// may not read notes at all.
+func askOwnNotes(_ *http.Request, caller user) (ownNotes, error) {
+	if caller.UserID == "mallory" {
+		return ownNotes{}, httpapi.ErrForbidden
+	}
+
+	return ownNotes{Owner: caller.UserID}, nil
+}
+
+func answerOwnNotes(view *architecturekit.InMemoryView[string, ownedNote]) httpapi.Answer[ownNotes, []string] {
+	return func(ctx context.Context, query ownNotes) ([]string, error) {
+		items, err := view.All(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		texts := []string{}
+		for item := range items {
+			if item.Owner == query.Owner {
+				texts = append(texts, item.Text)
+			}
+		}
+
+		return texts, nil
+	}
+}
+
+func servingOwnNotes(t *testing.T, wait time.Duration) *http.ServeMux {
+	t.Helper()
+
+	view := ownedNoteView()
+	require.NoError(t, view.Insert(t.Context(), "1", ownedNote{Owner: "alice", Text: "alice's secret"}))
+	require.NoError(t, view.Insert(t.Context(), "2", ownedNote{Owner: "bob", Text: "bob's list"}))
+	view.Seen("2")
+
+	mux := http.NewServeMux()
+	api := httpapi.NewAPI(deadStore(t), userFrom)
+
+	httpapi.QueryRevisioned(api, mux, "GET /notes", view, askOwnNotes, answerOwnNotes(view), wait)
+
+	return mux
+}
+
+func askNotesAs(mux *http.ServeMux, caller string, headers map[string]string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+	request.Header.Set("X-User", caller)
+
+	for name, value := range headers {
+		request.Header.Set(name, value)
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	return recorder
+}
+
+// TestTagsOfCallers covers callers who share a browser one after the other: the
+// browser keeps the answer for the first, and asks for the second whether that
+// is still current. It must not be, or the second caller sees the answer of the
+// first.
+func TestTagsOfCallers(t *testing.T) {
+	t.Run("callers who ask for their own get tags of their own", func(t *testing.T) {
+		mux := servingOwnNotes(t, time.Second)
+
+		alice := askNotesAs(mux, "alice", nil)
+		bob := askNotesAs(mux, "bob", nil)
+
+		require.Equal(t, http.StatusOK, alice.Code)
+		require.Equal(t, http.StatusOK, bob.Code)
+
+		assert.NotEqual(t, alice.Header().Get("ETag"), bob.Header().Get("ETag"))
+	})
+
+	t.Run("a caller who sends the tag of another gets their own answer", func(t *testing.T) {
+		mux := servingOwnNotes(t, time.Second)
+
+		alice := askNotesAs(mux, "alice", nil)
+		bob := askNotesAs(mux, "bob", map[string]string{"If-None-Match": alice.Header().Get("ETag")})
+
+		require.Equal(t, http.StatusOK, bob.Code, "bob was told that alice's answer is his")
+		assert.JSONEq(t, `["bob's list"]`, bob.Body.String())
+	})
+
+	t.Run("a caller who asks the same again is told that nothing changed", func(t *testing.T) {
+		mux := servingOwnNotes(t, time.Second)
+
+		first := askNotesAs(mux, "alice", nil)
+		again := askNotesAs(mux, "alice", map[string]string{"If-None-Match": first.Header().Get("ETag")})
+
+		assert.Equal(t, http.StatusNotModified, again.Code)
+	})
+
+	t.Run("a caller who may not ask is refused rather than told that nothing changed", func(t *testing.T) {
+		mux := servingOwnNotes(t, time.Second)
+
+		// Without a user in the query, mallory's tag would be anybody's.
+		alice := askNotesAs(mux, "alice", nil)
+		mallory := askNotesAs(mux, "mallory", map[string]string{"If-None-Match": alice.Header().Get("ETag")})
+
+		assert.Equal(t, http.StatusForbidden, mallory.Code)
+	})
+
+	t.Run("a caller who may not ask is refused before anything waits", func(t *testing.T) {
+		mux := servingOwnNotes(t, 10*time.Second)
+
+		started := time.Now()
+		mallory := askNotesAs(mux, "mallory", map[string]string{httpapi.HeaderWaitFor: "99"})
+
+		assert.Equal(t, http.StatusForbidden, mallory.Code)
+		assert.LessOrEqual(t, time.Since(started), time.Second, "waited before refusing")
+	})
+
+	t.Run("answers are private even when nothing changed", func(t *testing.T) {
+		mux := servingOwnNotes(t, time.Second)
+
+		first := askNotesAs(mux, "alice", nil)
+		again := askNotesAs(mux, "alice", map[string]string{"If-None-Match": first.Header().Get("ETag")})
+
+		assert.Equal(t, "private, no-cache", first.Header().Get("Cache-Control"))
+		assert.Equal(t, "private, no-cache", again.Header().Get("Cache-Control"))
+	})
+
+	t.Run("a query that can not be spelled out goes without a tag", func(t *testing.T) {
+		view := noteView()
+		view.Seen("3")
+
+		mux := http.NewServeMux()
+		api := httpapi.NewAPI(deadStore(t), userFrom)
+
+		type filtered struct{ Keep func(noteItem) bool }
+
+		httpapi.QueryRevisioned(api, mux, "GET /notes", view,
+			func(*http.Request, user) (filtered, error) {
+				return filtered{Keep: func(noteItem) bool { return true }}, nil
+			},
+			func(context.Context, filtered) (int, error) { return 0, nil },
+			time.Second)
+
+		response := askNotes(mux, nil)
+
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.NotContains(t, response.Header(), "Etag", "a tag that can not tell queries apart was handed out")
+		assert.Equal(t, "3", response.Header().Get(httpapi.HeaderRevision), "the revision is still worth knowing")
+		assert.Equal(t, "private, no-cache", response.Header().Get("Cache-Control"))
+	})
+}
+
 // --- the building blocks on their own ---
 
 func TestAwait(t *testing.T) {
@@ -278,6 +445,41 @@ func TestAwait(t *testing.T) {
 		err := httpapi.Await(t.Context(), request, refusingView{}, time.Second)
 
 		assert.Error(t, err, "waited without an error")
+	})
+}
+
+func TestServeUnchanged(t *testing.T) {
+	// The tag that RespondResultAt hands out is the one ServeUnchanged checks.
+	tagFor := func(t *testing.T, revision string) string {
+		t.Helper()
+
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+		recorder := httptest.NewRecorder()
+
+		httpapi.RespondResultAt(recorder, request, api, revision, []int{}, nil, nil)
+
+		return recorder.Header().Get("ETag")
+	}
+
+	t.Run("answers Not Modified for the tag of the same revision", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request.Header.Set("If-None-Match", tagFor(t, "7"))
+		recorder := httptest.NewRecorder()
+
+		require.True(t, httpapi.ServeUnchanged(recorder, request, "7", nil))
+
+		assert.Equal(t, http.StatusNotModified, recorder.Code)
+		assert.Equal(t, "private, no-cache", recorder.Header().Get("Cache-Control"))
+	})
+
+	t.Run("leaves the answer to the caller for any other tag", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request.Header.Set("If-None-Match", tagFor(t, "6"))
+		recorder := httptest.NewRecorder()
+
+		assert.False(t, httpapi.ServeUnchanged(recorder, request, "7", nil))
+		assert.Empty(t, recorder.Header().Get("ETag"), "headers were written although the caller answers")
 	})
 }
 
@@ -316,7 +518,7 @@ func TestQueryVarying(t *testing.T) {
 
 		// A browser left to itself decides how long an answer stays good and does
 		// not ask again until it has.
-		assert.Equal(t, "no-cache", first.Header().Get("Cache-Control"))
+		assert.Equal(t, "private, no-cache", first.Header().Get("Cache-Control"))
 
 		// Same revision, same day: nothing has changed, and saying so is the
 		// whole point of the tag.

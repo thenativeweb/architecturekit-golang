@@ -68,8 +68,8 @@ func Await(
 	return nil
 }
 
-// Volatile says what an answer depends on besides the revision and the
-// resource, as a string that changes when the answer would.
+// Volatile says what an answer depends on besides the revision and the query,
+// as a string that changes when the answer would.
 //
 // A revision describes the read model and nothing else. That is enough while
 // the answer follows from the stored events alone -- and it stops being
@@ -85,24 +85,35 @@ type Volatile func(*http.Request) string
 // ServeUnchanged answers 304 when the caller already holds this revision of
 // this resource, and reports whether it did. Use it after Await, because
 // waiting is what changes the answer.
+//
+// Its tag describes the resource, the revision and what varies, but not the
+// query, which it never sees. Use it only for an answer that is the same for
+// every caller, or make varies return whatever tells callers apart; otherwise
+// one caller is told that nothing has changed and keeps the answer of another.
+// QueryRevisioned and QueryVarying put the query into the tag themselves.
 func ServeUnchanged(
 	w http.ResponseWriter,
 	r *http.Request,
 	revision string,
 	varies Volatile,
 ) bool {
-	if revision == "" || r.Header.Get("If-None-Match") != etagOf(r, revision, varies) {
+	return serveUnchanged(w, r, revision, etagOf(r, revision, nil, varies))
+}
+
+func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string) bool {
+	if tag == "" || r.Header.Get("If-None-Match") != tag {
 		return false
 	}
 
-	writeRevision(w, r, revision, varies)
+	writeRevision(w, revision, tag)
 	w.WriteHeader(http.StatusNotModified)
 
 	return true
 }
 
 // RespondResultAt writes a query result and says which revision it shows. It
-// maps errors, and logs them, the way RespondResult does.
+// maps errors, and logs them, the way RespondResult does. Its tag is the one
+// ServeUnchanged checks, with the same limits.
 func RespondResultAt[TUser any, TResult any](
 	w http.ResponseWriter,
 	r *http.Request,
@@ -112,20 +123,19 @@ func RespondResultAt[TUser any, TResult any](
 	err error,
 	varies Volatile,
 ) {
-	respondResultAt(w, r, revision, result, err, varies, api.logFailure(r))
+	respondResultAt(w, revision, etagOf(r, revision, nil, varies), result, err, api.logFailure(r))
 }
 
 func respondResultAt[TResult any](
 	w http.ResponseWriter,
-	r *http.Request,
 	revision string,
+	tag string,
 	result TResult,
 	err error,
-	varies Volatile,
 	logFailure func(status int, err error),
 ) {
 	if err == nil {
-		writeRevision(w, r, revision, varies)
+		writeRevision(w, revision, tag)
 	}
 
 	respondResult(w, result, err, logFailure)
@@ -135,10 +145,26 @@ func respondResultAt[TResult any](
 // what the caller asked for, answers 304 when nothing changed, and tags the
 // answer with the revision it served.
 //
-// It assumes the answer follows from the read model alone. When it does not --
-// when the clock or anything else outside the events takes part -- use
-// QueryVarying and say so, or callers will be told that nothing has changed
-// when it has.
+// The tag holds the query, so two callers get the same tag only if they ask the
+// same: a query that holds the user, or anything else that tells callers
+// apart, gets a tag of its own for each of them. That is enough as long as the
+// answer depends on nothing but the query and the view, which is why answer
+// sees neither the request nor the user. Three things get past it, and each
+// has to be dealt with where it comes in:
+//
+//   - The clock: an answer that depends on the time, such as everything due
+//     today, uses QueryVarying and says so, or callers are told that nothing
+//     has changed when it has.
+//   - Another view: the revision is that of the view handed over, so an answer
+//     that also reads from another view does not notice when that one
+//     changes.
+//   - The context: a value that a middleware put into the context, such as the
+//     user, never shows up in the tag. Put it into the query instead.
+//
+// The query is built before anything waits or is answered, since building it
+// determines the caller and checks what they may ask: nobody can make the
+// server wait, or learn that an answer is unchanged, without being allowed to
+// ask. Answers are marked private, so that a shared cache does not keep them.
 //
 // Use Await, ServeUnchanged and RespondResultAt directly when you need a
 // different shape.
@@ -169,10 +195,15 @@ func QueryVarying[TUser any, TQuery any, TResult any](
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logFailure := api.logFailure(r)
 
-		// The caller is determined before anything waits, so that nobody can
-		// bind waiting time on the server without being allowed in.
-		if _, err := UserOf(r, api); err != nil {
+		user, err := UserOf(r, api)
+		if err != nil {
 			respondResult(w, struct{}{}, err, logFailure)
+			return
+		}
+
+		query, err := toQuery(r, user)
+		if err != nil {
+			respondResult(w, struct{}{}, categorise(err), logFailure)
 			return
 		}
 
@@ -184,38 +215,63 @@ func QueryVarying[TUser any, TQuery any, TResult any](
 		// The revision is read once, after waiting, so that the answer and its
 		// tag describe the same state even if the projection moves on.
 		revision := view.Revision()
+		tag := etagOf(r, revision, func(w io.Writer) bool { return spellOut(w, query) }, varies)
 
-		if ServeUnchanged(w, r, revision, varies) {
+		if serveUnchanged(w, r, revision, tag) {
 			return
 		}
 
-		result, err := Ask(r, api, toQuery, answer)
-		respondResultAt(w, r, revision, result, err, varies, logFailure)
+		result, err := answer(r.Context(), query)
+		respondResultAt(w, revision, tag, result, err, logFailure)
 	}))
 }
 
-func writeRevision(w http.ResponseWriter, r *http.Request, revision string, varies Volatile) {
+func writeRevision(w http.ResponseWriter, revision, tag string) {
 	if revision == "" {
 		return
 	}
 
-	// Without this a browser is free to decide for itself how long the answer
-	// stays good, and it will not ask again until it has. The tag still saves
-	// the body when nothing has changed; this only insists that it asks.
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("ETag", etagOf(r, revision, varies))
+	// Without no-cache a browser is free to decide for itself how long the
+	// answer stays good, and it will not ask again until it has. The tag still
+	// saves the body when nothing has changed; this only insists that it asks.
+	//
+	// Private keeps shared caches, such as proxies, from keeping the answer at
+	// all. Whether an answer is the same for everybody is something only the
+	// application knows, and even a public one may differ between anonymous
+	// callers, so the kit does not guess.
+	w.Header().Set("Cache-Control", "private, no-cache")
 	w.Header().Set(HeaderRevision, revision)
+
+	if tag != "" {
+		w.Header().Set("ETag", tag)
+	}
 }
 
-// etagOf ties the revision to the resource it describes. Every query over the
-// same view shares a revision, so a tag that held nothing else would match
-// across resources -- and a caller that sent one query's tag to another would
-// be told, wrongly, that nothing had changed.
-func etagOf(r *http.Request, revision string, varies Volatile) string {
+// etagOf ties the revision to the resource it describes and, when it is given
+// one, to the query that was asked. Every query over the same view shares a
+// revision, so a tag that held nothing else would match across resources and
+// across callers -- and a caller that sent a tag it got elsewhere would be
+// told, wrongly, that nothing had changed.
+//
+// It returns no tag for a view that has seen nothing, and for a query that can
+// not be spelled out (see spellOut).
+func etagOf(r *http.Request, revision string, asked func(io.Writer) bool, varies Volatile) string {
+	if revision == "" {
+		return ""
+	}
+
 	resource := fnv.New64a()
 	_, _ = io.WriteString(resource, r.URL.Path)
 	_, _ = io.WriteString(resource, "?")
 	_, _ = io.WriteString(resource, r.URL.RawQuery)
+
+	if asked != nil {
+		_, _ = io.WriteString(resource, "\x00")
+
+		if !asked(resource) {
+			return ""
+		}
+	}
 
 	if varies != nil {
 		_, _ = io.WriteString(resource, "\x00")
