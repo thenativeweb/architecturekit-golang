@@ -15,8 +15,8 @@ import (
 // produced, and can ask to see at least that much before it reads again. That
 // turns "wait a moment and hope" into a condition the server can check.
 //
-// The request names the revision it needs in WaitForRevision; the response
-// says in its ETag which revision it actually shows. Both headers carry the
+// The request names the revision it needs in the Wait-For-Revision header; the
+// response says in its ETag which revision it actually shows. Both headers carry the
 // same kind of value, but they mean different things, which is why the
 // standard If-None-Match is not used for the waiting: an ETag is opaque and
 // compares only for equality, while a revision is ordered. A server that is
@@ -26,15 +26,18 @@ const (
 	HeaderWaitFor = "Wait-For-Revision"
 
 	// HeaderRevision repeats the served revision, next to the ETag, so that a
-	// caller can read it without treating the ETag as anything but opaque.
-	HeaderRevision = "X-Revision"
+	// caller can read it without treating the ETag as anything but opaque. It
+	// has no X- prefix, which RFC 6648 advises against for new headers.
+	HeaderRevision = "Revision"
 )
 
 // DefaultWait is how long a query waits for its revision before answering with
 // what it has.
 const DefaultWait = 5 * time.Second
 
-// Await waits for the revision the request asked for.
+// Await waits for the revision the request asked for, for at most the given
+// time, and within the context of the request. Use it in a handler of your own
+// that reads its own writes.
 //
 // It returns nil when the view reached the revision and when the request asked
 // for none. Running out of time is not an error either: the caller answers
@@ -42,7 +45,6 @@ const DefaultWait = 5 * time.Second
 // revision that cannot be read as one is refused, because that is a mistake in
 // the request rather than a slow projection.
 func Await(
-	ctx context.Context,
 	r *http.Request,
 	view architecturekit.Revisioned,
 	wait time.Duration,
@@ -58,7 +60,7 @@ func Await(
 		return fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
 
-	waiting, cancel := context.WithTimeout(ctx, wait)
+	waiting, cancel := context.WithTimeout(r.Context(), wait)
 	defer cancel()
 
 	if err := view.WaitFor(waiting, wanted); err != nil && waiting.Err() == nil {
@@ -82,24 +84,8 @@ func Await(
 // Returning the current day is usually all it takes.
 type Volatile func(*http.Request) string
 
-// ServeUnchanged answers 304 when the caller already holds this revision of
-// this resource, and reports whether it did. Use it after Await, because
-// waiting is what changes the answer.
-//
-// Its tag describes the resource, the revision and what varies, but not the
-// query, which it never sees. Use it only for an answer that is the same for
-// every caller, or make varies return whatever tells callers apart; otherwise
-// one caller is told that nothing has changed and keeps the answer of another.
-// QueryRevisioned and QueryVarying put the query into the tag themselves.
-func ServeUnchanged(
-	w http.ResponseWriter,
-	r *http.Request,
-	revision string,
-	varies Volatile,
-) bool {
-	return serveUnchanged(w, r, revision, etagOf(r, revision, nil, varies))
-}
-
+// serveUnchanged answers 304 when the caller already holds the answer with
+// the given tag, and reports whether it did.
 func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string) bool {
 	if tag == "" || r.Header.Get("If-None-Match") != tag {
 		return false
@@ -111,21 +97,8 @@ func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string
 	return true
 }
 
-// RespondResultAt writes a query result and says which revision it shows. It
-// maps errors, and logs them, the way RespondResult does. Its tag is the one
-// ServeUnchanged checks, with the same limits.
-func RespondResultAt[TUser any, TResult any](
-	w http.ResponseWriter,
-	r *http.Request,
-	api *API[TUser],
-	revision string,
-	result TResult,
-	err error,
-	varies Volatile,
-) {
-	respondResultAt(w, revision, etagOf(r, revision, nil, varies), result, err, api.logFailure(r))
-}
-
+// respondResultAt writes a query result with the revision it shows, and logs
+// an internal failure with logFailure.
 func respondResultAt[TResult any](
 	w http.ResponseWriter,
 	revision string,
@@ -141,58 +114,15 @@ func respondResultAt[TResult any](
 	respondResult(w, result, err, logFailure)
 }
 
-// QueryRevisioned wires a query that can be asked for a revision. It waits for
-// what the caller asked for, answers 304 when nothing changed, and tags the
-// answer with the revision it served.
-//
-// The tag holds the query, so two callers get the same tag only if they ask the
-// same: a query that holds the user, or anything else that tells callers
-// apart, gets a tag of its own for each of them. That is enough as long as the
-// answer depends on nothing but the query and the view, which is why answer
-// sees neither the request nor the user. Three things get past it, and each
-// has to be dealt with where it comes in:
-//
-//   - The clock: an answer that depends on the time, such as everything due
-//     today, uses QueryVarying and says so, or callers are told that nothing
-//     has changed when it has.
-//   - Another view: the revision is that of the view handed over, so an answer
-//     that also reads from another view does not notice when that one
-//     changes.
-//   - The context: a value that a middleware put into the context, such as the
-//     user, never shows up in the tag. Put it into the query instead.
-//
-// The query is built before anything waits or is answered, since building it
-// determines the caller and checks what they may ask: nobody can make the
-// server wait, or learn that an answer is unchanged, without being allowed to
-// ask. Answers are marked private, so that a shared cache does not keep them.
-//
-// Use Await, ServeUnchanged and RespondResultAt directly when you need a
-// different shape.
-func QueryRevisioned[TUser any, TQuery any, TResult any](
+// answerRevisioned answers a query that can be asked for a revision (see
+// Revisioned).
+func answerRevisioned[TUser any, TQuery any, TResult any](
 	api *API[TUser],
-	mux *http.ServeMux,
-	pattern string,
-	view architecturekit.Revisioned,
 	toQuery ToQuery[TUser, TQuery],
 	answer Answer[TQuery, TResult],
-	wait time.Duration,
-) {
-	QueryVarying(api, mux, pattern, view, toQuery, answer, wait, nil)
-}
-
-// QueryVarying is QueryRevisioned for an answer that depends on more than the
-// read model. See Volatile.
-func QueryVarying[TUser any, TQuery any, TResult any](
-	api *API[TUser],
-	mux *http.ServeMux,
-	pattern string,
-	view architecturekit.Revisioned,
-	toQuery ToQuery[TUser, TQuery],
-	answer Answer[TQuery, TResult],
-	wait time.Duration,
-	varies Volatile,
-) {
-	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	settings querySettings,
+) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logFailure := api.logFailure(r)
 
 		user, err := UserOf(r, api)
@@ -207,15 +137,15 @@ func QueryVarying[TUser any, TQuery any, TResult any](
 			return
 		}
 
-		if err := Await(r.Context(), r, view, wait); err != nil {
+		if err := Await(r, settings.view, settings.wait); err != nil {
 			respondResult(w, struct{}{}, err, logFailure)
 			return
 		}
 
 		// The revision is read once, after waiting, so that the answer and its
 		// tag describe the same state even if the projection moves on.
-		revision := view.Revision()
-		tag := etagOf(r, revision, func(w io.Writer) bool { return spellOut(w, query) }, varies)
+		revision := settings.view.Revision()
+		tag := etagOf(r, revision, query, settings.varies)
 
 		if serveUnchanged(w, r, revision, tag) {
 			return
@@ -223,7 +153,7 @@ func QueryVarying[TUser any, TQuery any, TResult any](
 
 		result, err := answer(r.Context(), query)
 		respondResultAt(w, revision, tag, result, err, logFailure)
-	}))
+	})
 }
 
 func writeRevision(w http.ResponseWriter, revision, tag string) {
@@ -247,15 +177,15 @@ func writeRevision(w http.ResponseWriter, revision, tag string) {
 	}
 }
 
-// etagOf ties the revision to the resource it describes and, when it is given
-// one, to the query that was asked. Every query over the same view shares a
-// revision, so a tag that held nothing else would match across resources and
-// across callers -- and a caller that sent a tag it got elsewhere would be
-// told, wrongly, that nothing had changed.
+// etagOf ties the revision to the resource it describes and to the query that
+// was asked. Every query over the same view shares a revision, so a tag that
+// held nothing else would match across resources and across callers -- and a
+// caller that sent a tag it got elsewhere would be told, wrongly, that nothing
+// had changed.
 //
 // It returns no tag for a view that has seen nothing, and for a query that can
 // not be spelled out (see spellOut).
-func etagOf(r *http.Request, revision string, asked func(io.Writer) bool, varies Volatile) string {
+func etagOf(r *http.Request, revision string, query any, varies Volatile) string {
 	if revision == "" {
 		return ""
 	}
@@ -264,13 +194,10 @@ func etagOf(r *http.Request, revision string, asked func(io.Writer) bool, varies
 	_, _ = io.WriteString(resource, r.URL.Path)
 	_, _ = io.WriteString(resource, "?")
 	_, _ = io.WriteString(resource, r.URL.RawQuery)
+	_, _ = io.WriteString(resource, "\x00")
 
-	if asked != nil {
-		_, _ = io.WriteString(resource, "\x00")
-
-		if !asked(resource) {
-			return ""
-		}
+	if !spellOut(resource, query) {
+		return ""
 	}
 
 	if varies != nil {
