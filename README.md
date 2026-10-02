@@ -1953,6 +1953,8 @@ To answer this way in a handler of your own, call the `Respond` function with th
 
 *Note that the function has the type `httpapi.ToCommand`. The request type only describes the body, so it may come from another package, for example one that the application shares with its clients.*
 
+*Note that calling `Route` with `nil` as the function panics.*
+
 #### Adding to the Answer
 
 To answer with more than the revision, for example with the ID that `toAcquireBook` below makes up for a new book, hand over the `Adding` option. It takes a function that receives a `Handled` value with the command and the written events, and returns the fields to add, usually as a struct with JSON annotations, and an error:
@@ -2119,6 +2121,8 @@ The route answers with `200 OK` and the result as JSON. A result without items i
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error.
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
+
+*Note that calling `Query` with `nil` for either function panics.*
 
 #### Answering Queries in Your Own Format
 

@@ -147,6 +147,9 @@ func Varying(varies Volatile) QueryOption {
 // internal failure, and logged with its value and its stack, as with Route.
 // So is a result that can not be encoded, such as one that holds NaN, which
 // JSON has no number for.
+//
+// A nil toQuery or answer is a programming error, so Query panics, rather
+// than answering every request with 500, as Route does for its function.
 func Query[TUser any, TQuery any, TResult any](
 	api *API[TUser],
 	mux *http.ServeMux,
@@ -155,6 +158,13 @@ func Query[TUser any, TQuery any, TResult any](
 	answer Answer[TQuery, TResult],
 	options ...QueryOption,
 ) {
+	if toQuery == nil {
+		panic("architecturekit/httpapi: Query needs a function that turns the request into a query, not nil")
+	}
+	if answer == nil {
+		panic("architecturekit/httpapi: Query needs a function that answers the query, not nil")
+	}
+
 	var settings querySettings
 	for _, option := range options {
 		option(&settings)
