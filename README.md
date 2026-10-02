@@ -1430,7 +1430,22 @@ type bookTableTx struct {
   *architecturekit.TypedProjection
   tx *sql.Tx
 }
+
+func (tx *bookTableTx) Commit(ctx context.Context, lastEventID string) error {
+  _, err := tx.tx.ExecContext(ctx, "UPDATE checkpoint ...", lastEventID)
+  if err != nil {
+    return errors.Join(err, tx.tx.Rollback())
+  }
+
+  return tx.tx.Commit()
+}
+
+func (tx *bookTableTx) Rollback(ctx context.Context) error {
+  return tx.tx.Rollback()
+}
 ```
+
+*Note that `Rollback` is not called after `Commit` fails, so `Commit` has to roll back itself if it can not finish, as above.*
 
 To run a transactional projection, call the `StartTransactionalProjection` or the `CatchUpTransactionalProjection` function instead of `StartProjection` or `CatchUpProjection`. They take the same arguments:
 
@@ -1444,15 +1459,17 @@ run := architecturekit.StartTransactionalProjection(ctx, store, architecturekit.
 
 ### Batching Events
 
-By default, the checkpoint is saved, or the transaction is committed, after every event. To do so less often, implement the `Batched` interface on a resumable or transactional projection, and return how many events to apply at once, separately for catching up and for observing:
+By default, the checkpoint is saved, or the transaction is committed, after every event. While a projection catches up, for example when it starts for the first time, that takes a lot longer than needed. To apply several events at once while catching up, implement the `Batched` interface on a resumable or transactional projection, and return how many:
 
 ```go
-func (p *BookTableProjection) BatchSizes() (catchUp, live int) {
-  return 1000, 1
+func (p *BookTableProjection) CatchUpBatchSize() int {
+  return 1000
 }
 ```
 
-Values below `1` count as `1`.
+Values below `1` count as `1`. For a transactional projection, a batch is one transaction, so a failure rolls back all of its events, and the next attempt starts after the last commit.
+
+Once the projection has caught up, it saves the checkpoint, or commits, after every event again. Events then arrive one at a time, and a batch that waited to fill up would hold back the ones that have already arrived.
 
 *Note that a resumable projection may apply up to that many events a second time after a crash.*
 
@@ -1673,7 +1690,7 @@ Then run `trackedProjection` instead of `catalogProjection` (see [Running Projec
 
 *Note that calling `Tracking` without any view panics.*
 
-The tracked projection keeps the mode and the batch sizes of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
+The tracked projection keeps the mode and the batch size of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
 
 To get the revision your own write has produced, call the `RevisionOf` function with the written events. It returns the highest event ID, or an empty string if no events were written:
 

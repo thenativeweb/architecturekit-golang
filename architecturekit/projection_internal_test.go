@@ -89,13 +89,13 @@ func (t *recordingTx) Rollback(context.Context) error {
 	return t.owner.rollbackErr
 }
 
-// batchedRecorder announces its own batch sizes.
+// batchedRecorder announces its own batch size.
 type batchedRecorder struct {
 	resumableRecorder
-	catchUp, live int
+	size int
 }
 
-func (r *batchedRecorder) BatchSizes() (int, int) { return r.catchUp, r.live }
+func (r *batchedRecorder) CatchUpBatchSize() int { return r.size }
 
 // inTransactions is the writer StartTransactionalProjection uses.
 func inTransactions(projection Transactional) projectionWriter {
@@ -143,20 +143,15 @@ func TestModeOf(t *testing.T) {
 	})
 }
 
-func TestBatchSizes(t *testing.T) {
-	t.Run("default to one and are clamped", func(t *testing.T) {
-		catchUp, live := batchSizesOf(&recorder{})
-		assert.Equal(t, 1, catchUp)
-		assert.Equal(t, 1, live)
+func TestBatchSize(t *testing.T) {
+	t.Run("defaults to one and is clamped", func(t *testing.T) {
+		assert.Equal(t, 1, batchSizeOf(&recorder{}))
 
 		// A projection that announces nonsense is corrected rather than trusted.
-		catchUp, live = batchSizesOf(&batchedRecorder{catchUp: 0, live: -5})
-		assert.Equal(t, 1, catchUp)
-		assert.Equal(t, 1, live)
+		assert.Equal(t, 1, batchSizeOf(&batchedRecorder{size: 0}))
+		assert.Equal(t, 1, batchSizeOf(&batchedRecorder{size: -5}))
 
-		catchUp, live = batchSizesOf(&batchedRecorder{catchUp: 500, live: 10})
-		assert.Equal(t, 500, catchUp)
-		assert.Equal(t, 10, live)
+		assert.Equal(t, 500, batchSizeOf(&batchedRecorder{size: 500}))
 	})
 }
 
@@ -360,6 +355,36 @@ func TestWriters(t *testing.T) {
 		assert.Equal(t, "9", checkpoint)
 		// Rolling back without an open transaction does nothing.
 		assert.NoError(t, transactional.rollback(ctx))
+	})
+}
+
+func TestResumableWriter(t *testing.T) {
+	t.Run("goes on from the last event it applied, although the batch was cut short", func(t *testing.T) {
+		target := &resumableRecorder{start: "7"}
+		writer := writerFor(target)
+
+		_, err := drive(context.Background(), writer,
+			failingEvents(3, errors.New("connection lost")), unverified, nil, 10)
+		require.ErrorIs(t, err, ErrTransient)
+
+		assert.Empty(t, target.saved, "the batch was cut short before its checkpoint")
+
+		checkpoint, err := writer.checkpoint(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, "2", checkpoint, "catching up again must not apply 0 to 2 a second time")
+	})
+
+	t.Run("does not count an event it failed to apply", func(t *testing.T) {
+		target := &resumableRecorder{start: "7"}
+		target.failOn = "1"
+		writer := writerFor(target)
+
+		_, err := drive(context.Background(), writer, events("0", "1", "2"), unverified, nil, 10)
+		require.ErrorIs(t, err, ErrPermanent)
+
+		checkpoint, err := writer.checkpoint(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, "0", checkpoint, "the event that failed has to be tried again")
 	})
 }
 

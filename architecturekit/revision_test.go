@@ -294,11 +294,9 @@ func TestTracking(t *testing.T) {
 		architecturekittest.ExpectMode(t, projection, architecturekit.ModeRebuild)
 
 		batched, ok := projection.(architecturekit.Batched)
-		require.True(t, ok, "a tracked projection passes on its batch sizes")
+		require.True(t, ok, "a tracked projection passes on its batch size")
 
-		catchUp, live := batched.BatchSizes()
-		assert.Equal(t, 1, catchUp)
-		assert.Equal(t, 1, live)
+		assert.Equal(t, 1, batched.CatchUpBatchSize())
 	})
 
 	t.Run("keeps a resumable projection resumable", func(t *testing.T) {
@@ -318,9 +316,8 @@ func TestTracking(t *testing.T) {
 		require.NoError(t, resumable.SaveCheckpoint(t.Context(), "8"))
 		assert.Equal(t, "8", target.checkpoint, "the checkpoint has to reach the wrapped projection")
 
-		catchUp, live := projection.(architecturekit.Batched).BatchSizes()
-		assert.Equal(t, 500, catchUp, "the batch sizes of the wrapped projection")
-		assert.Equal(t, 10, live, "the batch sizes of the wrapped projection")
+		assert.Equal(t, 500, projection.(architecturekit.Batched).CatchUpBatchSize(),
+			"the batch size of the wrapped projection")
 	})
 
 	t.Run("refuses a projection that is transactional as well", func(t *testing.T) {
@@ -345,12 +342,12 @@ func TestTracking(t *testing.T) {
 	})
 }
 
-// batchedResumingCollector is resumable and announces its own batch sizes.
+// batchedResumingCollector is resumable and announces its own batch size.
 type batchedResumingCollector struct {
 	resumingCollector
 }
 
-func (c *batchedResumingCollector) BatchSizes() (int, int) { return 500, 10 }
+func (c *batchedResumingCollector) CatchUpBatchSize() int { return 500 }
 
 // --- RevisionOf ---
 

@@ -327,7 +327,7 @@ type batchedTransactionalCollector struct {
 	transactionalCollector
 }
 
-func (c *batchedTransactionalCollector) BatchSizes() (int, int) { return 2, 1 }
+func (c *batchedTransactionalCollector) CatchUpBatchSize() int { return 2 }
 
 // transactionalWithApply is transactional, but has an Apply as well, which
 // StartProjection would call instead of going through a transaction.

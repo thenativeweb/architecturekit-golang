@@ -100,10 +100,10 @@ func (p *trackedProjection) Apply(ctx context.Context, event eventsourcingdb.Eve
 	return nil
 }
 
-// BatchSizes passes on what the wrapped projection says, so that tracking does
-// not change how often a checkpoint is written.
-func (p *trackedProjection) BatchSizes() (catchUp, live int) {
-	return batchSizesOf(p.projection)
+// CatchUpBatchSize passes on what the wrapped projection says, so that
+// tracking does not change how often a checkpoint is written.
+func (p *trackedProjection) CatchUpBatchSize() int {
+	return batchSizeOf(p.projection)
 }
 
 // trackedResumable is a tracked projection that keeps its checkpoint.
