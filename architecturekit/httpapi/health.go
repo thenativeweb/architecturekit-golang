@@ -3,7 +3,6 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 	"net/http"
 	"time"
 
@@ -22,10 +21,11 @@ import (
 // of something that is behind.
 //
 // The projections are the runs started with StartProjection or
-// StartTransactionalProjection, by name. A nil run is a programming error, so
-// Readiness panics.
-func Readiness(projections map[string]*architecturekit.ProjectionRun) http.Handler {
-	return healthHandler(projections, "isReady", isReady)
+// StartTransactionalProjection, which it lists by the names they were given
+// with Named. A nil run, a run without a name, or two runs of the same name are
+// a programming error, so Readiness panics.
+func Readiness(runs ...*architecturekit.ProjectionRun) http.Handler {
+	return healthHandler(runs, "isReady", isReady)
 }
 
 // Liveness answers whether the application is alive, judged by its
@@ -37,10 +37,11 @@ func Readiness(projections map[string]*architecturekit.ProjectionRun) http.Handl
 // fixed in the meantime.
 //
 // The projections are the runs started with StartProjection or
-// StartTransactionalProjection, by name. A nil run is a programming error, so
-// Liveness panics.
-func Liveness(projections map[string]*architecturekit.ProjectionRun) http.Handler {
-	return healthHandler(projections, "isAlive", isAlive)
+// StartTransactionalProjection, which it lists by the names they were given
+// with Named. A nil run, a run without a name, or two runs of the same name are
+// a programming error, so Liveness panics.
+func Liveness(runs ...*architecturekit.ProjectionRun) http.Handler {
+	return healthHandler(runs, "isAlive", isAlive)
 }
 
 func isReady(status architecturekit.ProjectionStatus) bool {
@@ -64,19 +65,29 @@ type projectionHealth struct {
 }
 
 func healthHandler(
-	projections map[string]*architecturekit.ProjectionRun,
+	runs []*architecturekit.ProjectionRun,
 	verdict string,
 	isHealthy func(architecturekit.ProjectionStatus) bool,
 ) http.Handler {
-	for name, run := range projections {
-		if run == nil {
-			panic(fmt.Sprintf("architecturekit/httpapi: the projection %q has no run", name))
-		}
-	}
+	// The handler keeps a map of its own, so that changing the given slice later
+	// on does not change what it watches.
+	projections := make(map[string]*architecturekit.ProjectionRun, len(runs))
 
-	// The handler keeps its own copy, so that changing the given map later on
-	// does not change what it watches.
-	projections = maps.Clone(projections)
+	for i, run := range runs {
+		if run == nil {
+			panic(fmt.Sprintf("architecturekit/httpapi: projection %d has no run", i))
+		}
+
+		name := run.Name()
+		if name == "" {
+			panic(fmt.Sprintf("architecturekit/httpapi: projection %d has no name, give it one with architecturekit.Named", i))
+		}
+		if _, exists := projections[name]; exists {
+			panic(fmt.Sprintf("architecturekit/httpapi: two projections are named %q", name))
+		}
+
+		projections[name] = run
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		isHealthyOverall := true

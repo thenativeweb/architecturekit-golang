@@ -19,31 +19,43 @@ import (
 
 // reconnects records what a store reports before it reads again.
 type reconnects struct {
-	mutex  sync.Mutex
-	errs   []error
-	delays []time.Duration
+	mutex sync.Mutex
+	all   []architecturekit.Reconnect
 }
 
-func (r *reconnects) observe(err error, delay time.Duration) {
+func (r *reconnects) observe(reconnect architecturekit.Reconnect) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	r.errs = append(r.errs, err)
-	r.delays = append(r.delays, delay)
+	r.all = append(r.all, reconnect)
 }
 
 func (r *reconnects) count() int {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	return len(r.delays)
+	return len(r.all)
 }
 
 func (r *reconnects) recorded() ([]error, []time.Duration) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	return slices.Clone(r.errs), slices.Clone(r.delays)
+	errs := make([]error, len(r.all))
+	delays := make([]time.Duration, len(r.all))
+	for i, reconnect := range r.all {
+		errs[i] = reconnect.Err
+		delays[i] = reconnect.Delay
+	}
+
+	return errs, delays
+}
+
+func (r *reconnects) reports() []architecturekit.Reconnect {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	return slices.Clone(r.all)
 }
 
 func reconnectingStore(client *eventsourcingdb.Client, observed *reconnects) *architecturekit.Store {
@@ -54,7 +66,7 @@ func reconnectingStore(client *eventsourcingdb.Client, observed *reconnects) *ar
 }
 
 // runInBackground runs the projection until the returned function is called,
-// which returns what RunProjection returned. It also ends with the test, so
+// which returns what the run ended with. It also ends with the test, so
 // that a failed test does not leave it running.
 func runInBackground(t *testing.T, store *architecturekit.Store, projection architecturekit.Projection) func(t *testing.T) error {
 	t.Helper()
@@ -63,7 +75,7 @@ func runInBackground(t *testing.T, store *architecturekit.Store, projection arch
 	t.Cleanup(cancel)
 
 	done := make(chan error, 1)
-	go func() { done <- architecturekit.RunProjection(ctx, store, "/test", false, projection) }()
+	go func() { done <- runUntilDone(ctx, store, architecturekit.ExactSubject("/test"), projection) }()
 
 	return func(t *testing.T) error {
 		t.Helper()
@@ -74,7 +86,7 @@ func runInBackground(t *testing.T, store *architecturekit.Store, projection arch
 		case err := <-done:
 			return err
 		case <-time.After(5 * time.Second):
-			require.Fail(t, "RunProjection did not return after its context ended")
+			require.Fail(t, "the run did not end after its context ended")
 			return nil
 		}
 	}
@@ -104,7 +116,7 @@ func (c *flakyCollector) Apply(ctx context.Context, event eventsourcingdb.Event)
 	return c.collector.Apply(ctx, event)
 }
 
-func TestRunProjectionWithReconnects(t *testing.T) {
+func TestStartProjectionWithReconnects(t *testing.T) {
 	t.Run("reconnects after the stream ends", func(t *testing.T) {
 		database := &fakeDatabase{
 			events:       []int{0, 1, 2},
@@ -166,6 +178,15 @@ func TestRunProjectionWithReconnects(t *testing.T) {
 
 		_, delays := observed.recorded()
 		assert.Contains(t, delays[3:], time.Millisecond, "want the initial delay again after progress")
+
+		// The attempts start over together with the delay.
+		startsOver := false
+		for _, report := range observed.reports()[3:] {
+			if report.Attempt == 1 && report.Delay == time.Millisecond {
+				startsOver = true
+			}
+		}
+		assert.True(t, startsOver, "want the first attempt again after progress")
 	})
 
 	t.Run("retries an unreachable database", func(t *testing.T) {
@@ -197,12 +218,12 @@ func TestRunProjectionWithReconnects(t *testing.T) {
 		observed := &reconnects{}
 		client := refusingDatabase(t, "/api/v1/read-events", http.StatusUnauthorized, "unauthorized")
 
-		// Retrying would go on until the context ends, which RunProjection
+		// Retrying would go on until the context ends, which a run
 		// reports without an error.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := architecturekit.RunProjection(ctx, reconnectingStore(client, observed), "/test", false, &collector{})
+		err := runUntilDone(ctx, reconnectingStore(client, observed), architecturekit.ExactSubject("/test"), &collector{})
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a rejected API token is permanent")
 		assert.ErrorContains(t, err, "the database rejected the API token")
@@ -217,7 +238,7 @@ func TestRunProjectionWithReconnects(t *testing.T) {
 		observed := &reconnects{}
 		store := reconnectingStore(newFakeDatabase(t, database), observed)
 
-		err := architecturekit.RunProjection(context.Background(), store, "/test", false, failingCollector{})
+		err := runUntilDone(context.Background(), store, architecturekit.ExactSubject("/test"), failingCollector{})
 
 		assert.ErrorContains(t, err, "the view is broken", "expected the failure of Apply")
 		assert.Zero(t, observed.count(), "a failing Apply must not be retried")
