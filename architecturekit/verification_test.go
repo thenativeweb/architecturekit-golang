@@ -68,7 +68,7 @@ func TestSignatureVerification(t *testing.T) {
 		assert.Equal(t, 2, current.Total)
 
 		target := &collector{}
-		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, target))
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject), target))
 		assert.Len(t, target.IDs(), 2)
 	})
 
@@ -89,7 +89,7 @@ func TestSignatureVerification(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, current.Total, "want the seeded 1")
 
-		err = architecturekit.CatchUpProjection(context.Background(), store, subject, false, &collector{})
+		err = architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject), &collector{})
 		expectUnverified(t, err)
 	})
 
@@ -210,12 +210,12 @@ func TestVerification(t *testing.T) {
 				return nil
 			})
 
-		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, projection))
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject), projection))
 		assert.Equal(t, 5, total)
 	})
 }
 
-func TestRunProjectionWithVerification(t *testing.T) {
+func TestStartProjectionWithVerification(t *testing.T) {
 	t.Run("ends on an event signed with another key", func(t *testing.T) {
 		subject := subjectFor(t)
 		seed(t, subject, 1)
@@ -226,7 +226,7 @@ func TestRunProjectionWithVerification(t *testing.T) {
 			architecturekit.WithReconnectObserver(observed.observe),
 		)
 
-		err := architecturekit.RunProjection(context.Background(), store, subject, false, &collector{})
+		err := runUntilDone(context.Background(), store, architecturekit.ExactSubject(subject), &collector{})
 
 		expectUnverified(t, err)
 		assert.Zero(t, observed.count(), "an unverified event must not be retried")
@@ -249,7 +249,7 @@ func TestRunProjectionWithVerification(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		err := architecturekit.RunProjection(ctx, store, "/test", false, target)
+		err := runUntilDone(ctx, store, architecturekit.ExactSubject("/test"), target)
 
 		expectUnverified(t, err)
 		assert.Zero(t, observed.count(), "an unverified event must not be retried")
