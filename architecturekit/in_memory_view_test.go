@@ -3,13 +3,16 @@ package architecturekit_test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
 // book is an item with a key, a value to index, and a field for its revision.
@@ -256,6 +259,24 @@ func TestInMemoryView(t *testing.T) {
 		assert.Equal(t, []string{"b"}, idsIn(t, view))
 	})
 
+	t.Run("moves the revision with a change that does nothing", func(t *testing.T) {
+		view := bookView()
+		mustInsert(t, view, "1", book{ID: "42", Title: "kept"})
+
+		outcome, err := view.Update(context.Background(), "42", "3", func(*book) {})
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.Applied, outcome, "a change that does nothing is still applied")
+
+		got := mustGet(t, view, "42")
+		assert.Equal(t, "kept", got.Title)
+		assert.Equal(t, "3", got.Revision, "the field has to follow the event")
+
+		outcome, err = view.Update(context.Background(), "42", "2", func(item *book) { item.Title = "older" })
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.AlreadyApplied, outcome, "the revision the view keeps has to follow the event as well")
+		assert.Equal(t, "kept", mustGet(t, view, "42").Title)
+	})
+
 	t.Run("keeps revisions without a field", func(t *testing.T) {
 		view := architecturekit.NewInMemoryView(func(item book) string { return item.ID })
 		mustInsert(t, view, "5", book{ID: "42", Title: "current"})
@@ -438,5 +459,334 @@ func TestOutcome(t *testing.T) {
 		assert.Equal(t, "missing", architecturekit.Missing.String())
 		assert.Equal(t, "already applied", architecturekit.AlreadyApplied.String())
 		assert.Equal(t, "Outcome(0)", architecturekit.Outcome(0).String(), "the zero value is no outcome")
+	})
+}
+
+// shelfItem is an item that holds a slice and a map, which a plain copy shares
+// with the original, and a field for its revision.
+type shelfItem struct {
+	ID       string
+	BookIDs  []string
+	Labels   map[string]string
+	Revision string
+}
+
+func newShelfItem(id string) shelfItem {
+	return shelfItem{ID: id, BookIDs: []string{"42"}, Labels: map[string]string{"genre": "fiction"}}
+}
+
+func cloneShelfItem(item shelfItem) shelfItem {
+	item.BookIDs = slices.Clone(item.BookIDs)
+	item.Labels = maps.Clone(item.Labels)
+
+	return item
+}
+
+func shelfView(options ...architecturekit.InMemoryViewOption[shelfItem]) *architecturekit.InMemoryView[string, shelfItem] {
+	return architecturekit.NewInMemoryView(func(item shelfItem) string { return item.ID }, options...)
+}
+
+func mustGetShelf(t *testing.T, view *architecturekit.InMemoryView[string, shelfItem], id string) shelfItem {
+	t.Helper()
+
+	item, isFound, err := view.Get(context.Background(), id)
+	require.NoError(t, err)
+	require.True(t, isFound, "shelf %q is missing", id)
+
+	return item
+}
+
+// rearrange writes into the slice and the map of a shelf, rather than replacing
+// them, which is only safe if the view hands over a clone.
+func rearrange(item *shelfItem) {
+	item.BookIDs[0] = "23"
+	item.Labels["genre"] = "poetry"
+}
+
+func TestCloneWith(t *testing.T) {
+	t.Run("hands a clone to every change of an existing item", func(t *testing.T) {
+		ctx := context.Background()
+		changes := map[string]func(view *architecturekit.InMemoryView[string, shelfItem]) error{
+			"Update": func(view *architecturekit.InMemoryView[string, shelfItem]) error {
+				_, err := view.Update(ctx, "a", "2", rearrange)
+				return err
+			},
+			"Upsert": func(view *architecturekit.InMemoryView[string, shelfItem]) error {
+				return view.Upsert(ctx, "a", "2", rearrange)
+			},
+			"UpdateWhere": func(view *architecturekit.InMemoryView[string, shelfItem]) error {
+				_, err := view.UpdateWhere(ctx, func(shelfItem) bool { return true }, "2", rearrange)
+				return err
+			},
+			"Index.Update": func(view *architecturekit.InMemoryView[string, shelfItem]) error {
+				byID := view.Index(func(item shelfItem) string { return item.ID })
+				_, err := byID.Update(ctx, "a", "2", rearrange)
+				return err
+			},
+		}
+
+		for name, change := range changes {
+			t.Run(name, func(t *testing.T) {
+				view := shelfView(architecturekit.CloneWith(cloneShelfItem))
+				require.NoError(t, view.Insert(ctx, "1", newShelfItem("a")))
+
+				got := mustGetShelf(t, view, "a")
+				items, err := view.All(ctx)
+				require.NoError(t, err)
+
+				require.NoError(t, change(view))
+
+				// What the readers got before the change must stay as it was.
+				assert.Equal(t, []string{"42"}, got.BookIDs, "a change must not reach the slice of an item that was read")
+				assert.Equal(t, map[string]string{"genre": "fiction"}, got.Labels, "a change must not reach the map of an item that was read")
+				for item := range items {
+					assert.Equal(t, []string{"42"}, item.BookIDs, "a change must not reach the slice of an item that was listed")
+					assert.Equal(t, map[string]string{"genre": "fiction"}, item.Labels, "a change must not reach the map of an item that was listed")
+				}
+
+				changed := mustGetShelf(t, view, "a")
+				assert.Equal(t, []string{"23"}, changed.BookIDs)
+				assert.Equal(t, map[string]string{"genre": "poetry"}, changed.Labels)
+			})
+		}
+	})
+
+	t.Run("does not clone a new item, or a change that is skipped", func(t *testing.T) {
+		ctx := context.Background()
+		clones := 0
+		view := shelfView(architecturekit.CloneWith(func(item shelfItem) shelfItem {
+			clones++
+			return cloneShelfItem(item)
+		}))
+
+		require.NoError(t, view.Insert(ctx, "1", newShelfItem("a")))
+		require.NoError(t, view.Upsert(ctx, "b", "2", func(item *shelfItem) { item.ID = "b" }))
+		assert.Zero(t, clones, "a new item has no readers yet")
+
+		_, err := view.Update(ctx, "a", "3", rearrange)
+		require.NoError(t, err)
+		require.NoError(t, view.Upsert(ctx, "b", "4", func(*shelfItem) {}))
+		assert.Equal(t, 2, clones, "every change of an existing item needs a clone")
+
+		outcome, err := view.Update(ctx, "a", "3", rearrange)
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.AlreadyApplied, outcome)
+		outcome, err = view.Update(ctx, "c", "5", rearrange)
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.Missing, outcome)
+		assert.Equal(t, 2, clones, "a change that is skipped needs no clone")
+	})
+
+	t.Run("sets the revision on the clone it keeps", func(t *testing.T) {
+		// The clone leaves out the revision, which the view sets afterwards.
+		view := shelfView(
+			architecturekit.RevisionIn(func(item *shelfItem) *string { return &item.Revision }),
+			architecturekit.CloneWith(func(item shelfItem) shelfItem {
+				return shelfItem{ID: item.ID, BookIDs: slices.Clone(item.BookIDs), Labels: maps.Clone(item.Labels)}
+			}),
+		)
+		require.NoError(t, view.Insert(context.Background(), "1", newShelfItem("a")))
+		got := mustGetShelf(t, view, "a")
+
+		_, err := view.Update(context.Background(), "a", "2", rearrange)
+		require.NoError(t, err)
+
+		assert.Equal(t, "1", got.Revision, "a change must not reach the revision of an item that was read")
+		changed := mustGetShelf(t, view, "a")
+		assert.Equal(t, "2", changed.Revision)
+		assert.Equal(t, []string{"23"}, changed.BookIDs)
+	})
+
+	t.Run("keeps an index on data that a change writes into", func(t *testing.T) {
+		ctx := context.Background()
+		view := shelfView(architecturekit.CloneWith(cloneShelfItem))
+		byGenre := view.Index(func(item shelfItem) string { return item.Labels["genre"] })
+		require.NoError(t, view.Insert(ctx, "1", newShelfItem("a")))
+
+		_, err := view.Update(ctx, "a", "2", rearrange)
+		require.NoError(t, err)
+
+		fiction, err := byGenre.Lookup(ctx, "fiction")
+		require.NoError(t, err)
+		assert.Empty(t, slices.Collect(fiction), "the index must not find the shelf under its old value")
+		poetry, err := byGenre.Lookup(ctx, "poetry")
+		require.NoError(t, err)
+		assert.Len(t, slices.Collect(poetry), 1, "the index has to find the shelf under its new value")
+	})
+
+	t.Run("lets readers read while a change writes into an item", func(t *testing.T) {
+		ctx := context.Background()
+		view := shelfView(architecturekit.CloneWith(cloneShelfItem))
+		require.NoError(t, view.Insert(ctx, "1", newShelfItem("a")))
+
+		const rounds = 1000
+		started, done := make(chan struct{}), make(chan struct{})
+
+		var group sync.WaitGroup
+		group.Add(1)
+
+		go func() {
+			defer group.Done()
+
+			// The reader goes on until the writer is done, and reads the slice and
+			// the map of every item it gets, outside of the lock of the view.
+			for isFirst := true; ; isFirst = false {
+				select {
+				case <-done:
+					return
+				default:
+				}
+
+				got, _, _ := view.Get(ctx, "a")
+				_ = got.BookIDs[0] + got.Labels["genre"]
+
+				items, _ := view.All(ctx)
+				for item := range items {
+					for range item.Labels {
+					}
+				}
+
+				if isFirst {
+					close(started)
+				}
+			}
+		}()
+
+		// The writer starts once the reader has read, so that the two overlap.
+		<-started
+
+		for round := range rounds {
+			_, err := view.Update(ctx, "a", strconv.Itoa(round+2), func(item *shelfItem) {
+				item.BookIDs[0] = strconv.Itoa(round)
+				item.Labels["genre"] = strconv.Itoa(round)
+			})
+			require.NoError(t, err)
+		}
+
+		close(done)
+		group.Wait()
+
+		got := mustGetShelf(t, view, "a")
+		assert.Equal(t, []string{strconv.Itoa(rounds - 1)}, got.BookIDs)
+	})
+
+	t.Run("leaves a reader alone without a clone if a change replaces what it holds", func(t *testing.T) {
+		view := shelfView()
+		require.NoError(t, view.Insert(context.Background(), "1", newShelfItem("a")))
+		got := mustGetShelf(t, view, "a")
+
+		_, err := view.Update(context.Background(), "a", "2", func(item *shelfItem) {
+			item.BookIDs = append(slices.Clone(item.BookIDs), "23")
+			item.Labels = maps.Clone(item.Labels)
+			item.Labels["genre"] = "poetry"
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, []string{"42"}, got.BookIDs)
+		assert.Equal(t, map[string]string{"genre": "fiction"}, got.Labels)
+		changed := mustGetShelf(t, view, "a")
+		assert.Equal(t, []string{"42", "23"}, changed.BookIDs)
+		assert.Equal(t, map[string]string{"genre": "poetry"}, changed.Labels)
+	})
+
+	t.Run("panics on a nil function", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: CloneWith needs a function, not nil", func() {
+			architecturekit.CloneWith[shelfItem](nil)
+		})
+	})
+
+	t.Run("panics when it is given twice", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: CloneWith is given twice", func() {
+			shelfView(architecturekit.CloneWith(cloneShelfItem), architecturekit.CloneWith(cloneShelfItem))
+		})
+	})
+}
+
+// counterItem is the item of a view of counters, one per subject, which keeps
+// its revision for a precondition on that subject.
+type counterItem struct {
+	Subject  string
+	Total    int
+	Revision string
+}
+
+// counterItemProjection keeps the total of every counter. With followsResets,
+// it also handles resets, which change nothing about the item, with a change
+// that does nothing, so that the revision of the item follows the subject.
+func counterItemProjection(
+	view *architecturekit.InMemoryView[string, counterItem],
+	followsResets bool,
+) *architecturekit.TypedProjection {
+	projection := architecturekit.NewProjection().
+		On(func(ctx context.Context, event architecturekit.Envelope[incremented]) error {
+			return view.Upsert(ctx, event.Subject, event.ID, func(item *counterItem) {
+				item.Subject = event.Subject
+				item.Total += event.Data.By
+			})
+		})
+
+	if followsResets {
+		projection.On(func(ctx context.Context, event architecturekit.Envelope[reset]) error {
+			_, err := view.Update(ctx, event.Subject, event.ID, func(*counterItem) {})
+			return err
+		})
+	}
+
+	return projection
+}
+
+// projectIncrementAndReset writes an increment and a reset, which the state
+// ignores, to a subject of the test, and projects them into a view. It returns
+// the item of the counter, and the events it wrote.
+func projectIncrementAndReset(t *testing.T, followsResets bool) (counterItem, []eventsourcingdb.Event) {
+	t.Helper()
+
+	ctx := context.Background()
+	subject := subjectFor(t)
+	written, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{
+		{Source: "https://thenativeweb.io", Subject: subject, Type: (incremented{}).EventType(), Data: incremented{By: 2}},
+		{Source: "https://thenativeweb.io", Subject: subject, Type: (reset{}).EventType(), Data: reset{}},
+	}, nil)
+	require.NoError(t, err)
+
+	view := architecturekit.NewInMemoryView(
+		func(item counterItem) string { return item.Subject },
+		architecturekit.RevisionIn(func(item *counterItem) *string { return &item.Revision }),
+	)
+	projection := counterItemProjection(view, followsResets)
+	require.NoError(t, architecturekit.CatchUpProjection(ctx, requireStore(t), architecturekit.ExactSubject(subject), projection))
+
+	item, isFound, err := view.Get(ctx, subject)
+	require.NoError(t, err)
+	require.True(t, isFound, "the counter is missing")
+
+	return item, written
+}
+
+func TestRevisionIn(t *testing.T) {
+	// The decider ignores resets, as a state does with events that matter for no
+	// decision.
+	decider := counterDecider()
+	decider.State = resetIgnoringState()
+
+	t.Run("fits a precondition on the subject if the item follows every event of it", func(t *testing.T) {
+		item, written := projectIncrementAndReset(t, true)
+
+		assert.Equal(t, 2, item.Total, "the reset must not change the item")
+		assert.Equal(t, written[1].ID, item.Revision, "the revision has to follow the reset")
+
+		_, err := architecturekit.Execute(context.Background(), requireStore(t), decider,
+			increment{subject: item.Subject, By: 1}.onEventID(item.Revision))
+		assert.NoError(t, err, "the revision of the item has to fit the subject")
+	})
+
+	t.Run("falls behind the subject if the projection skips an event of it", func(t *testing.T) {
+		item, written := projectIncrementAndReset(t, false)
+
+		assert.Equal(t, written[0].ID, item.Revision)
+
+		_, err := architecturekit.Execute(context.Background(), requireStore(t), decider,
+			increment{subject: item.Subject, By: 1}.onEventID(item.Revision))
+		assert.ErrorIs(t, err, architecturekit.ErrConflict, "a revision behind the subject has to conflict")
 	})
 }
