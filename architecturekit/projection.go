@@ -10,7 +10,7 @@ import (
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// Projection is what RunProjection drives: it applies events. A projection
+// Projection is what StartProjection drives: it applies events. A projection
 // that implements nothing else is rebuilt from the beginning on every start,
 // which is right for a view kept in memory. A projection that can only apply
 // events within a transaction is a Transactional instead.
@@ -31,7 +31,7 @@ type Resumable interface {
 //
 // It is not an optional addition to Projection, but a kind of its own: it
 // applies events only within a transaction, so it has no Apply outside of one.
-// Run it with RunTransactionalProjection. That way the compiler checks its
+// Start it with StartTransactionalProjection. That way the compiler checks its
 // method set, instead of a mismatch silently turning it into a projection that
 // is rebuilt on every start.
 type Transactional interface {
@@ -59,7 +59,7 @@ type Batched interface {
 	BatchSizes() (catchUp, live int)
 }
 
-// Mode is how RunProjection drives a projection, derived from the interfaces
+// Mode is how StartProjection drives a projection, derived from the interfaces
 // it fulfils. A transactional projection has no mode, because it is run by a
 // function of its own.
 type Mode string
@@ -72,7 +72,7 @@ const (
 	ModeResumable Mode = "resumable"
 )
 
-// ModeOf reports how RunProjection will drive this projection. Log it at
+// ModeOf reports how StartProjection will drive this projection. Log it at
 // startup: if a projection is driven in rebuild mode against expectations, a
 // method signature does not match the interface.
 func ModeOf(projection Projection) Mode {
@@ -88,7 +88,7 @@ func ModeOf(projection Projection) Mode {
 // would notice, which is why it is refused loudly instead.
 func refuseTransactional(projection Projection) {
 	if _, ok := projection.(Transactional); ok {
-		panic(fmt.Sprintf("architecturekit: %T is transactional, run it with RunTransactionalProjection", projection))
+		panic(fmt.Sprintf("architecturekit: %T is transactional, start it with StartTransactionalProjection", projection))
 	}
 }
 
@@ -122,42 +122,21 @@ func batchSizesOf(projection any) (catchUp, live int) {
 func CatchUpProjection(
 	ctx context.Context,
 	store *Store,
-	subject string,
-	recursive bool,
+	subjects Subjects,
 	projection Projection,
+	options ...ProjectionOption,
 ) error {
+	requireSubjects(subjects)
 	refuseTransactional(projection)
+
+	// Catching up has no use for a name, but checks the options all the same,
+	// so that a mistake in them shows here as well.
+	_ = projectionSettingsOf(options)
 
 	catchUpSize, _ := batchSizesOf(projection)
-	_, err := catchUp(ctx, store, subject, recursive, writerFor(projection), catchUpSize, nil)
+	_, err := catchUp(ctx, store, subjects, writerFor(projection), catchUpSize, nil)
 
 	return err
-}
-
-// RunProjection drives a projection until the context ends. It first catches
-// up from the checkpoint with a finite read, then follows the stream live.
-//
-// If reading fails, or if the database ends the stream, for example on a
-// restart, it waits and catches up again from where it stopped, with a delay
-// that grows with every attempt in a row (see WithReconnectDelays and
-// WithReconnectObserver). Only a failure that trying again will not fix, such
-// as an error from Apply, ends it with that error.
-//
-// Ending through the context is how a projection is stopped, so that returns
-// no error.
-//
-// A projection that is transactional as well is a programming error and
-// panics; use RunTransactionalProjection for it.
-func RunProjection(
-	ctx context.Context,
-	store *Store,
-	subject string,
-	recursive bool,
-	projection Projection,
-) error {
-	refuseTransactional(projection)
-
-	return run(ctx, store, subject, recursive, writerFor(projection), projection, nil)
 }
 
 // CatchUpTransactionalProjection is CatchUpProjection for a transactional
@@ -165,50 +144,43 @@ func RunProjection(
 func CatchUpTransactionalProjection(
 	ctx context.Context,
 	store *Store,
-	subject string,
-	recursive bool,
+	subjects Subjects,
 	projection Transactional,
+	options ...ProjectionOption,
 ) error {
+	requireSubjects(subjects)
+
+	// Catching up has no use for a name, but checks the options all the same,
+	// so that a mistake in them shows here as well.
+	_ = projectionSettingsOf(options)
+
 	catchUpSize, _ := batchSizesOf(projection)
-	_, err := catchUp(ctx, store, subject, recursive,
+	_, err := catchUp(ctx, store, subjects,
 		&transactionalWriter{projection: projection}, catchUpSize, nil)
 
 	return err
 }
 
-// RunTransactionalProjection is RunProjection for a transactional projection.
-// Every batch is applied within one transaction, which is committed together
-// with the ID of its last event.
-func RunTransactionalProjection(
-	ctx context.Context,
-	store *Store,
-	subject string,
-	recursive bool,
-	projection Transactional,
-) error {
-	return run(ctx, store, subject, recursive,
-		&transactionalWriter{projection: projection}, projection, nil)
-}
-
-// run catches up and then follows the stream. The batch sizes are read from
-// the projection behind the writer, which is the one that knows its target.
-// Progress is reported to the given run, which is nil for RunProjection.
+// run catches up and then follows the stream, until the context ends or a
+// failure that trying again will not fix. The batch sizes are read from the
+// projection behind the writer, which is the one that knows its target.
+// Progress is reported to the given run.
 func run(
 	ctx context.Context,
 	store *Store,
-	subject string,
-	recursive bool,
+	subjects Subjects,
 	writer projectionWriter,
 	projection any,
 	progress *ProjectionRun,
 ) error {
 	catchUpSize, live := batchSizesOf(projection)
 	delay := store.reconnectInitialDelay
+	attempt := 0
 
 	for {
 		checkpointBefore, _ := writer.checkpoint(ctx)
 
-		err := follow(ctx, store, subject, recursive, writer, catchUpSize, live, progress)
+		err := follow(ctx, store, subjects, writer, catchUpSize, live, progress)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -222,10 +194,19 @@ func run(
 		// failure is retried quickly again.
 		if checkpointAfter, _ := writer.checkpoint(ctx); checkpointAfter != checkpointBefore {
 			delay = store.reconnectInitialDelay
+			attempt = 0
 		}
 
+		attempt++
+
 		if store.reconnectObserver != nil {
-			store.reconnectObserver(err, delay)
+			store.reconnectObserver(Reconnect{
+				Projection: progress.Name(),
+				Subject:    subjects.subject,
+				Err:        err,
+				Delay:      delay,
+				Attempt:    attempt,
+			})
 		}
 
 		timer := time.NewTimer(delay)
@@ -246,14 +227,13 @@ func run(
 func follow(
 	ctx context.Context,
 	store *Store,
-	subject string,
-	recursive bool,
+	subjects Subjects,
 	writer projectionWriter,
 	catchUpSize int,
 	live int,
 	progress *ProjectionRun,
 ) error {
-	lastEventID, err := catchUp(ctx, store, subject, recursive, writer, catchUpSize, progress)
+	lastEventID, err := catchUp(ctx, store, subjects, writer, catchUpSize, progress)
 	if err != nil {
 		return err
 	}
@@ -261,8 +241,8 @@ func follow(
 	progress.caughtUpNow()
 
 	_, err = drive(ctx, writer,
-		store.client.ObserveEvents(ctx, subject, eventsourcingdb.ObserveEventsOptions{
-			Recursive:  recursive,
+		store.client.ObserveEvents(ctx, subjects.subject, eventsourcingdb.ObserveEventsOptions{
+			Recursive:  subjects.recursive,
 			LowerBound: boundAfter(lastEventID),
 		}), store.verify, progress, live)
 
@@ -273,8 +253,7 @@ func follow(
 func catchUp(
 	ctx context.Context,
 	store *Store,
-	subject string,
-	recursive bool,
+	subjects Subjects,
 	writer projectionWriter,
 	catchUpSize int,
 	progress *ProjectionRun,
@@ -285,8 +264,8 @@ func catchUp(
 	}
 
 	lastEventID, err := drive(ctx, writer,
-		store.client.ReadEvents(ctx, subject, eventsourcingdb.ReadEventsOptions{
-			Recursive:  recursive,
+		store.client.ReadEvents(ctx, subjects.subject, eventsourcingdb.ReadEventsOptions{
+			Recursive:  subjects.recursive,
 			LowerBound: boundAfter(checkpoint),
 		}), store.verify, progress, catchUpSize)
 	if err != nil {
@@ -395,7 +374,7 @@ type projectionWriter interface {
 	rollback(ctx context.Context) error
 }
 
-// writerFor picks the writer for a projection that RunProjection drives. A
+// writerFor picks the writer for a projection that StartProjection drives. A
 // transactional projection never gets here, because it is run by functions
 // of its own.
 func writerFor(projection Projection) projectionWriter {
