@@ -29,6 +29,8 @@ type EventOn struct {
 // guard, since Write reads no state. That, an event without a subject, and the
 // other mistakes Execute refuses in the preconditions of a command make Write
 // fail with an error of the category ErrPermanent, without writing anything.
+// So does an event whose data can not be encoded as JSON, for example because
+// it holds a float NaN, as with Execute.
 // Writing no events writes nothing and returns nil, but the preconditions are
 // checked first, so a write of no events still declares them, for example
 // with Unconditionally.
@@ -58,11 +60,8 @@ func Write(
 			return nil, fmt.Errorf("%w: event %d of a write needs a subject and an event", ErrPermanent, i)
 		}
 
-		candidates[i] = eventsourcingdb.EventCandidate{
-			Source:  store.source,
-			Subject: event.Subject,
-			Type:    event.Event.EventType(),
-			Data:    event.Event,
+		if candidates[i], err = store.candidateFor(event.Subject, event.Event); err != nil {
+			return nil, err
 		}
 	}
 

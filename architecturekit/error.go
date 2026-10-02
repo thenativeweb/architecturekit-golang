@@ -20,7 +20,8 @@ var (
 	ErrTransient = errors.New("architecturekit: transient failure")
 
 	// ErrPermanent means trying again will not help, and something is wrong
-	// with the code, the data or the configuration.
+	// with the code, the data or the configuration, for example an event whose
+	// data can not be encoded as JSON, such as a float NaN.
 	ErrPermanent = errors.New("architecturekit: permanent failure")
 )
 
