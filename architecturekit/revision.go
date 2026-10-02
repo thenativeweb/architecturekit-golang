@@ -125,7 +125,9 @@ func (p *trackedResumable) SaveCheckpoint(ctx context.Context, eventID string) e
 // seen nothing is behind a view that has seen something.
 //
 // Revisions are compared as numbers, never as text: the database writes them
-// as decimal strings, and "10" sorts before "9" as text.
+// as decimal strings, and "10" sorts before "9" as text. A revision is a
+// decimal number from 0 to 2^63-1, the range of the database's event IDs;
+// anything else is refused with ErrNotARevision.
 func CompareRevisions(left, right string) (int, error) {
 	// Both sides are read before either is compared, so that a revision that
 	// is not one is refused even when the other side is empty.
@@ -156,12 +158,16 @@ func CompareRevisions(left, right string) (int, error) {
 
 // revisionNumber reads a revision as a number. A revision that is not set has
 // no number, which is what the second result says.
+//
+// The database numbers its events with signed 64-bit integers, so a revision
+// ends at 2^63-1; a larger number is no event ID it could ever hand out, and
+// it refuses one as a precondition.
 func revisionNumber(revision string) (uint64, bool, error) {
 	if revision == "" {
 		return 0, false, nil
 	}
 
-	number, err := strconv.ParseUint(revision, 10, 64)
+	number, err := strconv.ParseUint(revision, 10, 63)
 	if err != nil {
 		return 0, false, fmt.Errorf("%w: %q", ErrNotARevision, revision)
 	}
