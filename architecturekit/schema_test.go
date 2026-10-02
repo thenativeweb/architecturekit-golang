@@ -1,6 +1,7 @@
 package architecturekit_test
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/json/jsontext"
 	"reflect"
@@ -578,7 +579,7 @@ func TestEvolveWithDerivedSchemas(t *testing.T) {
 		store := requireStore(t)
 		subject := subjectFor(t)
 
-		require.NoError(t, store.RegisterSchemas(notedState().Schemas()))
+		require.NoError(t, architecturekit.RegisterSchemas(context.Background(), store, notedState().Schemas()))
 
 		// A nil slice is written as null, which the derived schema allows.
 		writeRaw(t, subject, noted{Text: "first", Tags: nil, At: time.Now()})
