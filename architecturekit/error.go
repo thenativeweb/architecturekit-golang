@@ -5,10 +5,12 @@ import (
 	"fmt"
 )
 
-// The kit sorts every failure onto two axes: whether it is a matter of the
-// domain or of the machinery, and whether trying again unchanged could help.
-// Callers ask for the category with errors.Is instead of matching concrete
-// errors, so that new failures do not break existing code.
+// The kit sorts its own failures in reading and writing onto two axes: whether
+// it is a matter of the domain or of the machinery, and whether trying again
+// unchanged could help. Callers ask for the category with errors.Is instead of
+// matching concrete errors, so that new failures do not break existing code.
+// An error of the application's own code, such as one a decider returns,
+// passes through unchanged, unless it is wrapped with a category.
 var (
 	// ErrDomain means a business rule rejected the command. The caller has to
 	// change what it asks for; asking again will not help.
@@ -47,6 +49,7 @@ func NewDomainError(format string, args ...any) error {
 	return &DomainError{message: fmt.Sprintf(format, args...)}
 }
 
+// Error returns the message, exactly as NewDomainError formatted it.
 func (e *DomainError) Error() string { return e.message }
 
 // Unwrap sorts every domain error under ErrDomain, so that a caller can ask

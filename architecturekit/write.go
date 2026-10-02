@@ -29,7 +29,9 @@ type EventOn struct {
 // guard, since Write reads no state. That, an event without a subject, and the
 // other mistakes Execute refuses in the preconditions of a command make Write
 // fail with an error of the category ErrPermanent, without writing anything.
-// Writing no events writes nothing and returns nil.
+// Writing no events writes nothing and returns nil, but the preconditions are
+// checked first, so a write of no events still declares them, for example
+// with Unconditionally.
 //
 // Write knows no state, so unlike Execute, it does not refuse an event that a
 // state reading its subject has no rule for. Reading the subject with that

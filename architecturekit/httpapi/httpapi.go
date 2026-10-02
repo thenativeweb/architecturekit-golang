@@ -1,4 +1,6 @@
-// Package httpapi exposes commands over HTTP. It is optional: the kit's core
+// Package httpapi exposes commands and queries over HTTP, lets a caller read
+// its own writes (see Revisioned and Await), and answers the health checks of
+// an orchestrator (see Readiness and Liveness). It is optional: the kit's core
 // knows nothing about transports, and everything here can be replaced by a
 // handler of your own.
 package httpapi

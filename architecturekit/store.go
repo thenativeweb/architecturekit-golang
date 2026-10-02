@@ -77,8 +77,14 @@ func WithStateCache(maxSubjects int) StoreOption {
 //
 // This applies only to commands whose preconditions include OnStateRead, since
 // only then does the conflict come from the state Execute read. A command that
-// checks a revision the caller hands over is never decided again: the caller
-// has to learn about the conflict, and deciding again would fail the same way.
+// checks only a revision the caller hands over is never decided again: the
+// caller has to learn about the conflict, and deciding again would fail the
+// same way. A command that checks both is decided again, since the database
+// does not say which precondition did not hold, so if the revision of the
+// caller is outdated, every attempt fails the same way until the retries are
+// used up. On the same subject, one of the two is enough: if the revision of
+// the caller holds, so does OnStateRead.
+//
 // Once the retries are used up, Execute reports the conflict, an error of the
 // category ErrConflict. Write never decides again, since it decides nothing.
 //
@@ -168,9 +174,9 @@ func WithSignatureVerification(verificationKey ed25519.PublicKey) StoreOption {
 // The store checks the hash of every event it reads, before any upcaster,
 // Evolve rule, or projection sees it, and an event whose hash does not match
 // its content makes reading fail with ErrUnverified. This applies to Execute,
-// Load, and every kind of projection. The events that Execute has just written
-// are not checked, since they are not read. To turn this off, hand over
-// WithoutHashVerification.
+// Load, Read, and every kind of projection. The events that Execute has just
+// written are not checked, since they are not read. To turn this off, hand
+// over WithoutHashVerification.
 func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOption) *Store {
 	store := &Store{
 		client:                client,
