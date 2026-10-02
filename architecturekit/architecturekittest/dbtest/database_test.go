@@ -1,4 +1,4 @@
-package architecturekittest_test
+package dbtest_test
 
 import (
 	"context"
@@ -10,12 +10,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
+	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest/dbtest"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
 func TestMain(m *testing.M) {
-	architecturekittest.Main(m)
+	dbtest.Main(m)
 }
 
 // --- a journal, written to subjects of its own in every test ---
@@ -100,21 +100,21 @@ func runWithSpy(t *testing.T, call func(testing.TB)) *fatalSpy {
 
 func TestSharedDatabase(t *testing.T) {
 	t.Run("is the same for every test of the package", func(t *testing.T) {
-		first := architecturekittest.SharedDatabase(t)
-		second := architecturekittest.SharedDatabase(t)
+		first := dbtest.SharedDatabase(t)
+		second := dbtest.SharedDatabase(t)
 
 		assert.Same(t, first, second)
 	})
 
 	t.Run("hands out a store that writes and reads", func(t *testing.T) {
-		store := architecturekittest.SharedDatabase(t).Store(t, journalSource, journalState.Schemas())
+		store := dbtest.SharedDatabase(t).Store(t, journalSource, journalState.Schemas())
 
 		_, current := writeAndRead(t, store, "first entry")
 		assert.Equal(t, []string{"first entry"}, current.Entries)
 	})
 
 	t.Run("registers the schemas", func(t *testing.T) {
-		database := architecturekittest.SharedDatabase(t)
+		database := dbtest.SharedDatabase(t)
 		database.Store(t, journalSource, journalState.Schemas())
 
 		var schema *map[string]any
@@ -130,7 +130,7 @@ func TestSharedDatabase(t *testing.T) {
 	})
 
 	t.Run("fails the test for a schema the database refuses", func(t *testing.T) {
-		database := architecturekittest.SharedDatabase(t)
+		database := dbtest.SharedDatabase(t)
 		eventType := "test.journal.refused." + rand.Text()
 
 		spy := runWithSpy(t, func(tb testing.TB) {
@@ -145,7 +145,7 @@ func TestSharedDatabase(t *testing.T) {
 	})
 
 	t.Run("can be reached with its address and API token", func(t *testing.T) {
-		database := architecturekittest.SharedDatabase(t)
+		database := dbtest.SharedDatabase(t)
 
 		client, err := eventsourcingdb.NewClient(database.URL, database.APIToken)
 		require.NoError(t, err)
@@ -156,17 +156,17 @@ func TestSharedDatabase(t *testing.T) {
 		applied := 0
 		option := architecturekit.StoreOption(func(*architecturekit.Store) { applied++ })
 
-		architecturekittest.SharedDatabase(t).Store(t, journalSource, journalState.Schemas(), option)
-		architecturekittest.Store(t, journalSource, journalState.Schemas(), option)
+		dbtest.SharedDatabase(t).Store(t, journalSource, journalState.Schemas(), option)
+		dbtest.Store(t, journalSource, journalState.Schemas(), option)
 
 		assert.Equal(t, 2, applied, "the options were not handed to the store")
 	})
 
 	t.Run("is what Store uses", func(t *testing.T) {
-		store := architecturekittest.Store(t, journalSource, journalState.Schemas())
+		store := dbtest.Store(t, journalSource, journalState.Schemas())
 		name, _ := writeAndRead(t, store, "through Store")
 
-		viaShared := architecturekittest.SharedDatabase(t).Store(t, journalSource, nil)
+		viaShared := dbtest.SharedDatabase(t).Store(t, journalSource, nil)
 		current, err := architecturekit.Load(context.Background(), viaShared, journalState, "/journals/"+name)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"through Store"}, current.Entries)
@@ -181,17 +181,17 @@ func TestIsolatedDatabase(t *testing.T) {
 			t.Skip("skipping a test that needs a database in short mode")
 		}
 
-		var isolated *architecturekittest.Database
+		var isolated *dbtest.Database
 
 		t.Run("in a test", func(t *testing.T) {
-			isolated = architecturekittest.IsolatedDatabase(t)
-			require.NotEqual(t, architecturekittest.SharedDatabase(t).URL.String(), isolated.URL.String())
+			isolated = dbtest.IsolatedDatabase(t)
+			require.NotEqual(t, dbtest.SharedDatabase(t).URL.String(), isolated.URL.String())
 
 			name, current := writeAndRead(t, isolated.Store(t, journalSource, journalState.Schemas()), "isolated entry")
 			assert.Equal(t, []string{"isolated entry"}, current.Entries)
 
 			inShared, err := architecturekit.Load(context.Background(),
-				architecturekittest.SharedDatabase(t).Store(t, journalSource, nil), journalState, "/journals/"+name)
+				dbtest.SharedDatabase(t).Store(t, journalSource, nil), journalState, "/journals/"+name)
 			require.NoError(t, err)
 			assert.Empty(t, inShared.Entries, "the shared database must not see the events of an isolated one")
 		})
@@ -204,7 +204,7 @@ func TestIsolatedDatabase(t *testing.T) {
 		applied := 0
 		option := architecturekit.StoreOption(func(*architecturekit.Store) { applied++ })
 
-		store := architecturekittest.IsolatedStore(t, journalSource, journalState.Schemas(), option)
+		store := dbtest.IsolatedStore(t, journalSource, journalState.Schemas(), option)
 
 		_, current := writeAndRead(t, store, "through IsolatedStore")
 		assert.Equal(t, []string{"through IsolatedStore"}, current.Entries)
