@@ -40,7 +40,9 @@ type Transactional interface {
 }
 
 // Tx is one unit of work of a transactional projection. Commit has to make the
-// applied events and the last event ID durable together, or neither.
+// applied events and the last event ID durable together, or neither. Rollback
+// is not called after Commit fails, so Commit has to roll back itself if it can
+// not finish.
 type Tx interface {
 	Apply(ctx context.Context, event eventsourcingdb.Event) error
 	Commit(ctx context.Context, lastEventID string) error
@@ -48,15 +50,21 @@ type Tx interface {
 }
 
 // Batched is optional, for resumable and transactional projections alike. It
-// says how many events are applied before the checkpoint is written,
-// separately for catching up and for live operation.
+// says how many events are applied while catching up before the checkpoint is
+// written.
 //
-// Both default to one, which is the safe choice and works for projections that
-// are not idempotent. Raising the catch-up size speeds up a rebuild by orders
-// of magnitude, at the price of repeating up to that many events after a
-// crash. Only the projection knows what its target costs.
+// The size defaults to one, which is the safe choice and works for projections
+// that are not idempotent. Raising it speeds up a rebuild by orders of
+// magnitude. A resumable projection pays for that by applying up to that many
+// events a second time after a crash, a transactional one by a larger
+// transaction. Only the projection knows what its target costs.
+//
+// Once a projection has caught up, it writes the checkpoint after every event,
+// whatever the size. Events then arrive one at a time, often with pauses in
+// between, and a batch that waited to fill up would hold back events that have
+// already arrived.
 type Batched interface {
-	BatchSizes() (catchUp, live int)
+	CatchUpBatchSize() int
 }
 
 // Mode is how StartProjection drives a projection, derived from the interfaces
@@ -92,22 +100,15 @@ func refuseTransactional(projection Projection) {
 	}
 }
 
-// batchSizesOf takes any projection, because resumable and transactional ones
+// batchSizeOf takes any projection, because resumable and transactional ones
 // can both be batched, and they share no interface.
-func batchSizesOf(projection any) (catchUp, live int) {
-	catchUp, live = 1, 1
-
-	if batched, ok := projection.(Batched); ok {
-		catchUp, live = batched.BatchSizes()
-		if catchUp < 1 {
-			catchUp = 1
-		}
-		if live < 1 {
-			live = 1
-		}
+func batchSizeOf(projection any) int {
+	batched, ok := projection.(Batched)
+	if !ok {
+		return 1
 	}
 
-	return catchUp, live
+	return max(batched.CatchUpBatchSize(), 1)
 }
 
 // CatchUpProjection applies everything that is already stored and returns.
@@ -133,8 +134,7 @@ func CatchUpProjection(
 	// so that a mistake in them shows here as well.
 	_ = projectionSettingsOf(options)
 
-	catchUpSize, _ := batchSizesOf(projection)
-	_, err := catchUp(ctx, store, subjects, writerFor(projection), catchUpSize, nil)
+	_, err := catchUp(ctx, store, subjects, writerFor(projection), batchSizeOf(projection), nil)
 
 	return err
 }
@@ -154,15 +154,14 @@ func CatchUpTransactionalProjection(
 	// so that a mistake in them shows here as well.
 	_ = projectionSettingsOf(options)
 
-	catchUpSize, _ := batchSizesOf(projection)
 	_, err := catchUp(ctx, store, subjects,
-		&transactionalWriter{projection: projection}, catchUpSize, nil)
+		&transactionalWriter{projection: projection}, batchSizeOf(projection), nil)
 
 	return err
 }
 
 // run catches up and then follows the stream, until the context ends or a
-// failure that trying again will not fix. The batch sizes are read from the
+// failure that trying again will not fix. The batch size is read from the
 // projection behind the writer, which is the one that knows its target.
 // Progress is reported to the given run.
 func run(
@@ -173,14 +172,14 @@ func run(
 	projection any,
 	progress *ProjectionRun,
 ) error {
-	catchUpSize, live := batchSizesOf(projection)
+	catchUpSize := batchSizeOf(projection)
 	delay := store.reconnectInitialDelay
 	attempt := 0
 
 	for {
 		checkpointBefore, _ := writer.checkpoint(ctx)
 
-		err := follow(ctx, store, subjects, writer, catchUpSize, live, progress)
+		err := follow(ctx, store, subjects, writer, catchUpSize, progress)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -224,13 +223,15 @@ func run(
 // follow catches up from the checkpoint and then follows the stream live,
 // until reading fails or the stream ends. It returns nil if the database
 // ended the stream.
+//
+// Live, every event is committed on its own, since a batch would only be
+// committed once the next events arrive, which may take a long time.
 func follow(
 	ctx context.Context,
 	store *Store,
 	subjects Subjects,
 	writer projectionWriter,
 	catchUpSize int,
-	live int,
 	progress *ProjectionRun,
 ) error {
 	lastEventID, err := catchUp(ctx, store, subjects, writer, catchUpSize, progress)
@@ -244,7 +245,7 @@ func follow(
 		store.client.ObserveEvents(ctx, subjects.subject, eventsourcingdb.ObserveEventsOptions{
 			Recursive:  subjects.recursive,
 			LowerBound: boundAfter(lastEventID),
-		}), store.verify, progress, live)
+		}), store.verify, progress, 1)
 
 	return err
 }
@@ -412,24 +413,40 @@ func (w *rebuildWriter) apply(ctx context.Context, event eventsourcingdb.Event) 
 
 func (w *rebuildWriter) commit(context.Context, string) error { return nil }
 
-// resumableWriter writes the checkpoint after the data, not with it.
+// resumableWriter writes the checkpoint after the data, not with it. Within a
+// run, it remembers the last event it applied, as rebuildWriter does, so that
+// catching up again after a lost stream goes on from there, rather than from a
+// checkpoint that a batch cut short did not get to save.
 type resumableWriter struct {
-	projection Projection
-	resumable  Resumable
+	projection  Projection
+	resumable   Resumable
+	lastApplied string
 }
 
 func (w *resumableWriter) checkpoint(ctx context.Context) (string, error) {
+	if w.lastApplied != "" {
+		return w.lastApplied, nil
+	}
+
 	return w.resumable.Checkpoint(ctx)
 }
 
 func (w *resumableWriter) begin(context.Context) error { return nil }
 
 // rollback has nothing to undo: the data is already written, and only the
-// checkpoint is still missing. That is what makes this mode at-least-once.
+// checkpoint is still missing. That is what makes this mode at-least-once
+// across a crash.
 func (w *resumableWriter) rollback(context.Context) error { return nil }
 
 func (w *resumableWriter) apply(ctx context.Context, event eventsourcingdb.Event) error {
-	return w.projection.Apply(ctx, event)
+	err := w.projection.Apply(ctx, event)
+	if err != nil {
+		return err
+	}
+
+	w.lastApplied = event.ID
+
+	return nil
 }
 
 func (w *resumableWriter) commit(ctx context.Context, lastEventID string) error {
