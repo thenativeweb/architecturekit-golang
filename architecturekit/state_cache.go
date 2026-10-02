@@ -38,10 +38,11 @@ type stateShape struct {
 	fromLatest string
 }
 
-// shapeOf describes how the given state is built.
+// shapeOf describes how the given state is built. It holds a copy of the
+// initial value, since the cache keeps the shape for as long as the entry.
 func shapeOf[TState any](state *State[TState]) stateShape {
 	shape := stateShape{
-		initial:    state.initial,
+		initial:    state.copyOf(state.initial),
 		evolved:    slices.Sorted(maps.Keys(state.evolve)),
 		ignored:    slices.Sorted(maps.Keys(state.ignored)),
 		fromLatest: state.fromLatest,

@@ -264,8 +264,9 @@ func readFailure(ctx context.Context, err error, doing string) error {
 	return databaseFailure(err, doing)
 }
 
-// fold reads the stream and folds it into a state as it goes. Events are not
-// collected, so even long streams need constant memory only.
+// fold reads the stream and folds it into a state as it goes, starting from a
+// copy of the initial value. Events are not collected, so even long streams
+// need constant memory only.
 //
 // With a state cache, it continues from the cached state and reads only the
 // events after the one the state was built from.
@@ -278,7 +279,10 @@ func fold[TState any](
 	subject string,
 	state *State[TState],
 ) (TState, string, error) {
-	current := state.initial
+	current, err := state.copyOfInitial()
+	if err != nil {
+		return current, "", err
+	}
 	lastEventID := ""
 
 	isCached := store.states != nil && state.isCopyable()
