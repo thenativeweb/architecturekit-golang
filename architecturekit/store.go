@@ -95,14 +95,26 @@ func WithConflictRetries(retries int) StoreOption {
 
 // WithReconnectDelays sets how long the projections started with
 // StartProjection or StartTransactionalProjection wait before they read again
-// after reading failed or the stream ended. The delay starts at initialDelay, doubles with every
-// attempt in a row, and never exceeds maxDelay. It starts over once a
-// projection has made progress. Without this option, the delays are 1 second
-// and 1 minute.
+// after reading failed or the stream ended. The delay starts at initialDelay,
+// doubles with every attempt in a row, and never exceeds maxDelay. It starts
+// over once a projection has made progress. Without this option, the delays
+// are 1 second and 1 minute.
+//
+// An initialDelay of zero or less is a programming error, since the
+// projections would then read again without any pause, and so is a maxDelay
+// below initialDelay. Both panic.
 func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
+	if initialDelay <= 0 {
+		panic(fmt.Sprintf("architecturekit: WithReconnectDelays needs an initial delay that is positive, not %v", initialDelay))
+	}
+	if maxDelay < initialDelay {
+		panic(fmt.Sprintf("architecturekit: WithReconnectDelays needs a maximum delay that is not below the initial delay of %v, not %v",
+			initialDelay, maxDelay))
+	}
+
 	return func(store *Store) {
 		store.reconnectInitialDelay = initialDelay
-		store.reconnectMaxDelay = max(maxDelay, initialDelay)
+		store.reconnectMaxDelay = maxDelay
 	}
 }
 
