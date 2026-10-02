@@ -475,6 +475,101 @@ func TestDeriveSchemaPanics(t *testing.T) {
 		{"for a Schema function whose schema can not be encoded",
 			func() { architecturekit.DeriveSchema[struct{ Value unencodableSchema }]() },
 			"can not be encoded as JSON"},
+		{"for a type with the Schema function of an embedded struct only",
+			func() { architecturekit.DeriveSchema[feePaid]() },
+			"architecturekit_test.feePaid has a Schema function only from its embedded field money, which describes money alone"},
+		{"for a pointer to such a type",
+			func() { architecturekit.DeriveSchema[*feePaid]() },
+			"architecturekit_test.feePaid has a Schema function only from its embedded field money"},
+		{"for a type with the Schema function of an embedded struct on a pointer receiver",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					deposit
+					Note string `json:"note"`
+				}]()
+			},
+			"has a Schema function only from its embedded field deposit"},
+		{"for a type that embeds a pointer to a struct with a Schema function",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					*money
+					Note string `json:"note"`
+				}]()
+			},
+			"has a Schema function only from its embedded field money"},
+		{"for a type with the Schema function of a struct embedded two levels deep",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					charge
+					Note string `json:"note"`
+				}]()
+			},
+			"has a Schema function only from its embedded field charge.money, which describes charge.money alone"},
+		{"for a type that embeds a struct whose Schema function hides the one of its own embedded field",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					feePaidWithSchema
+				}]()
+			},
+			"has a Schema function only from its embedded field feePaidWithSchema,"},
+		{"for a type that embeds a struct with a Schema function under a json tag",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					money `json:"fee"`
+				}]()
+			},
+			"has a Schema function only from its embedded field money"},
+		{"for a type with the Schema function of an embedded type that is not a struct",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					country
+					Note string `json:"note"`
+				}]()
+			},
+			"has a Schema function only from its embedded field country"},
+		{"for a type with the Schema function of an embedded type that is not a struct, on a pointer receiver",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					code
+					Note string `json:"note"`
+				}]()
+			},
+			"has a Schema function only from its embedded field code"},
+		{"for a type with the Schema function of an embedded interface",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					describer
+					Note string `json:"note"`
+				}]()
+			},
+			"has a Schema function only from its embedded field describer"},
+		{"for a generic type with the Schema function of an embedded struct only",
+			func() { architecturekit.DeriveSchema[priced[string]]() },
+			"architecturekit_test.priced[string] has a Schema function only from its embedded field money"},
+		{"for a type with the Schema function of an embedded instance of a generic type",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					labeled[int]
+					Note string `json:"note"`
+				}]()
+			},
+			"has a Schema function only from its embedded field labeled"},
+		{"for a field whose type has the Schema function of an embedded struct only",
+			func() { architecturekit.DeriveSchema[struct{ Fee feePaid }]() },
+			"field Fee of struct { Fee architecturekit_test.feePaid }: architecturekit_test.feePaid has a Schema function only from its embedded field money"},
+		{"for an optional field whose type has the Schema function of an embedded struct only",
+			func() {
+				architecturekit.DeriveSchema[struct {
+					Fee feePaid `json:"fee,omitempty"`
+				}]()
+			},
+			"architecturekit_test.feePaid has a Schema function only from its embedded field money"},
+		{"for a field that points to such a type",
+			func() { architecturekit.DeriveSchema[struct{ Fee *feePaid }]() },
+			"architecturekit_test.feePaid has a Schema function only from its embedded field money"},
+		{"for a slice of such a type",
+			func() { architecturekit.DeriveSchema[struct{ Fees []feePaid }]() },
+			"architecturekit_test.feePaid has a Schema function only from its embedded field money"},
 	}
 
 	for _, test := range tests {
@@ -493,6 +588,35 @@ func TestDeriveSchemaPanics(t *testing.T) {
 	t.Run("points to a Schema function where one helps", func(t *testing.T) {
 		message := panicMessage(t, func() { architecturekit.DeriveSchema[chain]() })
 		assert.Contains(t, message, "give it a Schema function")
+	})
+
+	t.Run("says how to resolve a Schema function of an embedded field", func(t *testing.T) {
+		message := panicMessage(t, func() { architecturekit.DeriveSchema[feePaid]() })
+		assert.Contains(t, message,
+			"give architecturekit_test.feePaid a Schema function of its own, or make money a named field")
+	})
+
+	t.Run("names the least deeply embedded field with a Schema function, as Go does", func(t *testing.T) {
+		// code declares its Schema function one level below the struct, money
+		// two levels below, so Go promotes the one of code.
+		message := panicMessage(t, func() {
+			architecturekit.DeriveSchema[struct {
+				charge
+				code
+			}]()
+		})
+		assert.Contains(t, message, "only from its embedded field code,")
+	})
+
+	t.Run("names the embedded field, not one of an embedded type without a Schema function or a named one", func(t *testing.T) {
+		message := panicMessage(t, func() {
+			architecturekit.DeriveSchema[struct {
+				audit
+				Country country `json:"country"`
+				money
+			}]()
+		})
+		assert.Contains(t, message, "only from its embedded field money,")
 	})
 }
 
@@ -616,6 +740,250 @@ func TestEvolveWithDerivedSchemas(t *testing.T) {
 
 			assert.ErrorContains(t, write(data), "schema", "the database must refuse %s because of the schema", name)
 		}
+	})
+}
+
+// money is a value type with constraints, which it describes with a Schema
+// function of its own.
+type money struct {
+	Amount   int    `json:"amount"`
+	Currency string `json:"currency"`
+}
+
+func (money) Schema() map[string]any {
+	schema := architecturekit.DeriveSchema[money]()
+	schema["properties"].(map[string]any)["currency"] = map[string]any{"type": "string", "pattern": "^[A-Z]{3}$"}
+
+	return schema
+}
+
+// feePaid has a Schema function only because it embeds money, and that
+// function describes money alone, while encoding/json writes the note next to
+// the amount and the currency.
+type feePaid struct {
+	money
+	Note string `json:"note"`
+}
+
+func (feePaid) EventType() string { return "io.thenativeweb.test.fee-paid" }
+
+// feeCharged has a field of the type feePaid.
+type feeCharged struct {
+	Fee feePaid `json:"fee"`
+}
+
+func (feeCharged) EventType() string { return "io.thenativeweb.test.fee-charged" }
+
+// feePaidWithSchema is feePaid with a Schema function of its own, which hides
+// the one of money. It has the same event type.
+type feePaidWithSchema struct {
+	money
+	Note string `json:"note"`
+}
+
+func (feePaidWithSchema) EventType() string { return "io.thenativeweb.test.fee-paid" }
+
+func (feePaidWithSchema) Schema() map[string]any {
+	schema := architecturekit.DeriveSchema[feePaidWithSchema]()
+	schema["properties"].(map[string]any)["currency"] = money{}.Schema()["properties"].(map[string]any)["currency"]
+
+	return schema
+}
+
+// feeWaived hides the Schema function of money with one on a pointer receiver.
+type feeWaived struct {
+	money
+}
+
+func (*feeWaived) Schema() map[string]any {
+	return map[string]any{"type": "object", "maxProperties": 2}
+}
+
+// deposit has a Schema function on a pointer receiver.
+type deposit struct {
+	Amount int `json:"amount"`
+}
+
+func (*deposit) Schema() map[string]any { return map[string]any{"type": "object"} }
+
+// charge has a Schema function only because it embeds money, and passes it on
+// to whatever embeds it.
+type charge struct {
+	money
+}
+
+// describer is an interface with a Schema function.
+type describer interface {
+	Schema() map[string]any
+}
+
+// labeled is a generic event with a Schema function of its own.
+type labeled[T any] struct {
+	Label T `json:"label"`
+}
+
+func (labeled[T]) EventType() string { return "io.thenativeweb.test.labeled" }
+
+func (labeled[T]) Schema() map[string]any {
+	return map[string]any{"type": "object", "required": []any{"label"}}
+}
+
+// labeledOnPointer is a generic type with a Schema function on a pointer
+// receiver.
+type labeledOnPointer[T any] struct {
+	Label T `json:"label"`
+}
+
+func (*labeledOnPointer[T]) Schema() map[string]any {
+	return map[string]any{"type": "object", "maxProperties": 1}
+}
+
+// priced is a generic event that has a Schema function only because it embeds
+// money.
+type priced[T any] struct {
+	money
+	Item T `json:"item"`
+}
+
+func (priced[T]) EventType() string { return "io.thenativeweb.test.priced" }
+
+// discounted is a generic type that hides the Schema function of money with
+// one of its own.
+type discounted[T any] struct {
+	money
+	By T `json:"by"`
+}
+
+func (discounted[T]) Schema() map[string]any {
+	return map[string]any{"type": "object", "minProperties": 3}
+}
+
+func TestSchemaFunctionsOfEmbeddedFields(t *testing.T) {
+	t.Run("panics in Evolve for an event with the Schema function of an embedded field only", func(t *testing.T) {
+		message := panicMessage(t, func() {
+			architecturekit.NewState(0).Evolve(func(count int, _ feePaid) int { return count + 1 })
+		})
+
+		assert.Contains(t, message, `architecturekit: event type "io.thenativeweb.test.fee-paid": `+
+			"architecturekit_test.feePaid has a Schema function only from its embedded field money")
+	})
+
+	t.Run("panics in Ignore for such an event", func(t *testing.T) {
+		message := panicMessage(t, func() {
+			architecturekit.NewState(0).Ignore[feePaid]()
+		})
+
+		assert.Contains(t, message, "architecturekit_test.feePaid has a Schema function only from its embedded field money")
+	})
+
+	t.Run("panics for a generic event with the Schema function of an embedded field only", func(t *testing.T) {
+		message := panicMessage(t, func() {
+			architecturekit.NewState(0).Evolve(func(count int, _ priced[string]) int { return count + 1 })
+		})
+
+		assert.Contains(t, message, "architecturekit_test.priced[string] has a Schema function only from its embedded field money")
+	})
+
+	t.Run("panics for an event with a field whose type has the Schema function of an embedded field only", func(t *testing.T) {
+		message := panicMessage(t, func() {
+			architecturekit.NewState(0).Evolve(func(count int, _ feeCharged) int { return count + 1 })
+		})
+
+		assert.Contains(t, message, `architecturekit: event type "io.thenativeweb.test.fee-charged": `+
+			"field Fee of architecturekit_test.feeCharged: "+
+			"architecturekit_test.feePaid has a Schema function only from its embedded field money")
+	})
+
+	t.Run("keeps the own Schema function of an event that hides the one of an embedded field", func(t *testing.T) {
+		schemas := architecturekit.NewState(0).
+			Evolve(func(count int, _ feePaidWithSchema) int { return count + 1 }).
+			Schemas()
+
+		require.Len(t, schemas, 1)
+		assert.Equal(t, feePaidWithSchema{}.Schema(), schemas[0].Schema)
+	})
+
+	t.Run("keeps the own Schema function of a generic event", func(t *testing.T) {
+		schemas := architecturekit.NewState(0).
+			Evolve(func(count int, _ labeled[int]) int { return count + 1 }).
+			Schemas()
+
+		require.Len(t, schemas, 1)
+		assert.Equal(t, labeled[int]{}.Schema(), schemas[0].Schema)
+	})
+
+	t.Run("describes fields by Schema functions that hide those of embedded fields, also on pointer receivers and generic types", func(t *testing.T) {
+		assert.JSONEq(t, `{"type": "object", "additionalProperties": false,
+			"properties": {
+				"withSchema": {"type": "object", "additionalProperties": false,
+					"properties": {"amount": {"type": "integer"}, "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+						"note": {"type": "string"}},
+					"required": ["amount", "currency", "note"]},
+				"waived": {"type": "object", "maxProperties": 2},
+				"discounted": {"type": "object", "minProperties": 3},
+				"label": {"type": "object", "required": ["label"]},
+				"labelOnPointer": {"type": "object", "maxProperties": 1}},
+			"required": ["withSchema", "waived", "discounted", "label", "labelOnPointer"]}`,
+			schemaJSON[struct {
+				WithSchema     feePaidWithSchema        `json:"withSchema"`
+				Waived         feeWaived                `json:"waived"`
+				Discounted     discounted[int]          `json:"discounted"`
+				Label          labeled[string]          `json:"label"`
+				LabelOnPointer labeledOnPointer[string] `json:"labelOnPointer"`
+			}](t))
+	})
+
+	t.Run("describes a named field by the Schema function of its type", func(t *testing.T) {
+		assert.JSONEq(t, `{"type": "object", "additionalProperties": false,
+			"properties": {
+				"fee": {"type": "object", "additionalProperties": false,
+					"properties": {"amount": {"type": "integer"}, "currency": {"type": "string", "pattern": "^[A-Z]{3}$"}},
+					"required": ["amount", "currency"]},
+				"note": {"type": "string"}},
+			"required": ["fee", "note"]}`,
+			schemaJSON[struct {
+				Fee  money  `json:"fee"`
+				Note string `json:"note"`
+			}](t))
+	})
+
+	t.Run("describes the fields of an embedded struct by their types in a Schema function of its own", func(t *testing.T) {
+		// DeriveSchema does not call the Schema function of money, so the
+		// currency has no pattern unless the own Schema function adds it.
+		assert.JSONEq(t, `{"type": "object", "additionalProperties": false,
+			"properties": {"amount": {"type": "integer"}, "currency": {"type": "string"}, "note": {"type": "string"}},
+			"required": ["amount", "currency", "note"]}`,
+			schemaJSON[feePaidWithSchema](t))
+	})
+
+	t.Run("refuses before anything is registered and leaves the event type free", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+
+		// Building the state panics, so RegisterSchemas is never reached.
+		panicMessage(t, func() {
+			state := architecturekit.NewState(0).Evolve(func(count int, _ feePaid) int { return count + 1 })
+			_ = architecturekit.RegisterSchemas(t.Context(), store, state.Schemas())
+		})
+
+		// Had the schema of money been registered for the event type, the
+		// schema of feePaidWithSchema would differ from it and be refused.
+		state := architecturekit.NewState(0).Evolve(func(count int, _ feePaidWithSchema) int { return count + 1 })
+		require.NoError(t, architecturekit.RegisterSchemas(t.Context(), store, state.Schemas()))
+
+		writeRaw(t, subject, feePaidWithSchema{money: money{Amount: 5, Currency: "EUR"}, Note: "late"})
+
+		count, err := architecturekit.Load(t.Context(), store, state, subject)
+		require.NoError(t, err)
+		assert.Equal(t, 1, count)
+
+		_, err = rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+			Source:  "https://thenativeweb.io",
+			Subject: subject,
+			Type:    feePaidWithSchema{}.EventType(),
+			Data:    feePaidWithSchema{money: money{Amount: 5, Currency: "euro"}, Note: "late"},
+		}}, nil)
+		assert.ErrorContains(t, err, "schema", "the database must check the currency against the pattern of money")
 	})
 }
 

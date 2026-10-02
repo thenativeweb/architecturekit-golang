@@ -200,6 +200,10 @@ func (BookCorrected) Schema() map[string]any {
 
 `DeriveSchema` returns a new schema on every call, with objects as `map[string]any` and arrays as `[]any`, as `encoding/json` decodes them.
 
+A `Schema` function describes the type that declares it. Go also promotes it to a struct that embeds the type, but there it still describes the embedded type alone, while `encoding/json` writes the fields of the embedded struct next to the other fields of the struct. So if an event, or the type of a field, has its `Schema` function only from an embedded field, `Evolve` panics and names the embedded field, and so does `DeriveSchema` for such a type. Give the struct a `Schema` function of its own, or make the embedded type a named field.
+
+*Note that the derived schema describes the fields of an embedded struct by their own types, as it describes all other fields, even if the embedded struct has a `Schema` function. A struct that starts its own `Schema` function from `DeriveSchema` therefore does not get the constraints from the `Schema` function of the embedded struct. Add them there if the struct needs them.*
+
 *Note that a json tag name that `encoding/json` considers invalid also makes `Evolve` panic, since `encoding/json` reads such a name differently depending on the Go version the application declares.*
 
 ### Defining State

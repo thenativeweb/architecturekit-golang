@@ -19,8 +19,10 @@ import (
 // each event of the type against (see RegisterSchemas). The kit derives it
 // from the struct (see DeriveSchema), so that no event type can be forgotten.
 // An event that needs another schema, e.g. one with constraints the struct
-// can not express, returns it from a function Schema() map[string]any, which
-// takes precedence.
+// can not express, returns it from a function Schema() map[string]any of its
+// own, which takes precedence. One that the event has only from an embedded
+// field describes the embedded type alone, so Evolve refuses it (see
+// DeriveSchema).
 type Event interface {
 	EventType() string
 }
