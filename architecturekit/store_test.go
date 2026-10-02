@@ -175,6 +175,51 @@ func TestExecute(t *testing.T) {
 		assert.ErrorContains(t, err, "io.thenativeweb.test.unexpected", "error should name the event type")
 	})
 
+	t.Run("refuses an event its state has no rule for and writes nothing", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+
+		_, err := architecturekit.Execute(context.Background(), store,
+			emittingDecider(counterState(), annotated{Note: "no rule"}), increment{subject: subject})
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "an event without a rule is permanent")
+		assert.ErrorContains(t, err, `event of type "io.thenativeweb.test.annotated" to "`+subject+`"`,
+			"error should name the event type and the subject")
+		assert.ErrorContains(t, err, "could not read the subject any more", "error should say why")
+		assert.Empty(t, eventTypesIn(t, subject), "nothing may have been written")
+
+		// The subject is still readable, so the next command succeeds.
+		_, err = architecturekit.Execute(context.Background(), store, counterDecider(),
+			increment{subject: subject, By: 2})
+		require.NoError(t, err)
+		assert.Equal(t, 2, totalIn(t, store, subject))
+	})
+
+	t.Run("writes none of the events if one has no rule", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+
+		_, err := architecturekit.Execute(context.Background(), store,
+			emittingDecider(counterState(), incremented{By: 1}, annotated{Note: "no rule"}),
+			increment{subject: subject})
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, `"io.thenativeweb.test.annotated"`, "error should name the event type")
+		assert.Empty(t, eventTypesIn(t, subject), "not even the event with a rule may have been written")
+	})
+
+	t.Run("writes an event its state ignores", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+
+		written, err := architecturekit.Execute(context.Background(), store,
+			emittingDecider(resetIgnoringState(), incremented{By: 3}, reset{}), increment{subject: subject})
+		require.NoError(t, err)
+
+		require.Len(t, written, 2)
+		assert.Equal(t, []string{(incremented{}).EventType(), (reset{}).EventType()}, eventTypesIn(t, subject))
+	})
+
 	t.Run("reports an unreachable database", func(t *testing.T) {
 		brokenStore := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
 
@@ -269,6 +314,35 @@ func TestExecute(t *testing.T) {
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a failing upcaster is permanent")
 		assert.ErrorContains(t, err, "cannot be migrated")
 	})
+}
+
+// emittingDecider returns exactly the given events, whatever the command and
+// the state, on the given state.
+func emittingDecider(
+	state *architecturekit.State[counter],
+	events ...architecturekit.Event,
+) architecturekit.Decider[increment, counter] {
+	return architecturekit.Decider[increment, counter]{
+		State: state,
+		Decide: func(context.Context, increment, counter) ([]architecturekit.Event, error) {
+			return events, nil
+		},
+	}
+}
+
+// eventTypesIn reads the types of the events in a subject straight from the
+// database, bypassing the framework's abstractions.
+func eventTypesIn(t *testing.T, subject string) []string {
+	t.Helper()
+
+	var eventTypes []string
+	for event, err := range rawClient(t).ReadEvents(context.Background(), subject,
+		eventsourcingdb.ReadEventsOptions{Recursive: false}) {
+		require.NoError(t, err, "failed to read %q", subject)
+		eventTypes = append(eventTypes, event.Type)
+	}
+
+	return eventTypes
 }
 
 func TestConflict(t *testing.T) {

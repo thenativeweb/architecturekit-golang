@@ -531,6 +531,13 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // OnStateRead is filled in with the last event Execute has read, so that the
 // events are only written if the state they were decided on still holds.
 //
+// Every event the decider returns needs a rule on the state of the decider,
+// an Evolve rule or Ignore, since Execute writes it to the subject that the
+// same state reads for the next command. If one of them has none, Execute
+// writes none of them and fails with an error of the category ErrPermanent
+// that names the event type, rather than leave a subject the state can not
+// read any more.
+//
 // If the context ends before the events are written, Execute writes nothing
 // and fails with the context's error, also if it ends while the decider
 // decides. Once the write has begun, it is finished, since the client writes
@@ -580,6 +587,12 @@ func executeOnce[TCommand Command, TState any](
 	}
 	if len(events) == 0 {
 		return nil, nil
+	}
+
+	// An event the state has no rule for would leave a subject the state can
+	// not read any more, so then none of the events is written.
+	if err := decider.State.checkRules(subject, events); err != nil {
+		return nil, err
 	}
 
 	// The client writes without a context, so a context that has ended by now,
