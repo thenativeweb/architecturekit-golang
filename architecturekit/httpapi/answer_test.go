@@ -120,11 +120,11 @@ func TestRouteAnswers(t *testing.T) {
 
 	t.Run("with the fields of Adding next to the revision", func(t *testing.T) {
 		mux := routed(httpapi.NewAPI(writingStore(t), userFrom),
-			httpapi.Adding(func(handled httpapi.Handled[note]) any {
+			httpapi.Adding(func(handled httpapi.Handled[note]) (any, error) {
 				return struct {
 					ID    string `json:"id"`
 					Count int64  `json:"count"`
-				}{handled.Command.ID, 9_007_199_254_740_993}
+				}{handled.Command.ID, 9_007_199_254_740_993}, nil
 			}))
 
 		response := postNote(t, mux, `{"id":"1","text":"hello"}`)
@@ -141,9 +141,9 @@ func TestRouteAnswers(t *testing.T) {
 	t.Run("without asking Adding after a failure", func(t *testing.T) {
 		isAsked := false
 		mux := routed(httpapi.NewAPI(deadStore(t), userFrom),
-			httpapi.Adding(func(httpapi.Handled[note]) any {
+			httpapi.Adding(func(httpapi.Handled[note]) (any, error) {
 				isAsked = true
-				return struct{}{}
+				return struct{}{}, nil
 			}))
 
 		response := postNote(t, mux, `{"id":"1","text":"hello"}`)
@@ -167,7 +167,7 @@ func TestRouteAnswers(t *testing.T) {
 		t.Run("with 500 and a log entry for "+test.name, func(t *testing.T) {
 			var logs bytes.Buffer
 			mux := routed(httpapi.NewAPI(writingStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))),
-				httpapi.Adding(func(httpapi.Handled[note]) any { return test.fields }))
+				httpapi.Adding(func(httpapi.Handled[note]) (any, error) { return test.fields, nil }))
 
 			response := postNote(t, mux, `{"id":"1","text":"hello"}`)
 
@@ -176,6 +176,41 @@ func TestRouteAnswers(t *testing.T) {
 			assert.Contains(t, logs.String(), test.logged)
 		})
 	}
+
+	t.Run("as a success when Adding fails after the command has succeeded", func(t *testing.T) {
+		var logs bytes.Buffer
+		mux := routed(httpapi.NewAPI(writingStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))),
+			httpapi.Adding(func(handled httpapi.Handled[note]) (any, error) {
+				return struct {
+					ID string `json:"id"`
+				}{handled.Command.ID}, errors.New("the files are gone")
+			}))
+
+		response := postNote(t, mux, `{"id":"1","text":"hello"}`)
+
+		// The events are written, so the caller needs the revision, and must
+		// not send the command again.
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.JSONEq(t, `{"revision": "0", "id": "1"}`, response.Body.String(), "the fields returned along with the error are kept")
+		assert.Contains(t, logs.String(), "httpapi: incomplete answer")
+		assert.Contains(t, logs.String(), `route="POST /note"`)
+		assert.Contains(t, logs.String(), "the files are gone")
+		assert.NotContains(t, logs.String(), "internal failure")
+	})
+
+	t.Run("with the revision alone when Adding fails without fields", func(t *testing.T) {
+		var logs bytes.Buffer
+		mux := routed(httpapi.NewAPI(writingStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))),
+			httpapi.Adding(func(httpapi.Handled[note]) (any, error) {
+				return nil, errors.New("nothing to add")
+			}))
+
+		response := postNote(t, mux, `{"id":"1","text":"hello"}`)
+
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.JSONEq(t, `{"revision": "0"}`, response.Body.String())
+		assert.Contains(t, logs.String(), "nothing to add")
+	})
 
 	t.Run("explains a failure the caller can fix, as before", func(t *testing.T) {
 		mux := routed(httpapi.NewAPI(writingStore(t), userFrom))
@@ -196,7 +231,7 @@ func TestAdding(t *testing.T) {
 	})
 
 	t.Run("panics if given twice", func(t *testing.T) {
-		fields := func(httpapi.Handled[note]) any { return struct{}{} }
+		fields := func(httpapi.Handled[note]) (any, error) { return struct{}{}, nil }
 
 		assert.PanicsWithValue(t, "architecturekit/httpapi: Adding is given twice", func() {
 			routed(httpapi.NewAPI(deadStore(t), userFrom), httpapi.Adding(fields), httpapi.Adding(fields))
@@ -254,7 +289,7 @@ func TestWithLogger(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.QueryRevisioned(api, mux, "GET /notes", noteView(), toListNotes, failingNotes, time.Second)
+		httpapi.Query(api, mux, "GET /notes", toListNotes, failingNotes, httpapi.Revisioned(noteView(), time.Second))
 
 		response := ask(t, mux, "/notes", "golo")
 
@@ -266,7 +301,7 @@ func TestWithLogger(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.QueryVarying(api, mux, "GET /notes", brokenView{}, toListNotes, answerListNotes, time.Second, nil)
+		httpapi.Query(api, mux, "GET /notes", toListNotes, answerListNotes, httpapi.Revisioned(brokenView{}, time.Second))
 
 		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
 		request.Header.Set("X-User", "golo")
@@ -325,43 +360,13 @@ func (r publicNoteRequest) ToCommand(httpapi.NoUser) (note, error) {
 	return note(r), nil
 }
 
-func TestRespondResultAt(t *testing.T) {
-	t.Run("writes the result and the revision it shows", func(t *testing.T) {
-		var logs bytes.Buffer
-		request, api := inAHandler(&logs)
-		recorder := httptest.NewRecorder()
-
-		httpapi.RespondResultAt(recorder, request, api, "7", []int{1, 2}, nil, nil)
-
-		assert.Equal(t, http.StatusOK, recorder.Code)
-		assert.Equal(t, "7", recorder.Header().Get(httpapi.HeaderRevision))
-		assert.NotEmpty(t, recorder.Header().Get("ETag"))
-		assert.JSONEq(t, `[1, 2]`, recorder.Body.String())
-	})
-
-	t.Run("logs an internal failure once, through the logger of the API, with the route", func(t *testing.T) {
-		var logs bytes.Buffer
-		request, api := inAHandler(&logs)
-		recorder := httptest.NewRecorder()
-
-		httpapi.RespondResultAt(recorder, request, api, "7", []int{}, errors.New("the index is gone"), nil)
-
-		assert.Equal(t, http.StatusInternalServerError, recorder.Code)
-		assert.Empty(t, recorder.Header().Get(httpapi.HeaderRevision), "a failure shows no revision")
-		assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
-		assert.Contains(t, logs.String(), `route="GET /notes"`)
-		assert.Contains(t, logs.String(), "the index is gone")
-	})
-}
-
 func TestAnsweringWithoutAnAPI(t *testing.T) {
 	var noAPI *httpapi.API[user]
 	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
 
 	for name, answer := range map[string]func(){
-		"Respond":         func() { httpapi.Respond(httptest.NewRecorder(), request, noAPI, nil, nil) },
-		"RespondResult":   func() { httpapi.RespondResult(httptest.NewRecorder(), request, noAPI, []int{}, nil) },
-		"RespondResultAt": func() { httpapi.RespondResultAt(httptest.NewRecorder(), request, noAPI, "7", []int{}, nil, nil) },
+		"Respond":       func() { httpapi.Respond(httptest.NewRecorder(), request, noAPI, nil, nil) },
+		"RespondResult": func() { httpapi.RespondResult(httptest.NewRecorder(), request, noAPI, []int{}, nil) },
 	} {
 		t.Run(name+" panics, also on success", func(t *testing.T) {
 			assert.PanicsWithValue(t, "architecturekit/httpapi: answering needs the API, not nil", answer)
