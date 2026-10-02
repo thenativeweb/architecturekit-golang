@@ -194,6 +194,10 @@ func Query[TUser any, TQuery any, TResult any](
 // with the route of the request (see WithLogger), and the error itself
 // otherwise. A result that can not be encoded, such as one that holds NaN,
 // is answered with 500 as well.
+//
+// As with Respond, an error without a status of its own is answered with 500,
+// so wrap a mistake in the request that a handler of your own has found with
+// ErrMalformed, to answer it with 400.
 func RespondResult[TUser any, TResult any](
 	w http.ResponseWriter,
 	r *http.Request,

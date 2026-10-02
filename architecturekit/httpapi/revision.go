@@ -43,10 +43,12 @@ const DefaultWait = 5 * time.Second
 //
 // It returns nil when the view reached the revision and when the request asked
 // for none. Running out of time is not an error either: the caller answers
-// with what the view has. Only a revision that cannot be read as one is
-// refused, because that is a mistake in the request rather than a slow
-// projection. The error is ErrMalformed, and wraps
-// architecturekit.ErrNotARevision.
+// with what the view has. Neither is the end of the context of the request,
+// for example because the caller went away: Await stops waiting then, and
+// returns nil as well. Only a revision that cannot be read as one is refused,
+// because that is a mistake in the request rather than a slow projection. The
+// error is ErrMalformed, and wraps architecturekit.ErrNotARevision. Any other
+// error of the view is returned as it is.
 func Await(
 	r *http.Request,
 	view architecturekit.Revisioned,

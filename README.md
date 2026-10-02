@@ -206,6 +206,31 @@ A `Schema` function describes the type that declares it. Go also promotes it to 
 
 *Note that a json tag name that `encoding/json` considers invalid also makes `Evolve` panic, since `encoding/json` reads such a name differently depending on the Go version the application declares.*
 
+#### Keeping Schemas in Files
+
+An event's own schema does not have to be written in Go. To keep it in a JSON file instead, embed the file with the `embed` package, and decode it in the `Schema` function of the event:
+
+```go
+import (
+  _ "embed"
+  "encoding/json"
+)
+
+//go:embed schemas/book-acquired.json
+var bookAcquiredSchema []byte
+
+func (BookAcquired) Schema() map[string]any {
+  var schema map[string]any
+  if err := json.Unmarshal(bookAcquiredSchema, &schema); err != nil {
+    panic(err)
+  }
+
+  return schema
+}
+```
+
+The `Evolve` function calls `Schema` when the state is built, so a file that does not contain valid JSON stops the application on start, before it writes anything.
+
 ### Defining State
 
 The state holds what a command needs to decide on. Define it as a struct, call the `NewState` function with its initial value, and call the `Evolve` function for every event type that changes it:
@@ -375,6 +400,8 @@ Every command declares at least one precondition, so that writing without any ch
 
 Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`.
 
+To find out what kind a precondition is, call its `IsOnStateRead` or `IsUnconditional` function. Its `Database` function returns the precondition of the client SDK that `Require` made it from, or `false` if it was not made with `Require`.
+
 #### Guarding Against Concurrent Changes
 
 If a command may only write events in case nothing has been written to its subject since `Execute` read the state, use the `OnStateRead` function. This fits most commands, since the decider decides on exactly that state:
@@ -396,6 +423,8 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", 
 ```
 
 `Execute` then reads the state anew, and the decider decides on it, up to four more times. Once the retries are used up, the command fails with `ErrConflict`, as without the option.
+
+*Note that a negative number of retries makes `WithConflictRetries` panic.*
 
 *Note that this only applies to commands whose preconditions include `OnStateRead`. A command that checks only a revision the caller hands over is never decided again, since the caller has to learn about the conflict, and deciding again would fail the same way (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). A command that checks both is decided again, since the database does not say which precondition did not hold. If the revision of the caller is outdated, every attempt fails the same way, until the retries are used up. On the same subject, one of the two is enough: if the revision of the caller holds, so does `OnStateRead`.*
 
@@ -419,6 +448,8 @@ func (c BorrowBook) Preconditions() []architecturekit.Precondition {
 ```
 
 *Note that the caller has to provide the event ID. A view can keep it for that purpose, as long as its items follow every event of their subject (see [Defining Views](#defining-views)).*
+
+*Note that the database refuses an empty event ID, or one that is not an event ID at all, as a malformed request, so `Execute` fails with an error of the category `ErrPermanent`. Since the event ID comes from the caller, check it before it becomes part of the command (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
 #### Preventing Duplicates
 
@@ -465,7 +496,7 @@ func (c AcquireBook) Preconditions() []architecturekit.Precondition {
 
 #### Writing Unconditionally
 
-If a command may write its events whatever has been written to its subject in the meantime, for example because it only records a comment that does not depend on the state, use the `Unconditionally` function:
+If a command may write its events whatever has been written to its subject in the meantime, for example `CommentOnBook`, which only records a comment that does not depend on the state, use the `Unconditionally` function:
 
 ```go
 func (c CommentOnBook) Preconditions() []architecturekit.Precondition {
@@ -644,7 +675,7 @@ To know when an event was written, use the time that the database records for ev
 
 ### Writing to Several Subjects
 
-A command acts on a single subject, since it is a decision on the state of that subject. Some events are no such decision, for example a summary derived from many subjects, which has to be written together with a note on each of them, either all or none. To write events to several subjects at once, call the `Write` function with a context, the store, the events together with their subjects, and the preconditions:
+A command acts on a single subject, since it is a decision on the state of that subject. Some events are no such decision, for example a summary derived from many subjects, which has to be written together with a note on each of them, either all or none, such as an `InventoryTaken` event that counts the books, with a `BookCounted` event for each of them. To write events to several subjects at once, call the `Write` function with a context, the store, the events together with their subjects, and the preconditions:
 
 ```go
 written, err := architecturekit.Write(context.TODO(), store, []architecturekit.EventOn{
@@ -764,6 +795,8 @@ var libraryUpcasters = architecturekit.NewUpcasters().
 
 The function has the type `Upcaster`. Upcasters may return more than one event, for example to split an event that recorded two facts into one event per fact. Derive each of them from the stored event, as above, so that they all keep its ID. A projection then applies every one of them to a view, also if several of them change the same item (see [Defining Views](#defining-views)). If a returned event has an upcaster of its own, that one runs as well, so every version needs only a single step to the next one. The translated events are never written back.
 
+A chain ends after 16 steps: if the event still has an upcaster then, reading fails with an error of the category `ErrPermanent`, which catches an upcaster that keeps its event type and would otherwise run forever. An error that an upcaster returns belongs to `ErrPermanent` as well.
+
 To use the upcasters, call the `UpcastWith` function on the state and hand over the set. The upcasters then run before the `Evolve` rules:
 
 ```go
@@ -771,6 +804,8 @@ bookState.UpcastWith(libraryUpcasters)
 ```
 
 Upcasting belongs to the event types, not to a single state, so register the upcasters once and hand the same set to every state, and to every projection that reads these events (see [Defining Projections](#defining-projections)). That way, the write side and the read side see the same events.
+
+The kit decodes the data of an event with `encoding/json`, which matches the names in the data to the fields of the struct regardless of case, and ignores names that match no field. So data that names a field `BorrowedBy` fills the field that `BookBorrowed` tags as `borrowedBy`, without an upcaster. A name that differs by more than case, such as `lentTo`, matches no field, and the field stays empty, so a field whose name changes by more than case still needs an upcaster, as above.
 
 *Note that calling `Upcast` twice for the same event type panics, as does calling `UpcastWith` twice, or with `nil`.*
 
@@ -828,7 +863,7 @@ The cache tells states apart by their type, not by the object. A state that is b
 
 *Note that the cache can not compare the `Evolve` functions themselves. Two states of the same type that are built alike, but compute something else, are not told apart.*
 
-A cached state is handed to several commands, possibly at the same time. That is safe for a state that consists of values only, such as the `Book` state above. A state that holds slices, maps or pointers is only cached if it has a `Clone` function, which returns a copy that shares no data with the original:
+A cached state is handed to several commands, possibly at the same time. That is safe for a state that consists of values only, such as the `Book` state above. A state that holds slices, maps or pointers is only cached if it has a `Clone` function, which returns a copy that shares no data with the original, as for a shelf that collects the IDs of the books that `BookShelved` events put on it:
 
 ```go
 type Shelf struct {
@@ -947,6 +982,8 @@ if !ok {
 }
 ```
 
+*Note that a key of another length than `ed25519.PublicKeySize` makes `WithSignatureVerification` panic.*
+
 The store checks every event it reads, for `Execute`, `Load`, and `Read` as well as for every kind of projection, and it does so before any upcaster sees the event. The events that `Execute` has just written are not checked, since they are not read. If an event fails its verification, reading fails with an error of the category `ErrUnverified`, which is a special case of `ErrPermanent` (see [Handling Errors](#handling-errors)). A projection stops rather than skipping the event.
 
 The two checks prove different things:
@@ -956,7 +993,7 @@ The two checks prove different things:
 
 The hashes are enough wherever reading is under your control. Check the signatures as well where events cross a trust boundary, for example when reading from a database that another organization runs. For details, see [Verifying Event Signatures](https://www.eventfoundation.io/docs/eventsourcingdb/verifying-event-signatures).
 
-*Note that checking a hash takes about a microsecond per event, so there is rarely a reason to turn it off. If there is one, hand over the `WithoutHashVerification` option, which can not be combined with `WithSignatureVerification`. Checking a signature, on the other hand, takes some tens of microseconds per event, which adds up when a projection catches up on millions of events.*
+*Note that checking a hash takes about a microsecond per event, so there is rarely a reason to turn it off. If there is one, hand over the `WithoutHashVerification` option. It can not be combined with `WithSignatureVerification`, since checking a signature includes checking the hash, so `NewStore` panics if it gets both. Checking a signature, on the other hand, takes some tens of microseconds per event, which adds up when a projection catches up on millions of events.*
 
 *Note that the database signs with the key it has at the moment, so after the signing key is rotated, the store needs the new verification key.*
 
@@ -1047,7 +1084,9 @@ Every item has a revision of its own, which is the ID of the last event that cha
 
 The revision of an item fits such a precondition only if the item stands for exactly one subject, and the projection applies every event type of that subject to the item. The precondition checks the last event of the subject, so as soon as an event lands in the subject that the view does not apply to the item, the two drift apart, and every command with the revision of the item fails with an error of the category `ErrConflict`, until an event changes the item again. Apply an event type that does not change the item, such as one the state ignores, with a change that does nothing (see [Defining Projections](#defining-projections)). For an item that gathers several subjects, such as all books a reader has borrowed, there is no single subject its revision could stand for, so use `OnStateRead` for the commands instead (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
 
-Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing. All functions take a context and return an error, as a view in a database would need. So a view in a database can offer the same functions later on, without the projections that write to it having to change.
+Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing, as long as the item is still there. The view forgets the revision of an item it removes, so an event that adds the item, applied again after a later event has removed it, adds it again. A projection that is rebuilt applies every event once, in order, so with a view in memory, that does not happen.
+
+All functions take a context and return an error, as a view in a database would need. So a view in a database can offer functions of the same shape, which the handlers of a projection call the same way. The kit has no interface for the functions that change a view, though: a projection takes its view by its type, such as `*InMemoryView`, so moving it to a view in a database changes that type.
 
 If an upcaster splits a stored event into several events, they all carry the ID of the stored event (see [Versioning Events](#versioning-events)). A projection created with `NewProjection` hands each of them to its handler with a context that holds its position among them, and the view reads it from the context it gets. For the same ID, the view counts a later event as newer than an earlier one, so every one of them is applied, in order, also if several of them change the same item. Applying the stored event again still changes nothing, and the revision of the item stays the ID of the stored event. That is why a handler always hands the context it gets on to the view, rather than one of its own, such as `context.Background()`.
 
@@ -1333,6 +1372,8 @@ logProjection := architecturekit.ProjectionFunc(func(ctx context.Context, event 
 
 To run a projection, call the `StartProjection` function with a context, the store, the subjects to read, and the projection. Say which subjects with the `SubjectTree` function, which stands for the given subject together with every subject below it, or with the `ExactSubject` function, which stands for the given subject alone. A projection usually reads a tree, such as every book below `/books`. There is no default, so that every projection says which one it means, since the client SDK reads a single subject unless told otherwise.
 
+*Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection` and the other functions that run a projection panic.*
+
 The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that:
 
 ```go
@@ -1356,7 +1397,11 @@ case <-run.Done():
 
 The options after the projection are optional. `Named` gives the projection a name, by which the observer of reconnects and the health checks report it (see [Checking Health over HTTP](#checking-health-over-http)). The `Name` function of the run returns it.
 
+*Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic.*
+
 `CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did, since canceling the context is how a projection is stopped. If `Apply` returns an error that trying again will not fix, the run ends, and `Err` returns it.
+
+*Note that canceling the context stops the projection, so `defer cancel()` stops it as soon as the surrounding function returns. That is too early for a function that only sets up the application (see [Putting It Together](#putting-it-together)).*
 
 To wait until the run ends, as a process does that runs nothing else, wait for `Done`:
 
@@ -1510,7 +1555,8 @@ Instead of implementing `Apply` on the `Tx` yourself, you can use handlers creat
 func (p *TransactionalBookTableProjection) Begin(ctx context.Context) (architecturekit.Tx, error) {
   tx, err := p.db.BeginTx(ctx, nil)
   if err != nil {
-    return nil, err
+    // The database can not be reached, which may pass.
+    return nil, fmt.Errorf("%w: beginning a transaction: %v", architecturekit.ErrTransient, err)
   }
 
   return &bookTableTx{
@@ -1553,6 +1599,10 @@ run := architecturekit.StartTransactionalProjection(ctx, store, architecturekit.
 ```
 
 *Note that `StartProjection`, `CatchUpProjection`, and `Tracking` panic for a projection that implements `Transactional` in addition to `Apply`, since calling `Apply` would bypass the transactions.*
+
+The place where a view keeps its data can fail as well, and such a failure counts like an error of `Apply`, whether it comes from `Checkpoint`, `SaveCheckpoint`, `Begin`, `Commit`, or the `Apply` function of a `Tx`. An error that does not belong to `ErrTransient` ends the run, so `Liveness` answers `503`, and the orchestrator restarts the application (see [Checking Health over HTTP](#checking-health-over-http)). That fits a mistake, such as a statement that the database refuses, but not a failure that may pass, such as a lost connection or a deadlock. Report such a failure as an error of the category `ErrTransient`, as `Begin` does above. The run then waits and tries again from where it stopped, with the same growing delay as when reading from EventSourcingDB fails (see [Running Projections](#running-projections)).
+
+*Note that which failures may pass depends on the database and its driver, so mark only those. A failure that is marked as transient but never passes keeps the run trying forever, while `Liveness` keeps answering `200`.*
 
 ### Batching Events
 
@@ -1610,7 +1660,7 @@ func (m *LoanMailer) SaveCheckpoint(ctx context.Context, eventID string) error {
 }
 ```
 
-Here, `Mailer` and `CheckpointStore` stand for whatever your application uses to send mails and to keep a value. Start the projection as any other (see [Running Projections](#running-projections)):
+Here, `Mailer` and `CheckpointStore` stand for whatever your application uses to send mails and to keep a value. `Checkpoint` and `SaveCheckpoint` hand on the errors of the checkpoint store as they are, so it reports a failure that may pass, such as a lost connection, as an error of the category `ErrTransient` itself. Otherwise, such a failure ends the run (see [Resuming Projections](#resuming-projections)). Start the projection as any other (see [Running Projections](#running-projections)):
 
 ```go
 run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("/books"), NewLoanMailer(mailer, checkpoints),
@@ -1624,6 +1674,36 @@ Since publishing rides on a projection, it behaves like one:
 - **An event may be published twice.** The checkpoint is saved after an event has been applied, so an event published right before the application stopped is published again after the restart. Hand over the ID of the event, so that the receiver can recognize an event it got before.
 - **A transient failure is tried again.** For an error of the category `ErrTransient`, the run tries the failed event again, with a growing delay. Any other error ends the run.
 - **Events arrive in order,** one at a time, as they were stored.
+
+On its first start, the checkpoint is empty, so the projection reads every event that has ever been stored, and publishes all of them, for example by sending a mail for every book that has ever been borrowed. To publish only the events from now on, save the ID of the latest event as the checkpoint before the first start. To find it, read the subjects of the projection in reverse order, and stop after the first event:
+
+```go
+checkpoint, err := checkpoints.Load(ctx, "loan-mailer")
+if err != nil {
+  // ...
+}
+
+if checkpoint == "" {
+  for event, err := range architecturekit.Read(ctx, store, "/books", eventsourcingdb.ReadEventsOptions{
+    Recursive: true,
+    Order:     eventsourcingdb.OrderAntichronological(),
+  }) {
+    if err != nil {
+      // ...
+    }
+
+    if err := checkpoints.Save(ctx, "loan-mailer", event.ID); err != nil {
+      // ...
+    }
+
+    break
+  }
+}
+```
+
+If there are no events yet, the checkpoint stays empty, since there is nothing to skip.
+
+A transient failure is tried again without a limit. So if the mail server stays down, the run keeps trying, and since it does not end, `Liveness` keeps answering `200`, and so does `Readiness` once the run has caught up. To notice it, check the `Status` of the run, whose `Phase` stays `PhaseReconnecting`, with `Since` telling since when and `Err` telling why, or log every attempt with the observer of reconnects, whose `Attempt` keeps growing (see [Running Projections](#running-projections)).
 
 *Note that the mode of a projection depends on the functions it implements. To make sure that a publisher is resumable, check its mode in a test (see [Testing Projections](#testing-projections)).*
 
@@ -1767,6 +1847,8 @@ A view lags behind the events that have been written, by however long its projec
 
 The ID of the last event a view has seen is its revision. Since the database assigns event IDs in ascending order across all subjects, revisions can be compared.
 
+A view sees only the events of the subjects its projection reads. So wait only for a write to one of those subjects: if the write went to another subject, the view does not reach its revision until a later event lands in one of its own subjects, and waiting for it lasts the full time, with `WaitFor`, with `Await`, and with the `Wait-For-Revision` header alike.
+
 #### Tracking Revisions
 
 To track the revision of a view, wrap the projection with the `Tracking` function and hand over the view. It records every event that reaches the projection, including the ones the projection ignores:
@@ -1866,6 +1948,8 @@ Everything that answers through an API logs every error it does not explain to t
 api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
 ```
 
+*Note that calling `WithLogger` with `nil` panics.*
+
 #### Determining the User
 
 To determine the user in a handler of your own, call the `UserOf` function. If the user cannot be determined, it returns an error that wraps `httpapi.ErrUnauthorized` as well as the error of the function, so that `errors.Is` and `errors.As` find either. If the error of the function has a status code of its own, though, it returns that error as it is (see [Setting Up an HTTP API](#setting-up-an-http-api)):
@@ -1899,6 +1983,12 @@ func toBorrowBook(r *http.Request, request borrowBookRequest, user User) (Borrow
   if _, err := time.Parse(time.DateOnly, request.BorrowedUntil); err != nil {
     return BorrowBook{}, errors.New("borrowedUntil must be a date")
   }
+  if request.ExpectedEventID == "" {
+    return BorrowBook{}, errors.New("expectedEventId is missing")
+  }
+  if _, err := architecturekit.CompareRevisions(request.ExpectedEventID, ""); err != nil {
+    return BorrowBook{}, errors.New("expectedEventId must be an event ID")
+  }
 
   return BorrowBook{
     BookID:          bookID,
@@ -1909,7 +1999,7 @@ func toBorrowBook(r *http.Request, request borrowBookRequest, user User) (Borrow
 }
 ```
 
-The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
+The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake. So is an expected event ID that is empty or not an event ID at all (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). `CompareRevisions` refuses a value that is not an event ID with `ErrNotARevision`, but takes an empty one for the revision of a view that has seen nothing, which is why the function checks for an empty one first.
 
 Then call the `Route` function with the API, the mux, a pattern, the function that returns the command, and the decider:
 
@@ -1953,7 +2043,7 @@ If handling a request panics, for example because `Build` received an ID that wa
 
 *Note that a panic with `http.ErrAbortHandler` is passed on, since `net/http` expects it to abort the response.*
 
-To answer this way in a handler of your own, call the `Respond` function with the response writer, the request, the API, the written events, and the error. Like the route, it logs through the logger of the API, with the route of the request.
+To answer this way in a handler of your own, call the `Respond` function with the response writer, the request, the API, the written events, and the error. Like the route, it logs through the logger of the API, with the route of the request. Unlike the route, it does not know where an error comes from, so an error without a status code of its own is answered with `500 Internal Server Error`, also if the handler has found a mistake in the request itself. Wrap such an error with `httpapi.ErrMalformed`, for example with `fmt.Errorf("%w: %w", httpapi.ErrMalformed, err)`, to answer it with `400 Bad Request`.
 
 *Note that the function has the type `httpapi.ToCommand`. The request type only describes the body, so it may come from another package, for example one that the application shares with its clients.*
 
@@ -1998,6 +2088,8 @@ The function is only called if the command has succeeded. If it returns an error
 The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object, so they must not hold `NaN`, for example, which JSON has no number for. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
 
 *Note that the written events are available in `Handled` as well. Add them only deliberately: they are the inner model of the application, every caller that reads them depends on their shape, and they may contain data that is not meant for the caller.*
+
+*Note that calling `Adding` with `nil`, or giving it twice, panics.*
 
 #### Answering Commands in Your Own Format
 
@@ -2122,7 +2214,7 @@ httpapi.Query(api, mux, "GET /api/books", toListBooks, answerBooks(listBooks(cat
 
 The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
 
-To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error.
+To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error. As with `Respond`, an error without a status code of its own is answered with `500 Internal Server Error`, so wrap a mistake in the request that the handler finds itself with `httpapi.ErrMalformed` (see [Handling Commands over HTTP](#handling-commands-over-http)).
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 
@@ -2147,11 +2239,27 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
 
 #### Reading Queries from the Body
 
-Some queries need more input than fits into the query string, for example a list of books to check at once. Send such a query as the body of a `POST` request, and call the `BodyOf` function with the type of the body to read it:
+Some queries need more input than fits into the query string, for example a list of books to check at once. Send such a query as the body of a `POST` request, and call the `BodyOf` function with the type of the body to read it. Here, the answer tells for every book whether it is available:
 
 ```go
 type CheckAvailability struct {
   BookIDs []string `json:"bookIds"`
+}
+
+func checkAvailability(catalog architecturekit.KeyedView[string, BookItem]) func(context.Context, CheckAvailability) (map[string]bool, error) {
+  return func(ctx context.Context, q CheckAvailability) (map[string]bool, error) {
+    isAvailable := make(map[string]bool, len(q.BookIDs))
+    for _, bookID := range q.BookIDs {
+      book, isFound, err := catalog.Get(ctx, bookID)
+      if err != nil {
+        return nil, err
+      }
+
+      isAvailable[bookID] = isFound && !book.IsBorrowed
+    }
+
+    return isAvailable, nil
+  }
 }
 
 toCheckAvailability := func(r *http.Request, user User) (CheckAvailability, error) {
@@ -2161,7 +2269,7 @@ toCheckAvailability := func(r *http.Request, user User) (CheckAvailability, erro
 httpapi.Query(api, mux, "POST /api/check-availability", toCheckAvailability, checkAvailability(catalog))
 ```
 
-The function reads the body by the same rules as for a command (see [Validating Requests](#validating-requests)), and returns the same errors, so the request is answered with `415`, `413`, or `400` as a command would be. It works in a handler of your own as well.
+`BodyOf` reads the body by the same rules as for a command (see [Validating Requests](#validating-requests)), and returns the same errors, so the request is answered with `415`, `413`, or `400` as a command would be. It works in a handler of your own as well.
 
 #### Reporting Missing Items
 
@@ -2261,6 +2369,8 @@ A query that holds a function or a channel can not be written into an `ETag`, an
 
 *Note that the constants `httpapi.HeaderWaitFor` and `httpapi.HeaderRevision` contain the names of the two headers.*
 
+*Note that `Revisioned` panics for a `nil` view or a negative wait, and so does giving it twice.*
+
 #### Depending on More Than the Read Model
 
 If an answer depends on more than the view, for example on the current date, the simplest way is to put that value into the query, as `Today` below. Since the query is part of the `ETag`, the `ETag` changes with it, and `Revisioned` is all it takes:
@@ -2305,9 +2415,13 @@ httpapi.Query(api, mux, "GET /api/books-due-today", toListBooksDueToday, answerB
 )
 ```
 
+Here, `listBooksDueToday` answers like `listOverdueBooks`, but takes the current day from `time.Now` itself, rather than from its query, and `toListBooksDueToday` returns that query.
+
+*Note that `Varying` panics for `nil`, and so does giving it twice, or without `Revisioned`.*
+
 #### Waiting for a Revision in a Handler of Your Own
 
-To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error. It returns an error if the header holds something that is not a revision, which wraps `httpapi.ErrMalformed` as well as `architecturekit.ErrNotARevision`, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
+To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error, and neither is the end of the context of the request, for example because the caller went away: in both cases, `Await` stops waiting and returns `nil`, so the handler answers with what the view holds. It returns an error if the header holds something that is not a revision, which wraps `httpapi.ErrMalformed` as well as `architecturekit.ErrNotARevision`, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
 
 ```go
 mux.HandleFunc("GET /api/books.csv", func(w http.ResponseWriter, r *http.Request) {
@@ -2340,13 +2454,14 @@ mux.Handle("GET /ready", httpapi.Readiness(run))
 mux.Handle("GET /live", httpapi.Liveness(run))
 ```
 
-*Note that a run without a name, or two runs of the same name, make `Readiness` and `Liveness` panic.*
+*Note that a `nil` run, a run without a name, or two runs of the same name, make `Readiness` and `Liveness` panic.*
 
 Both answer with `200 OK` or `503 Service Unavailable`, depending on where the projections stand:
 
 | Projection | `Readiness` | `Liveness` |
 | --- | --- | --- |
 | catches up for the first time | `503` | `200` |
+| can not reach the database at the start | `503` | `200` |
 | is live | `200` | `200` |
 | reconnects after it has caught up | `200` | `200` |
 | has stopped | `503` | `503` |
@@ -2373,6 +2488,93 @@ The body of `Readiness` tells whether the application is ready, and where each p
 The body of `Liveness` has the same shape, but tells whether the application is alive, with `isAlive` instead of `isReady`.
 
 *Note that the body does not tell why a projection reconnects or has stopped, since health checks are usually reachable without signing in, and the reason may name internal addresses. Log it instead, for example by waiting for `Done` and calling `Err`.*
+
+### Putting It Together
+
+So far, the pieces have been shown one at a time. A `main` function wires them together: it creates the store, registers the schemas, starts the projection and waits until it has caught up, serves the routes and the health checks, and shuts down cleanly once it is asked to stop:
+
+```go
+func main() {
+  ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+  defer stop()
+
+  baseURL, err := url.Parse("http://localhost:3000")
+  if err != nil {
+    log.Fatal(err)
+  }
+
+  client, err := eventsourcingdb.NewClient(baseURL, "secret")
+  if err != nil {
+    log.Fatal(err)
+  }
+
+  store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io")
+
+  if err := architecturekit.RegisterSchemas(ctx, store, bookState.Schemas()); err != nil {
+    log.Fatal(err)
+  }
+
+  // The projection stops only after the server, since the requests that the
+  // server finishes may still wait for the view.
+  projectionCtx, stopProjection := context.WithCancel(context.Background())
+  defer stopProjection()
+
+  catalog := newCatalog()
+  run := architecturekit.StartProjection(projectionCtx, store, architecturekit.SubjectTree("/books"),
+    architecturekit.Tracking(newCatalogProjection(catalog), catalog),
+    architecturekit.Named("catalog"),
+  )
+
+  select {
+  case <-run.CaughtUp():
+  case <-run.Done():
+    log.Fatal(run.Err())
+  case <-time.After(time.Minute):
+    log.Fatal("the catalog has not caught up within a minute")
+  case <-ctx.Done():
+    return
+  }
+
+  api := httpapi.NewAPI(store, userFrom)
+  mux := http.NewServeMux()
+
+  httpapi.Route(api, mux, "POST /api/books/{id}/borrow", toBorrowBook, borrowBook)
+  httpapi.Query(api, mux, "GET /api/books", toListBooks, answerBooks(listBooks(catalog)),
+    httpapi.Revisioned(catalog, httpapi.DefaultWait),
+  )
+  mux.Handle("GET /ready", httpapi.Readiness(run))
+  mux.Handle("GET /live", httpapi.Liveness(run))
+
+  server := &http.Server{Addr: ":8080", Handler: mux}
+  go func() {
+    if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+      log.Fatal(err)
+    }
+  }()
+
+  <-ctx.Done()
+
+  shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+  defer cancel()
+
+  if err := server.Shutdown(shutdownCtx); err != nil {
+    log.Println(err)
+  }
+
+  stopProjection()
+  <-run.Done()
+
+  if err := run.Err(); err != nil {
+    log.Println(err)
+  }
+}
+```
+
+`signal.NotifyContext` ends `ctx` once the process is asked to stop, as an orchestrator does with `SIGTERM`. `Shutdown` then lets the server finish the requests it has begun, which may still wait for the view (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)). That is why the projection runs with a context of its own, which `main` cancels only after the server has stopped. Then it waits for `Done`, and logs the error of the run, which is `nil` unless the run had ended on a failure before.
+
+A database that can not be reached at the start makes `RegisterSchemas` fail right away. The server starts only once the view has caught up, so that no query sees a half-built view. If that takes longer than a minute, for example because the database has stopped answering in the meantime, `main` gives up rather than wait without end, so that the orchestrator restarts the application. Choose the limit with room for the history to grow, since a view that never catches up within it keeps the application from ever starting. Until the server starts, the health checks do not answer either, so give the application that long to start, for example with a startup probe in Kubernetes.
+
+Set up this way, everything lives as long as `main` does. If you move the setup of the projection into a function of its own, that function returns long before the application ends, so it must not cancel the context of the projection with `defer cancel()`, which would stop the projection right away. Have it return the `cancel` function along with the run instead, and call it on shutdown, as `main` calls `stopProjection`.
 
 ### Testing Deciders
 
@@ -2630,7 +2832,7 @@ func TestAcquireBook(t *testing.T) {
   store := dbtest.Store(t, "https://library.eventsourcingdb.io", bookState.Schemas())
 
   _, err := architecturekit.Execute(context.TODO(), store, acquireBook, AcquireBook{
-    BookID: uuid.NewString(),
+    BookID: rand.Text(),
     // ...
   })
   if err != nil {
@@ -2647,7 +2849,7 @@ func TestMain(m *testing.M) {
 }
 ```
 
-If `TestMain` has more to do once the tests have run, such as closing a browser, run the tests yourself, and call the `StopSharedDatabase` function afterwards. It does nothing if no test has started the database:
+If `TestMain` has more to do once the tests have run, such as closing a browser, run the tests yourself, and call the `StopSharedDatabase` function afterwards. It does nothing if no test has started the database. Here, `closeBrowser` stands for whatever else is left to do:
 
 ```go
 func TestMain(m *testing.M) {
@@ -2667,7 +2869,7 @@ func TestMain(m *testing.M) {
 
 The tests share the events as well, so a test writes to subjects of its own, for example with a random ID in them, and reads only from those. A test that reads more than that, such as a projection from `/`, needs a database of its own. Call the `IsolatedStore` function to start one for the test alone, which is stopped once the test is over. It takes the same arguments as `Store`, and a few seconds to start, so use it only where the shared one would not do.
 
-For a test that connects by itself, such as one that starts a whole server, call the `SharedDatabase` or the `IsolatedDatabase` function. Each returns a `*Database`, whose `URL` and `APIToken` fields are what a client needs. Its `Client` function returns a client, for example to write an event that no command would, and its `Store` function returns a store, as above:
+For a test that connects by itself, such as one that starts a whole server, call the `SharedDatabase` or the `IsolatedDatabase` function. Each returns a `*Database`, whose `URL` and `APIToken` fields are what a client needs. Its `Client` function returns a client, for example to write an event that no command would, and its `Store` function returns a store, as above. Here, `server.Config` stands for the configuration of your application:
 
 ```go
 database := dbtest.SharedDatabase(t)
@@ -2679,5 +2881,7 @@ config := server.Config{
 ```
 
 *Note that with `-short` every test that asks for a database is skipped, so that the other tests run without Docker.*
+
+*Note that the database runs the image `thenativeweb/eventsourcingdb:latest`, as the client SDK starts it, rather than a version of your choice. Docker pulls the image only if it is missing, so which release that is depends on what the machine has pulled before. The database runs without a signing key, so its events carry no signature, and a store with `WithSignatureVerification` fails to read them with an error of the category `ErrUnverified`. Signature verification can therefore not be tested with it (see [Verifying Events](#verifying-events)).*
 
 *Note that `dbtest` is a package of its own because it starts the database with Testcontainers, which brings along the Docker client. A package whose tests only import `architecturekittest`, for example to test deciders and projections, builds without either.*

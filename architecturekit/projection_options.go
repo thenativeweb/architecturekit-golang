@@ -10,6 +10,9 @@ import (
 // below it belong to it. Create it with SubjectTree or ExactSubject, so that
 // every projection says which of the two it means, rather than relying on a
 // default that differs from the one of the client SDK.
+//
+// The zero value names no subject, which is a programming error, so
+// StartProjection and the other functions that run a projection panic for it.
 type Subjects struct {
 	subject   string
 	recursive bool

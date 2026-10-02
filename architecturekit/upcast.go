@@ -37,7 +37,10 @@ func NewUpcasters() *Upcasters {
 //
 // Upcasters are chained: if the result carries a type that has an upcaster of
 // its own, that one runs too, so only one step per version is needed instead
-// of one per pair of versions.
+// of one per pair of versions. A chain ends after 16 steps: an event that still
+// has an upcaster then makes reading fail with an error of the category
+// ErrPermanent, which catches an upcaster that keeps its event type and would
+// otherwise run forever. So does an error that an upcaster returns.
 //
 // Registering the same event type twice is a programming error, so it panics
 // while the set is being built rather than silently overwriting an upcaster.
