@@ -408,7 +408,7 @@ func (c BorrowBook) Preconditions() []architecturekit.Precondition {
 }
 ```
 
-*Note that the caller has to provide the event ID. A view can keep it for that purpose (see [Defining Views](#defining-views)).*
+*Note that the caller has to provide the event ID. A view can keep it for that purpose, as long as its items follow every event of their subject (see [Defining Views](#defining-views)).*
 
 #### Preventing Duplicates
 
@@ -1025,6 +1025,8 @@ catalog := newCatalog()
 
 Every item has a revision of its own, which is the ID of the last event that changed it. The `RevisionIn` option makes the view keep it in a field of the item, so that a caller can hand it over to a command that uses the `NewIsSubjectOnEventIDPrecondition` function (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). The view sets the field whenever it changes an item, so you never set it yourself. Without the option, the view keeps the revisions to itself.
 
+The revision of an item fits such a precondition only if the item stands for exactly one subject, and the projection applies every event type of that subject to the item. The precondition checks the last event of the subject, so as soon as an event lands in the subject that the view does not apply to the item, the two drift apart, and every command with the revision of the item fails with an error of the category `ErrConflict`, until an event changes the item again. Apply an event type that does not change the item, such as one the state ignores, with a change that does nothing (see [Defining Projections](#defining-projections)). For an item that gathers several subjects, such as all books a reader has borrowed, there is no single subject its revision could stand for, so use `OnStateRead` for the commands instead (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
+
 Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing. All functions take a context and return an error, which the view in memory hardly needs, but a view in a database would. So a view in a database can offer the same functions later on, without the projections that write to it having to change.
 
 *Note that the view as a whole has a revision as well, which is the last event it has seen at all, rather than the last one that changed a particular item (see [Reading Your Own Writes](#reading-your-own-writes)).*
@@ -1079,6 +1081,8 @@ for item := range items {
 }
 ```
 
+*Note that the items you get share their slices, maps, and pointees with the view, so never change them (see [Sharing Items with Readers](#sharing-items-with-readers)).*
+
 #### Changing and Removing Items
 
 To change the item with a given key, call the `Update` function with a function that changes it. To remove it, call the `Delete` function. Both return an `Outcome`, which tells what they did:
@@ -1126,6 +1130,49 @@ changed, err := catalog.UpdateWhere(ctx, isByClarke, event.ID, func(item *BookIt
 
 removed, err := catalog.DeleteWhere(ctx, isByClarke, event.ID)
 ```
+
+#### Sharing Items with Readers
+
+`Get` and `All` hand out plain copies of the items, which share their slices, maps, and pointees with the view. So an item is shared with every reader who got it, also while a projection changes it. That is why a reader must never change an item it got, and why a change replaces a field that holds a slice, a map, or a pointer, rather than writing into it. Writing into it would change what the readers hold, possibly while they are reading it, and writing into a map while somebody reads it may crash the process. Replacing the field with one built anew is safe:
+
+```go
+type ReaderItem struct {
+  ID       string            `json:"id"`
+  BookIDs  []string          `json:"bookIds"`
+  DueDates map[string]string `json:"dueDates"`
+}
+
+outcome, err := readers.Update(ctx, event.Data.BorrowedBy, event.ID, func(item *ReaderItem) {
+  item.BookIDs = append(slices.Clone(item.BookIDs), bookID)
+})
+```
+
+*Note that `append(item.BookIDs, bookID)` alone does not build the slice anew: if its array has room left, `append` writes into the array that the readers share.*
+
+To have the view take care of that, hand over the `CloneWith` option with a function that returns a copy of an item that shares no data with the original, like the `Clone` function of a state (see [Caching States](#caching-states)). The view then clones the item before every change, and hands the clone to the change, which may write into it freely:
+
+```go
+readers := architecturekit.NewInMemoryView(
+  func(item ReaderItem) string { return item.ID },
+  architecturekit.CloneWith(func(item ReaderItem) ReaderItem {
+    item.BookIDs = slices.Clone(item.BookIDs)
+    item.DueDates = maps.Clone(item.DueDates)
+    return item
+  }),
+)
+
+outcome, err := readers.Update(ctx, event.Data.BorrowedBy, event.ID, func(item *ReaderItem) {
+  item.DueDates[bookID] = event.Data.BorrowedUntil
+})
+```
+
+The view clones an item whenever it changes an existing one, with `Update`, `Upsert`, `UpdateWhere`, and the `Update` function of an index, but not when it adds one, since nobody has read a new item yet. Readers still never change an item they got, since the view hands out what it holds.
+
+*Note that an index whose value is taken from a slice, a map, or a pointee loses track of an item if a change writes into that data without a clone, since the old item then holds the new value as well (see [Indexing Items](#indexing-items)).*
+
+*Note that a `time.Time` counts as a value, since its location never changes, so an item whose only pointer is the one inside a `time.Time` needs no `CloneWith`.*
+
+*Note that calling `CloneWith` with `nil`, or twice, panics.*
 
 #### Indexing Items
 
@@ -1214,6 +1261,19 @@ func bookIDOf(subject string) string {
 ```
 
 `NewProjection` returns a `*TypedProjection`, which is a `Projection` like any other, so you can run, track, and test it as described below. Events without a handler are skipped, since a projection usually reads more events than it depends on. If the data of an event can not be decoded, the projection returns an error of the category `ErrPermanent`. An error returned by a handler is passed on unchanged.
+
+If the view keeps the revisions of its items for a precondition, a skipped event makes the revision of its item fall behind the subject (see [Defining Views](#defining-views)). In that case, give every event type of the subject a handler, also one that does not change the item, such as `BookInspected`, which the state ignores. Its handler calls `Update` with a change that does nothing, which only moves the revision of the item on:
+
+```go
+func newCatalogProjection(catalog *architecturekit.InMemoryView[string, BookItem]) *architecturekit.TypedProjection {
+  return architecturekit.NewProjection().
+    // ...
+    On(func(ctx context.Context, event architecturekit.Envelope[BookInspected]) error {
+      _, err := catalog.Update(ctx, bookIDOf(event.Subject), event.ID, func(*BookItem) {})
+      return err
+    })
+}
+```
 
 To have the projection see the same events as the state, hand over the same set of upcasters with the `UpcastWith` function (see [Versioning Events](#versioning-events)):
 

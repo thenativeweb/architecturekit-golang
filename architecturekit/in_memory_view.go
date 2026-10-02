@@ -19,6 +19,13 @@ import (
 // that, the view has a revision as a whole, which is the last event it has
 // seen at all (see Tracking).
 //
+// An item is shared with every reader who got it, since Get and All hand out
+// plain copies, which share the slices, maps, and pointees of the item with
+// the view. So a reader never changes an item it got, and a change replaces
+// the fields that hold such data rather than writing into them, unless the
+// view clones every item before a change (see CloneWith). A time.Time counts
+// as a value.
+//
 // All operations take a context and return an error, as a view in a database
 // would need to. The view in memory uses neither the context nor, mostly, the
 // error, but so a view in a database can offer the same functions later on,
@@ -31,6 +38,7 @@ type InMemoryView[TKey comparable, TItem any] struct {
 
 	keyOf      func(TItem) TKey
 	revisionIn func(*TItem) *string
+	clone      func(TItem) TItem
 
 	// entries holds the items by key. order keeps the keys in the order in
 	// which they were inserted, and may still hold keys that have been deleted
@@ -66,6 +74,7 @@ type InMemoryViewOption[TItem any] func(*inMemoryViewOptions[TItem])
 
 type inMemoryViewOptions[TItem any] struct {
 	revisionIn func(*TItem) *string
+	clone      func(TItem) TItem
 }
 
 // RevisionIn makes the view keep the revision of every item in a field of the
@@ -73,10 +82,49 @@ type inMemoryViewOptions[TItem any] struct {
 // it over to a command later. The function returns the address of that field.
 // The view sets the field on every change, so handlers do not.
 //
+// The revision of an item fits a precondition on the last event of a subject,
+// such as eventsourcingdb.NewIsSubjectOnEventIDPrecondition, only if the item
+// stands for exactly one subject, and the projection applies every event type
+// of that subject to the item. Otherwise the two drift apart as soon as an
+// event lands in the subject that the view does not apply to the item, and
+// every command with the revision of the item fails with a conflict, until an
+// event changes the item again. For an event type the item does not change
+// for, such as one the state ignores, call Update with a change that does
+// nothing, which only moves the revision on. For an item that gathers several
+// subjects, use OnStateRead instead.
+//
 // Without this option, the view keeps the revisions to itself.
 func RevisionIn[TItem any](field func(item *TItem) *string) InMemoryViewOption[TItem] {
 	return func(options *inMemoryViewOptions[TItem]) {
 		options.revisionIn = field
+	}
+}
+
+// CloneWith makes the view clone an item before every change, and hand the
+// clone to the change, so that the change may write into the slices, maps,
+// and pointees of the item without changing what a reader got before. The
+// function must return a copy that shares no data with the original, like the
+// Clone function of a State. The view calls it whenever it changes an existing
+// item, with Update, Upsert, UpdateWhere, or the Update function of an index,
+// but not for a new item, which nobody has read yet.
+//
+// Without this option, a change gets a plain copy of the item, which shares
+// its slices, maps, and pointees with every reader who got the item before, so
+// it replaces the fields that hold such data rather than writing into them.
+//
+// A nil function, or giving CloneWith twice, is a programming error, so it
+// panics while the view is being built.
+func CloneWith[TItem any](clone func(item TItem) TItem) InMemoryViewOption[TItem] {
+	if clone == nil {
+		panic("architecturekit: CloneWith needs a function, not nil")
+	}
+
+	return func(options *inMemoryViewOptions[TItem]) {
+		if options.clone != nil {
+			panic("architecturekit: CloneWith is given twice")
+		}
+
+		options.clone = clone
 	}
 }
 
@@ -94,6 +142,7 @@ func NewInMemoryView[TKey comparable, TItem any](
 	return &InMemoryView[TKey, TItem]{
 		keyOf:      keyOf,
 		revisionIn: configured.revisionIn,
+		clone:      configured.clone,
 		entries:    map[TKey]*inMemoryEntry[TItem]{},
 		changed:    make(chan struct{}),
 	}
@@ -151,6 +200,12 @@ func (v *InMemoryView[TKey, TItem]) WaitFor(ctx context.Context, revision string
 }
 
 // Get returns the item with the given key, and false if there is none.
+//
+// The item is a plain copy, which shares its slices, maps, and pointees with
+// the view and with every other reader. So never change it, not even through
+// a pointer. A later change of the item leaves what you got alone only if it
+// replaces such data rather than writing into it, or if the view clones items
+// with CloneWith (see Update).
 func (v *InMemoryView[TKey, TItem]) Get(_ context.Context, key TKey) (TItem, bool, error) {
 	v.mutex.RLock()
 	defer v.mutex.RUnlock()
@@ -167,6 +222,9 @@ func (v *InMemoryView[TKey, TItem]) Get(_ context.Context, key TKey) (TItem, boo
 // All hands out every item, in the order in which they were inserted. The
 // items are copied under the lock, so a query can take its time without
 // blocking the projection that feeds the view.
+//
+// Like with Get, every item is a plain copy, which shares its slices, maps,
+// and pointees with the view and with every other reader, so never change it.
 func (v *InMemoryView[TKey, TItem]) All(context.Context) (iter.Seq[TItem], error) {
 	v.mutex.RLock()
 	defer v.mutex.RUnlock()
@@ -217,6 +275,11 @@ func (v *InMemoryView[TKey, TItem]) Insert(_ context.Context, eventID string, it
 // so a single function describes both, and it has to set the fields that make
 // up the key. An existing item is skipped if the event is not newer than it.
 //
+// Like with Update, the change of an existing item replaces the fields that
+// hold slices, maps, or pointers rather than writing into them, since every
+// reader who got the item before shares them, unless the view clones items
+// with CloneWith. A new item starts from the zero value, which nobody shares.
+//
 // An item whose key, after the change, differs from the given one is a mistake,
 // and makes Upsert fail with an error of the category ErrPermanent.
 func (v *InMemoryView[TKey, TItem]) Upsert(
@@ -257,6 +320,14 @@ func (v *InMemoryView[TKey, TItem]) Upsert(
 // have deleted the item already. A projection for which a missing item means
 // that something is wrong says so itself.
 //
+// The change gets a plain copy of the item, which shares its slices, maps, and
+// pointees with every reader who got the item before. So it replaces the
+// fields that hold such data rather than writing into them, for example with
+// append(slices.Clone(item.BookIDs), bookID), since writing into them would
+// change what those readers hold while they may be reading it. With
+// CloneWith, the change gets a clone instead, and may write freely. A change
+// that does nothing still moves the revision of the item on.
+//
 // Changing the key of the item is a mistake, and makes Update fail with an
 // error of the category ErrPermanent.
 func (v *InMemoryView[TKey, TItem]) Update(
@@ -291,6 +362,10 @@ func (v *InMemoryView[TKey, TItem]) Delete(_ context.Context, key TKey, eventID 
 
 // UpdateWhere changes every matching item for which the event is newer, and
 // reports how many it changed.
+//
+// Like with Update, the change replaces the fields that hold slices, maps, or
+// pointers rather than writing into them, since every reader who got an item
+// before shares them, unless the view clones items with CloneWith.
 func (v *InMemoryView[TKey, TItem]) UpdateWhere(
 	_ context.Context,
 	match func(TItem) bool,
@@ -369,6 +444,9 @@ func (v *InMemoryView[TKey, TItem]) change(key TKey, eventID string, change func
 	}
 
 	changed := entry.item
+	if v.clone != nil {
+		changed = v.clone(entry.item)
+	}
 	change(&changed)
 
 	if newKey := v.keyOf(changed); newKey != key {
@@ -473,7 +551,11 @@ func (v *InMemoryView[TKey, TItem]) compact() {
 // Index adds a secondary index to the view, which finds the items by the value
 // the given function takes from them, such as the user they belong to. Several
 // items may share a value. The index is kept up to date with every change,
-// also when the value of an item changes.
+// also when the value of an item changes. A value that is taken from a slice,
+// a map, or a pointee of the item is only followed if a change replaces that
+// data rather than writing into it, or if the view clones items with
+// CloneWith, since the index takes the old value from the item as it was
+// before the change.
 //
 // Add indexes before the view is used, since adding one reads every item.
 func (v *InMemoryView[TKey, TItem]) Index[TValue comparable](
@@ -543,6 +625,8 @@ func (i *InMemoryIndex[TKey, TItem, TValue]) keysOf(value TValue) []TKey {
 }
 
 // Lookup hands out the items with the given value, in the order of the view.
+// Like with All, they share their slices, maps, and pointees with the view, so
+// never change them.
 func (i *InMemoryIndex[TKey, TItem, TValue]) Lookup(_ context.Context, value TValue) (iter.Seq[TItem], error) {
 	i.view.mutex.RLock()
 	defer i.view.mutex.RUnlock()
@@ -557,7 +641,9 @@ func (i *InMemoryIndex[TKey, TItem, TValue]) Lookup(_ context.Context, value TVa
 }
 
 // Update changes every item with the given value for which the event is
-// newer, and reports how many it changed.
+// newer, and reports how many it changed. Like with the Update function of the
+// view, the change replaces the fields that hold slices, maps, or pointers
+// rather than writing into them, unless the view clones items with CloneWith.
 func (i *InMemoryIndex[TKey, TItem, TValue]) Update(
 	_ context.Context,
 	value TValue,
