@@ -17,8 +17,9 @@ import (
 var ErrNotFound = errors.New("httpapi: not found")
 
 // ToQuery turns request data and the user into a query. It is the read
-// side's counterpart to ToCommand, and it is a function rather than a method,
-// because a query reads from the URL instead of from a body.
+// side's counterpart to ToCommand, without a decoded body, since a query
+// usually reads from the URL. One whose input does not fit there reads the
+// body itself, with BodyOf.
 //
 // Its errors are treated as those of ToCommand: one that StatusFor maps to a
 // status of its own keeps it, and so does one of the category
@@ -146,6 +147,9 @@ func Varying(varies Volatile) QueryOption {
 // internal failure, and logged with its value and its stack, as with Route.
 // So is a result that can not be encoded, such as one that holds NaN, which
 // JSON has no number for.
+//
+// A nil toQuery or answer is a programming error, so Query panics, rather
+// than answering every request with 500, as Route does for its function.
 func Query[TUser any, TQuery any, TResult any](
 	api *API[TUser],
 	mux *http.ServeMux,
@@ -154,6 +158,13 @@ func Query[TUser any, TQuery any, TResult any](
 	answer Answer[TQuery, TResult],
 	options ...QueryOption,
 ) {
+	if toQuery == nil {
+		panic("architecturekit/httpapi: Query needs a function that turns the request into a query, not nil")
+	}
+	if answer == nil {
+		panic("architecturekit/httpapi: Query needs a function that answers the query, not nil")
+	}
+
 	var settings querySettings
 	for _, option := range options {
 		option(&settings)

@@ -133,7 +133,7 @@ func postNote(t *testing.T, mux *http.ServeMux, body string) *httptest.ResponseR
 // routed wires the note decider at POST /note, with the given options.
 func routed(api *httpapi.API[user], options ...httpapi.RouteOption[note]) *http.ServeMux {
 	mux := http.NewServeMux()
-	httpapi.Route[noteRequest](api, mux, "POST /note", noteDecider(), options...)
+	httpapi.Route(api, mux, "POST /note", toNote, noteDecider(), options...)
 
 	return mux
 }
@@ -394,7 +394,7 @@ func TestWithLogger(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewPublicAPI(deadStore(t), httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Route[publicNoteRequest](api, mux, "POST /note", noteDecider())
+		httpapi.Route(api, mux, "POST /note", toPublicNote, noteDecider())
 
 		send(t, mux, request{contentType: "application/json", body: `{"id":"1","text":"hello"}`})
 
@@ -416,14 +416,9 @@ func (brokenView) Revision() string { return "" }
 
 func (brokenView) WaitFor(context.Context, string) error { return errors.New("the view is broken") }
 
-// publicNoteRequest is noteRequest for an API without users.
-type publicNoteRequest struct {
-	ID   string `json:"id"`
-	Text string `json:"text"`
-}
-
-func (r publicNoteRequest) ToCommand(httpapi.NoUser) (note, error) {
-	return note(r), nil
+// toPublicNote is toNote for an API without users.
+func toPublicNote(_ *http.Request, request noteRequest, _ httpapi.NoUser) (note, error) {
+	return note(request), nil
 }
 
 func TestAnsweringWithoutAnAPI(t *testing.T) {

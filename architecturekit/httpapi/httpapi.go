@@ -50,9 +50,15 @@ var (
 	errNoStore = errors.New("httpapi: the API has no store, so it can not execute commands")
 )
 
-// ToCommand is implemented by the request DTO. It is the single place where
-// transport data and the user turn into a command, which keeps the command
-// itself free of JSON tags and of HTTP.
+// ToCommand turns a request, its body, and the user into a command. The body
+// comes decoded into TRequest, by the rules of BodyOf, while the request holds
+// what the body does not, such as a value of the path, which r.PathValue
+// returns, a header, or the context of the request.
+//
+// It is the single place where transport data and the user turn into a
+// command, which keeps the command itself free of JSON tags and of HTTP.
+// TRequest only describes the body, so it may come from another package than
+// the function, such as one that is shared with a client.
 //
 // An error that StatusFor maps to a status of its own keeps it, such as
 // ErrForbidden, an error of the category architecturekit.ErrDomain, or one of
@@ -61,9 +67,7 @@ var (
 // answered with 500. Any other error means that the request can not be turned
 // into a command, and comes back wrapped with ErrMalformed, which is answered
 // with 400 and the error as the message.
-type ToCommand[TUser any, TCommand any] interface {
-	ToCommand(user TUser) (TCommand, error)
-}
+type ToCommand[TUser any, TRequest any, TCommand any] func(r *http.Request, request TRequest, user TUser) (TCommand, error)
 
 // API bundles what all routes share.
 type API[TUser any] struct {
@@ -245,15 +249,17 @@ func NewPublicAPI(store *architecturekit.Store, options ...APIOption) *API[NoUse
 }
 
 // Handled is what a command did. It carries the command itself, so that a
-// handler can answer with something it generated on the way, such as an
-// aggregate ID it made up before executing.
+// handler can answer with something that ToCommand generated on the way, such
+// as an aggregate ID it made up before executing.
 type Handled[TCommand any] struct {
 	Command TCommand
 	Events  []eventsourcingdb.Event
 }
 
-// Handle turns a request into a command and executes it, without writing
-// anything to the response. Use it to answer in a format of your own.
+// Handle determines the caller, decodes the body of the request into TRequest
+// (see BodyOf), turns both into a command with toCommand, and executes it,
+// without writing anything to the response. Use it to answer in a format of
+// your own.
 //
 // A panic on the way, such as one of SubjectScheme.Build in the Subject
 // function of the command, comes back as an error that StatusFor maps to 500,
@@ -261,13 +267,14 @@ type Handled[TCommand any] struct {
 // http.ErrAbortHandler panics on, since net/http expects it to abort the
 // response.
 func Handle[
-	TRequest ToCommand[TUser, TCommand],
 	TUser any,
+	TRequest any,
 	TCommand architecturekit.Command,
 	TState any,
 ](
 	r *http.Request,
 	api *API[TUser],
+	toCommand ToCommand[TUser, TRequest, TCommand],
 	decider architecturekit.Decider[TCommand, TState],
 ) (handled Handled[TCommand], err error) {
 	defer recoverInto(&err)
@@ -282,7 +289,7 @@ func Handle[
 		return handled, err
 	}
 
-	cmd, err := request.ToCommand(user)
+	cmd, err := toCommand(r, request, user)
 	if err != nil {
 		return handled, categorise(err)
 	}
@@ -341,27 +348,37 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 	}
 }
 
-// Route wires a request DTO to a decider, adds it to the mux and answers in
-// the kit's default format, which is the revision the command wrote (see
-// Respond), plus the fields of Adding, if given. Only TRequest has to be
-// given: TUser comes from the API, TCommand and TState come from the decider.
+// Route wires a command to the mux. It handles a request as Handle does,
+// turning it into the command with toCommand and executing that with the
+// decider, and answers in the kit's default format, which is the revision the
+// command wrote (see Respond), plus the fields of Adding, if given. No type
+// has to be given: TUser comes from the API, TRequest and TCommand come from
+// toCommand, and TState comes from the decider.
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack. Left to
 // net/http, it would close the connection, and the caller would get no answer
 // at all.
+//
+// A nil toCommand is a programming error, so Route panics, rather than
+// answering every request with 500.
 func Route[
-	TRequest ToCommand[TUser, TCommand],
 	TUser any,
+	TRequest any,
 	TCommand architecturekit.Command,
 	TState any,
 ](
 	api *API[TUser],
 	mux *http.ServeMux,
 	pattern string,
+	toCommand ToCommand[TUser, TRequest, TCommand],
 	decider architecturekit.Decider[TCommand, TState],
 	options ...RouteOption[TCommand],
 ) {
+	if toCommand == nil {
+		panic("architecturekit/httpapi: Route needs a function that turns the request into a command, not nil")
+	}
+
 	var settings routeSettings[TCommand]
 	for _, option := range options {
 		option(&settings)
@@ -370,7 +387,7 @@ func Route[
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer api.answerPanic(w, r)
 
-		handled, err := Handle[TRequest](r, api, decider)
+		handled, err := Handle(r, api, toCommand, decider)
 
 		var fields any
 		if err == nil && settings.fields != nil {

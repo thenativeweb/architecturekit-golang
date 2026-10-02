@@ -34,7 +34,7 @@ func TestAPIWithoutStore(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(nil, userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Route[noteRequest](api, mux, "POST /note", noteDecider())
+		httpapi.Route(api, mux, "POST /note", toNote, noteDecider())
 
 		var response *httptest.ResponseRecorder
 		require.NotPanics(t, func() {
