@@ -141,22 +141,61 @@ func (p *TypedProjection) UpcastWith(upcasters *Upcasters) *TypedProjection {
 
 // Apply satisfies Projection. It upcasts the event, and hands every resulting
 // event to the handler registered for its type.
+//
+// An upcaster may split a stored event into several events, which all carry
+// the ID of the stored event. So that a view can still tell them apart, Apply
+// hands every handler a context that holds the position of its event among
+// them: 0 for the first, 1 for the second, and so on. A stored event that is
+// not split is at position 0. The functions of InMemoryView read the position
+// from the context they get, so a handler hands its context on to the view,
+// or one derived from it, but never one of its own.
 func (p *TypedProjection) Apply(ctx context.Context, event eventsourcingdb.Event) error {
 	upcasted, err := p.upcasters.apply(event)
 	if err != nil {
 		return err
 	}
 
-	for _, event := range upcasted {
+	for part, event := range upcasted {
 		handle, isKnown := p.handlers[event.Type]
 		if !isKnown {
 			continue
 		}
 
-		if err := handle(ctx, event); err != nil {
+		if err := handle(withPart(ctx, part), event); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// partKey is the key under which Apply puts the position of an event among the
+// ones an upcaster split a stored event into, its part, into the context of a
+// handler.
+//
+// A view needs the part because the parts share the ID of the stored event. It
+// compares the ID first, and the part only for the same ID, so a later part of
+// an event is newer than an earlier one, but older than every later event.
+// That way every part changes an item once, and applying the stored event
+// again changes nothing, just as for an event that is not split. The revision
+// a view hands out stays the ID of the event, without the part, so that it
+// still fits a precondition.
+//
+// The key is not exported, since only InMemoryView reads it so far. A view of
+// one's own, such as one in a database, may get a function to read it later
+// on, which can be added without changing anything else.
+type partKey struct{}
+
+// withPart returns a context that holds the part of an event.
+func withPart(ctx context.Context, part int) context.Context {
+	return context.WithValue(ctx, partKey{}, part)
+}
+
+// partOf reads the part of an event from a context. A context without one,
+// such as one that does not come from a typed projection, stands for part 0,
+// which is what every event that is not split is.
+func partOf(ctx context.Context) int {
+	part, _ := ctx.Value(partKey{}).(int)
+
+	return part
 }

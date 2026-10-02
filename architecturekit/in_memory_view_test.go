@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -803,5 +804,300 @@ func TestRevisionIn(t *testing.T) {
 		_, err := architecturekit.Execute(context.Background(), requireStore(t), decider,
 			increment{subject: item.Subject, By: 1}.onEventID(item.Revision))
 		assert.ErrorIs(t, err, architecturekit.ErrConflict, "a revision behind the subject has to conflict")
+	})
+}
+
+// bookAcquired, bookShelved, and bookDiscarded are the events of a book, as a
+// newer version of an application writes them.
+type bookAcquired struct {
+	Title string `json:"title"`
+}
+
+func (bookAcquired) EventType() string { return "io.thenativeweb.test.book-acquired" }
+
+type bookShelved struct {
+	Shelf string `json:"shelf"`
+}
+
+func (bookShelved) EventType() string { return "io.thenativeweb.test.book-shelved" }
+
+type bookDiscarded struct{}
+
+func (bookDiscarded) EventType() string { return "io.thenativeweb.test.book-discarded" }
+
+// An older version of the application wrote a single event for what are two
+// events now, which bookUpcasters split. The last one is a mistake, since a
+// book is acquired only once.
+const (
+	bookAcquiredAndShelved  = "io.thenativeweb.test.book-acquired-and-shelved"
+	bookShelvedAndDiscarded = "io.thenativeweb.test.book-shelved-and-discarded"
+	bookReplaced            = "io.thenativeweb.test.book-replaced"
+	bookAcquiredTwice       = "io.thenativeweb.test.book-acquired-twice"
+)
+
+func bookUpcasters() *architecturekit.Upcasters {
+	return architecturekit.NewUpcasters().
+		Upcast(bookAcquiredAndShelved, splitInto(bookAcquired{}.EventType(), bookShelved{}.EventType())).
+		Upcast(bookShelvedAndDiscarded, splitInto(bookShelved{}.EventType(), bookDiscarded{}.EventType())).
+		Upcast(bookReplaced, splitInto(bookDiscarded{}.EventType(), bookAcquired{}.EventType())).
+		Upcast(bookAcquiredTwice, splitInto(bookAcquired{}.EventType(), bookAcquired{}.EventType()))
+}
+
+// splitInto is an upcaster that splits a stored event into one event per given
+// type. Each is a copy of the stored event, with its ID and its data, of which
+// every type decodes the fields it knows.
+func splitInto(eventTypes ...string) architecturekit.Upcaster {
+	return func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
+		parts := make([]eventsourcingdb.Event, 0, len(eventTypes))
+		for _, eventType := range eventTypes {
+			part := event
+			part.Type = eventType
+			parts = append(parts, part)
+		}
+
+		return parts, nil
+	}
+}
+
+// storedBook is a stored event about the book 42.
+func storedBook(eventID, eventType, data string) eventsourcingdb.Event {
+	event := stored(eventType, data)
+	event.ID = eventID
+	event.Subject = "/books/42"
+
+	return event
+}
+
+// bookCatalog is a view of books with an index by ID, so that the index can
+// stand in for the view. It counts how often a change of a book runs, and how
+// many books are removed, so that a test sees whether a part was applied again.
+type bookCatalog struct {
+	view    *architecturekit.InMemoryView[string, book]
+	byID    *architecturekit.InMemoryIndex[string, book, string]
+	changes int
+	removed int
+}
+
+// The ways to add, change, and remove a book, through the view or its index.
+type (
+	bookAcquisition func(ctx context.Context, catalog *bookCatalog, id, eventID, title string) error
+	bookChange      func(ctx context.Context, catalog *bookCatalog, id, eventID string, change func(item *book)) error
+	bookRemoval     func(ctx context.Context, catalog *bookCatalog, id, eventID string) (int, error)
+)
+
+func insertBook(ctx context.Context, catalog *bookCatalog, id, eventID, title string) error {
+	return catalog.view.Insert(ctx, eventID, book{ID: id, Title: title})
+}
+
+func updateBook(ctx context.Context, catalog *bookCatalog, id, eventID string, change func(item *book)) error {
+	_, err := catalog.view.Update(ctx, id, eventID, change)
+	return err
+}
+
+func deleteBook(ctx context.Context, catalog *bookCatalog, id, eventID string) (int, error) {
+	outcome, err := catalog.view.Delete(ctx, id, eventID)
+	if outcome != architecturekit.Applied {
+		return 0, err
+	}
+
+	return 1, err
+}
+
+var bookAcquisitions = map[string]bookAcquisition{
+	"Insert": insertBook,
+	"Upsert": func(ctx context.Context, catalog *bookCatalog, id, eventID, title string) error {
+		return catalog.view.Upsert(ctx, id, eventID, func(item *book) {
+			catalog.changes++
+			item.ID = id
+			item.Title = title
+		})
+	},
+}
+
+var bookChanges = map[string]bookChange{
+	"Update": updateBook,
+	"Upsert": func(ctx context.Context, catalog *bookCatalog, id, eventID string, change func(item *book)) error {
+		return catalog.view.Upsert(ctx, id, eventID, func(item *book) {
+			item.ID = id
+			change(item)
+		})
+	},
+	"UpdateWhere": func(ctx context.Context, catalog *bookCatalog, id, eventID string, change func(item *book)) error {
+		_, err := catalog.view.UpdateWhere(ctx, func(item book) bool { return item.ID == id }, eventID, change)
+		return err
+	},
+	"Index.Update": func(ctx context.Context, catalog *bookCatalog, id, eventID string, change func(item *book)) error {
+		_, err := catalog.byID.Update(ctx, id, eventID, change)
+		return err
+	},
+}
+
+var bookRemovals = map[string]bookRemoval{
+	"Delete": deleteBook,
+	"DeleteWhere": func(ctx context.Context, catalog *bookCatalog, id, eventID string) (int, error) {
+		return catalog.view.DeleteWhere(ctx, func(item book) bool { return item.ID == id }, eventID)
+	},
+	"Index.Delete": func(ctx context.Context, catalog *bookCatalog, id, eventID string) (int, error) {
+		return catalog.byID.Delete(ctx, id, eventID)
+	},
+}
+
+// newBookCatalog creates a catalog, and a projection without upcasters that
+// applies the events of books to it in the given ways.
+func newBookCatalog(
+	acquire bookAcquisition,
+	shelve bookChange,
+	discard bookRemoval,
+) (*bookCatalog, *architecturekit.TypedProjection) {
+	view := bookView()
+	catalog := &bookCatalog{view: view, byID: view.Index(func(item book) string { return item.ID })}
+
+	projection := architecturekit.NewProjection().
+		On(func(ctx context.Context, event architecturekit.Envelope[bookAcquired]) error {
+			return acquire(ctx, catalog, strings.TrimPrefix(event.Subject, "/books/"), event.ID, event.Data.Title)
+		}).
+		On(func(ctx context.Context, event architecturekit.Envelope[bookShelved]) error {
+			return shelve(ctx, catalog, strings.TrimPrefix(event.Subject, "/books/"), event.ID, func(item *book) {
+				catalog.changes++
+				item.Shelf = event.Data.Shelf
+			})
+		}).
+		On(func(ctx context.Context, event architecturekit.Envelope[bookDiscarded]) error {
+			removed, err := discard(ctx, catalog, strings.TrimPrefix(event.Subject, "/books/"), event.ID)
+			catalog.removed += removed
+			return err
+		})
+
+	return catalog, projection
+}
+
+func TestSplitEvents(t *testing.T) {
+	acquiredAndShelved := storedBook("0", bookAcquiredAndShelved, `{"title":"Dune","shelf":"A3"}`)
+
+	t.Run("applies a later part that changes the item an earlier part inserted", func(t *testing.T) {
+		for name, change := range bookChanges {
+			t.Run(name, func(t *testing.T) {
+				catalog, projection := newBookCatalog(insertBook, change, deleteBook)
+
+				require.NoError(t, apply(t, projection.UpcastWith(bookUpcasters()), acquiredAndShelved))
+
+				want := book{ID: "42", Title: "Dune", Shelf: "A3", Revision: "0"}
+				assert.Equal(t, want, mustGet(t, catalog.view, "42"), "the second part has to change the item")
+				assert.Equal(t, 1, catalog.changes)
+			})
+		}
+	})
+
+	t.Run("changes nothing when the stored event is applied again", func(t *testing.T) {
+		for name, change := range bookChanges {
+			t.Run(name, func(t *testing.T) {
+				catalog, projection := newBookCatalog(insertBook, change, deleteBook)
+
+				require.NoError(t, apply(t, projection.UpcastWith(bookUpcasters()),
+					acquiredAndShelved, acquiredAndShelved))
+
+				want := book{ID: "42", Title: "Dune", Shelf: "A3", Revision: "0"}
+				assert.Equal(t, want, mustGet(t, catalog.view, "42"))
+				assert.Equal(t, 1, catalog.changes, "no part may change the item a second time")
+			})
+		}
+	})
+
+	t.Run("applies a later stored event after a split one", func(t *testing.T) {
+		for name, change := range bookChanges {
+			t.Run(name, func(t *testing.T) {
+				catalog, projection := newBookCatalog(insertBook, change, deleteBook)
+
+				require.NoError(t, apply(t, projection.UpcastWith(bookUpcasters()),
+					acquiredAndShelved,
+					storedBook("1", bookShelved{}.EventType(), `{"shelf":"B7"}`)))
+
+				want := book{ID: "42", Title: "Dune", Shelf: "B7", Revision: "1"}
+				assert.Equal(t, want, mustGet(t, catalog.view, "42"), "a later event has to be newer than every part of an earlier one")
+				assert.Equal(t, 2, catalog.changes)
+			})
+		}
+	})
+
+	t.Run("skips a change of the same event without a part, which counts as part 0", func(t *testing.T) {
+		catalog, projection := newBookCatalog(insertBook, updateBook, deleteBook)
+		require.NoError(t, apply(t, projection.UpcastWith(bookUpcasters()), acquiredAndShelved))
+
+		outcome, err := catalog.view.Update(context.Background(), "42", "0", func(item *book) { item.Shelf = "C1" })
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.AlreadyApplied, outcome)
+
+		outcome, err = catalog.view.Update(context.Background(), "42", "1", func(item *book) { item.Shelf = "C1" })
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.Applied, outcome, "a later event without a part has to be applied")
+	})
+
+	t.Run("removes an item in a later part", func(t *testing.T) {
+		for name, discard := range bookRemovals {
+			t.Run(name, func(t *testing.T) {
+				catalog, projection := newBookCatalog(insertBook, updateBook, discard)
+				shelvedAndDiscarded := storedBook("1", bookShelvedAndDiscarded, `{"shelf":"B7"}`)
+
+				require.NoError(t, apply(t, projection.UpcastWith(bookUpcasters()),
+					acquiredAndShelved, shelvedAndDiscarded))
+
+				assert.Empty(t, idsIn(t, catalog.view), "the second part has to remove the item the first one changed")
+				assert.Equal(t, 1, catalog.removed)
+				assert.Equal(t, 2, catalog.changes)
+
+				require.NoError(t, apply(t, projection, shelvedAndDiscarded))
+
+				assert.Empty(t, idsIn(t, catalog.view))
+				assert.Equal(t, 1, catalog.removed, "applying the stored event again must not remove anything")
+				assert.Equal(t, 2, catalog.changes, "applying the stored event again must not change anything")
+			})
+		}
+	})
+
+	t.Run("adds an item in a later part, and keeps it when the stored event is applied again", func(t *testing.T) {
+		for name, acquire := range bookAcquisitions {
+			t.Run(name, func(t *testing.T) {
+				catalog, projection := newBookCatalog(acquire, updateBook, deleteBook)
+				replaced := storedBook("1", bookReplaced, `{"title":"Dune, second copy"}`)
+
+				require.NoError(t, apply(t, projection.UpcastWith(bookUpcasters()),
+					storedBook("0", bookAcquired{}.EventType(), `{"title":"Dune"}`), replaced))
+
+				want := book{ID: "42", Title: "Dune, second copy", Revision: "1"}
+				assert.Equal(t, want, mustGet(t, catalog.view, "42"), "the first part has to remove the old item, and the second one has to add the new one")
+				assert.Equal(t, 1, catalog.removed)
+				changes := catalog.changes
+
+				require.NoError(t, apply(t, projection, replaced), "applying the stored event again has to skip both parts")
+
+				assert.Equal(t, want, mustGet(t, catalog.view, "42"))
+				assert.Equal(t, 1, catalog.removed)
+				assert.Equal(t, changes, catalog.changes, "applying the stored event again must not change anything")
+			})
+		}
+	})
+
+	t.Run("refuses a later part that inserts an item whose key an earlier part took", func(t *testing.T) {
+		_, projection := newBookCatalog(insertBook, updateBook, deleteBook)
+
+		err := apply(t, projection.UpcastWith(bookUpcasters()), storedBook("0", bookAcquiredTwice, `{"title":"Dune"}`))
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a second item with the same key is a mistake, also within one stored event")
+		assert.ErrorContains(t, err, "already taken")
+	})
+
+	t.Run("treats every event as part 0 without upcasters", func(t *testing.T) {
+		catalog, projection := newBookCatalog(insertBook, updateBook, deleteBook)
+
+		require.NoError(t, apply(t, projection,
+			storedBook("0", bookAcquired{}.EventType(), `{"title":"Dune"}`),
+			storedBook("1", bookShelved{}.EventType(), `{"shelf":"A3"}`),
+			storedBook("1", bookShelved{}.EventType(), `{"shelf":"B7"}`),
+			storedBook("0", bookAcquired{}.EventType(), `{"title":"Dune, again"}`),
+		))
+
+		want := book{ID: "42", Title: "Dune", Shelf: "A3", Revision: "1"}
+		assert.Equal(t, want, mustGet(t, catalog.view, "42"), "an event applied again has to be skipped, as before")
+		assert.Equal(t, 1, catalog.changes)
 	})
 }
