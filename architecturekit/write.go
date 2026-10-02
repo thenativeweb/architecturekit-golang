@@ -30,6 +30,11 @@ type EventOn struct {
 // other mistakes Execute refuses in the preconditions of a command make Write
 // fail with an error of the category ErrPermanent, without writing anything.
 // Writing no events writes nothing and returns nil.
+//
+// Write knows no state, so unlike Execute, it does not refuse an event that a
+// state reading its subject has no rule for. Reading the subject with that
+// state fails afterwards, so every state that reads one of the subjects needs
+// a rule for each event type written to it, an Evolve rule or Ignore.
 func Write(
 	ctx context.Context,
 	store *Store,

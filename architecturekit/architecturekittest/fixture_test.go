@@ -162,20 +162,36 @@ func decider() architecturekit.Decider[open, account] {
 }
 
 // emitDecider emits exactly what it was handed, which is how the tests reach
-// the marshalling paths.
+// the marshalling paths. Its state is the one of the account, which has a rule
+// for every event the tests hand it, except unheardOf.
 type emit struct {
 	events []architecturekit.Event
+
+	// subject is where the events go, "/account/1" unless a test needs a
+	// subject of its own.
+	subject string
 }
 
-func (emit) Subject() string { return "/account/1" }
+func (c emit) Subject() string {
+	if c.subject == "" {
+		return "/account/1"
+	}
+
+	return c.subject
+}
 
 func (emit) Preconditions() []architecturekit.Precondition {
 	return []architecturekit.Precondition{architecturekit.Unconditionally()}
 }
 
 func emitDecider() architecturekit.Decider[emit, account] {
+	return emitDeciderOn(accountState())
+}
+
+// emitDeciderOn emits exactly what it was handed, on the given state.
+func emitDeciderOn(state *architecturekit.State[account]) architecturekit.Decider[emit, account] {
 	return architecturekit.Decider[emit, account]{
-		State: architecturekit.NewState(account{}),
+		State: state,
 		Decide: func(ctx context.Context, cmd emit, _ account) ([]architecturekit.Event, error) {
 			return cmd.events, nil
 		},
@@ -561,6 +577,53 @@ func TestThenEvents(t *testing.T) {
 
 		recorder.expectFailure(t, "no events")
 	})
+}
+
+func TestEventWithoutRule(t *testing.T) {
+	withoutRule := emit{events: []architecturekit.Event{unheardOf{}}}
+
+	t.Run("fails ThenEvents, naming the event type", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, emitDecider()).
+			When(withoutRule).
+			ThenEvents(unheardOf{})
+
+		recorder.expectFailure(t, `event of type "test.account.unheardOf" to "/account/1"`)
+		recorder.expectFailure(t, "could not read the subject any more")
+	})
+
+	t.Run("fails every assertion that expects events or nothing", func(t *testing.T) {
+		always := func(architecturekit.Event) bool { return true }
+
+		for label, check := range map[string]func(o *architecturekittest.Outcome[emit, account]){
+			"ThenNothing":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNothing() },
+			"ThenSomeEvent":  func(o *architecturekittest.Outcome[emit, account]) { o.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(o *architecturekittest.Outcome[emit, account]) { o.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNoEvent(always) },
+		} {
+			t.Run(label, func(t *testing.T) {
+				recorder := &spy{}
+				check(architecturekittest.Given(recorder, emitDecider()).When(withoutRule))
+				recorder.expectFailure(t, `"test.account.unheardOf"`)
+			})
+		}
+	})
+
+	t.Run("is a permanent failure, also as the second event", func(t *testing.T) {
+		architecturekittest.Given(t, emitDecider()).
+			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, unheardOf{}}}).
+			ThenFailed(architecturekit.ErrPermanent)
+	})
+
+	t.Run("lets an event through that the state ignores", func(t *testing.T) {
+		ignoring := accountState().Ignore[unheardOf]()
+
+		architecturekittest.Given(t, emitDeciderOn(ignoring)).
+			When(withoutRule).
+			ThenEvents(unheardOf{})
+	})
+
 }
 
 func TestThenPreconditions(t *testing.T) {

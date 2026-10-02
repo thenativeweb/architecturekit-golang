@@ -66,10 +66,20 @@ func GivenStored[TCommand architecturekit.Command, TState any](
 }
 
 // When runs the command against that state.
+//
+// Like Execute, it refuses an event that the state of the decider has no rule
+// for, since the state could not read the subject any more. The outcome is
+// then the error of the category architecturekit.ErrPermanent that Execute
+// returns, so that ThenEvents and the other assertions that expect events
+// fail, naming the event type, and ThenFailed(architecturekit.ErrPermanent)
+// matches it.
 func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState] {
 	f.t.Helper()
 
 	events, err := f.decider.Decide(context.Background(), cmd, f.state)
+	if err == nil {
+		err = checkRules(f.decider.State, cmd.Subject(), events)
+	}
 
 	return &Outcome[TCommand, TState]{
 		t:      f.t,
@@ -286,6 +296,26 @@ func (o *Outcome[TCommand, TState]) ThenPreconditions(
 	}
 
 	return o
+}
+
+// checkRules fails if the state has no rule for one of the events, with the
+// same error as Execute, which refuses to write them then. Execute checks
+// with a function of its own, which is not exported, so the wording here has
+// to stay the same as there, and a test compares the two.
+func checkRules[TState any](
+	state *architecturekit.State[TState],
+	subject string,
+	events []architecturekit.Event,
+) error {
+	for _, event := range events {
+		if !state.HasRule(event.EventType()) {
+			return fmt.Errorf("%w: refusing to write an event of type %q to %q, since the state of the "+
+				"decider has no rule for it and could not read the subject any more",
+				architecturekit.ErrPermanent, event.EventType(), subject)
+		}
+	}
+
+	return nil
 }
 
 func describe(events []architecturekit.Event) string {

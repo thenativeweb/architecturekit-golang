@@ -243,6 +243,8 @@ var bookState = architecturekit.NewState(Book{}).
 
 *Note that the data of an ignored event is not decoded, but its schema is still part of `Schemas`, since the event is still written. Ignoring an event type that has an `Evolve` rule, or ignoring it twice, panics, and so does calling `FromLatest` for it.*
 
+*Note that `Execute` refuses to write an event that the state of the decider has no rule for, since the state could not read the subject any more afterwards (see [Executing Commands](#executing-commands)). To find out whether a state has a rule for an event type, call the `HasRule` function on the state with the event type.*
+
 ### Making Decisions
 
 A decider connects a state with the decision made on it. Create a `Decider`, hand over the state, and provide a `Decide` function that receives the command and the current state, and returns the events to write:
@@ -330,6 +332,8 @@ if err != nil {
 ```
 
 `Execute` reads the events of the command's subject, evolves the state from them, calls the decider, and writes the events it returns. The function returns the written events, including the fields added by the server. If the decider returns no events, nothing is written, and the function returns `nil`.
+
+Every event the decider returns needs a rule on the state of the decider, an `Evolve` function or `Ignore`. `Execute` writes the events to the subject that the same state reads for the next command, and the database keeps every event, so an event without a rule would leave a subject that the state can not read any more. If the state has no rule for one of the events, `Execute` writes none of them, and fails with an error of the category `ErrPermanent` that names the event type (see [Handling Errors](#handling-errors)). The test fixture reports such an event the same way (see [Testing Deciders](#testing-deciders)).
 
 The written events come as they are stored, with their data as JSON. To read the data of one of them, call the `Decode` function with the type of the event. It returns an `Envelope`, the same a projection gets (see [Defining Projections](#defining-projections)), with the data in its `Data` field:
 
@@ -649,6 +653,8 @@ Like a command, a write declares at least one precondition, made with `Require`,
 
 *Note that `Write` never decides again, since there is nothing to decide. If nothing is to be written, call it with no events, which writes nothing.*
 
+*Note that `Write` knows no state, so unlike `Execute`, it does not refuse an event that a state has no rule for. Every state that reads one of the subjects needs a rule for the events written to it, since reading the subject fails otherwise.*
+
 ### Handling Errors
 
 Every error architecturekit returns belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
@@ -656,7 +662,7 @@ Every error architecturekit returns belongs to one of four categories. Use `erro
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
 - `ErrTransient` means that trying again may help, for example if the database can not be reached.
-- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if it does not match the schema of its type, or if a subject contains an event type the state has no `Evolve` rule for.
+- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if it does not match the schema of its type, if a subject contains an event type the state has no rule for, or if a decider returns one.
 
 A failure of the database is sorted by what its answer means, the same way for reading and for writing:
 
@@ -2276,6 +2282,8 @@ func TestBorrowBook(t *testing.T) {
 ```
 
 `Given` returns a `*Fixture`, and `When` returns an `*Outcome`. The functions that check the outcome return the outcome again, so they can be chained.
+
+Like `Execute`, `When` refuses an event that the state of the decider has no rule for (see [Executing Commands](#executing-commands)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the event type, and `ThenFailed(architecturekit.ErrPermanent)` matches.
 
 *Note that `Given` accepts any value that provides the `Helper` and `Fatalf` functions, as described by the `TestingT` interface.*
 
