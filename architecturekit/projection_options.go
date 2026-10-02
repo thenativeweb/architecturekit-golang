@@ -103,9 +103,10 @@ type Reconnect struct {
 	// Delay is how long the projection waits before it reads again.
 	Delay time.Duration
 
-	// Attempt counts the attempts in a row in which the projection has not
-	// got any further, starting at one. It grows together with Delay, and
-	// starts over with it once the projection has applied an event.
+	// Attempt counts the attempts in a row, starting at one. It grows together
+	// with Delay, and starts over with it once the projection has applied an
+	// event, or has followed the stream for longer than the delay had grown
+	// to, even if no event arrived.
 	//
 	// ProjectionStatus counts differently: its Attempts start over whenever the
 	// projection has caught up, even if the stream ends again right after.
