@@ -3,7 +3,9 @@ package architecturekit_test
 import (
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +43,36 @@ type secret struct{}
 func (secret) MarshalJSON() ([]byte, error) { return []byte(`"***"`), nil }
 
 // handle encodes itself as text, but with a pointer receiver only.
+// appended writes itself as text with AppendText, which encoding/json calls
+// just like MarshalText.
+type appended struct{ value int }
+
+func (a appended) AppendText(b []byte) ([]byte, error) {
+	return strconv.AppendInt(b, int64(a.value), 10), nil
+}
+
+// appendedOnPointer does so only with a pointer receiver.
+type appendedOnPointer struct{ value int }
+
+func (a *appendedOnPointer) AppendText(b []byte) ([]byte, error) {
+	return strconv.AppendInt(b, int64(a.value), 10), nil
+}
+
+// encodedTo writes its JSON itself with MarshalJSONTo of encoding/json/v2,
+// which encoding/json calls as well.
+type encodedTo struct{ value int }
+
+func (e encodedTo) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return enc.WriteToken(jsontext.Int(int64(e.value)))
+}
+
+// encodedToOnPointer does so only with a pointer receiver.
+type encodedToOnPointer struct{ value int }
+
+func (e *encodedToOnPointer) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return enc.WriteToken(jsontext.Int(int64(e.value)))
+}
+
 type handle struct{ value string }
 
 func (h *handle) MarshalText() ([]byte, error) { return []byte(h.value), nil }
@@ -232,6 +264,30 @@ func TestDeriveSchema(t *testing.T) {
 				"levels": {"type": "object", "additionalProperties": {"type": "string"}}},
 			"required": ["level"]}`},
 
+		{"describes a json.Number as a number, and as a string with the string option", schemaJSON[struct {
+			Amount  json.Number            `json:"amount"`
+			Quoted  json.Number            `json:"quoted,string"`
+			Pointed *json.Number           `json:"pointed,string"`
+			Maybe   *json.Number           `json:"maybe"`
+			Many    []json.Number          `json:"many,omitempty"`
+			ByValue map[json.Number]string `json:"byValue,omitempty"`
+		}], `{"type": "object", "additionalProperties": false,
+			"properties": {"amount": {"type": "number"},
+				"quoted": {"type": "string"},
+				"pointed": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+				"maybe": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+				"many": {"type": "array", "items": {"type": "number"}},
+				"byValue": {"type": "object", "additionalProperties": {"type": "string"}}},
+			"required": ["amount", "quoted", "pointed", "maybe"]}`},
+
+		{"describes a type with AppendText as a string", schemaJSON[struct {
+			Count  appended              `json:"count"`
+			Counts map[appended]appended `json:"counts,omitempty"`
+		}], `{"type": "object", "additionalProperties": false,
+			"properties": {"count": {"type": "string"},
+				"counts": {"type": "object", "additionalProperties": {"type": "string"}}},
+			"required": ["count"]}`},
+
 		{"allows any value for an interface", schemaJSON[struct {
 			Payload any `json:"payload"`
 		}], `{"type": "object", "additionalProperties": false,
@@ -364,7 +420,16 @@ func TestDeriveSchemaPanics(t *testing.T) {
 			"architecturekit_test.secret encodes itself with MarshalJSON"},
 		{"for a type that encodes itself as text with a pointer receiver only",
 			func() { architecturekit.DeriveSchema[struct{ Handle handle }]() },
-			"architecturekit_test.handle encodes itself with MarshalText on a pointer only"},
+			"architecturekit_test.handle encodes itself with MarshalText or AppendText on a pointer only"},
+		{"for a type that encodes itself as text with AppendText on a pointer only",
+			func() { architecturekit.DeriveSchema[struct{ Count appendedOnPointer }]() },
+			"architecturekit_test.appendedOnPointer encodes itself with MarshalText or AppendText on a pointer only"},
+		{"for a type that encodes itself with MarshalJSONTo",
+			func() { architecturekit.DeriveSchema[struct{ Value encodedTo }]() },
+			"architecturekit_test.encodedTo encodes itself with MarshalJSON or MarshalJSONTo"},
+		{"for a type that encodes itself with MarshalJSONTo on a pointer",
+			func() { architecturekit.DeriveSchema[struct{ Value encodedToOnPointer }]() },
+			"architecturekit_test.encodedToOnPointer encodes itself with MarshalJSON or MarshalJSONTo"},
 		{"for a slice of a type that can not be derived",
 			func() { architecturekit.DeriveSchema[struct{ Secrets []secret }]() },
 			"architecturekit_test.secret encodes itself with MarshalJSON"},

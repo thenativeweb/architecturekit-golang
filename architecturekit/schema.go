@@ -3,6 +3,7 @@ package architecturekit
 import (
 	"encoding"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"reflect"
 	"slices"
@@ -20,8 +21,37 @@ type describesSchema interface {
 var (
 	describesSchemaType = reflect.TypeFor[describesSchema]()
 	jsonMarshalerType   = reflect.TypeFor[json.Marshaler]()
+	jsonMarshalerToType = reflect.TypeFor[jsonv2.MarshalerTo]()
 	textMarshalerType   = reflect.TypeFor[encoding.TextMarshaler]()
+	textAppenderType    = reflect.TypeFor[encoding.TextAppender]()
+	numberType          = reflect.TypeFor[json.Number]()
 )
+
+// encodesAsJSON reports whether a type writes its JSON itself, with
+// MarshalJSON, or with MarshalJSONTo of encoding/json/v2, which encoding/json
+// calls as well. Either receiver counts, since what it writes can not be
+// derived either way.
+func encodesAsJSON(valueType reflect.Type) bool {
+	pointerType := reflect.PointerTo(valueType)
+
+	return valueType.Implements(jsonMarshalerType) || pointerType.Implements(jsonMarshalerType) ||
+		valueType.Implements(jsonMarshalerToType) || pointerType.Implements(jsonMarshalerToType)
+}
+
+// encodesAsText reports whether a type writes itself as text, with MarshalText
+// or AppendText, both of which encoding/json calls, with a value receiver.
+func encodesAsText(valueType reflect.Type) bool {
+	return valueType.Implements(textMarshalerType) || valueType.Implements(textAppenderType)
+}
+
+// encodesAsTextOnPointer reports whether a type writes itself as text only with
+// a pointer receiver.
+func encodesAsTextOnPointer(valueType reflect.Type) bool {
+	pointerType := reflect.PointerTo(valueType)
+
+	return !encodesAsText(valueType) &&
+		(pointerType.Implements(textMarshalerType) || pointerType.Implements(textAppenderType))
+}
 
 // derivedSchemas holds the schemas derived so far, by type, since a state is
 // often built anew for every command. It holds a *derivedSchema.
@@ -50,8 +80,10 @@ type derivedSchema struct {
 //   - A pointer, a slice and a map may also be null, since encoding/json writes
 //     null for nil, unless a field of such a type is optional and therefore
 //     left out instead.
-//   - A time.Time is a string in the date-time format, and a type with a
-//     MarshalText function a string. An interface allows any value.
+//   - A time.Time is a string in the date-time format, a json.Number a number,
+//     unless the string option makes it a string, and a type with a
+//     MarshalText or an AppendText function a string. An interface allows any
+//     value.
 //   - The type of a field that has a Schema function is described by it, like
 //     an event is.
 //
@@ -60,9 +92,12 @@ type derivedSchema struct {
 // has the shape encoding/json decodes JSON into: objects are map[string]any,
 // arrays []any, and numbers float64.
 //
-// A type that encodes itself with a MarshalJSON function, a recursive type, a
-// channel, a function or a complex number can not be derived. That is a
-// programming error, so DeriveSchema panics, naming the type.
+// A type that encodes itself with MarshalJSON, or with MarshalJSONTo of
+// encoding/json/v2, can not be derived, and neither can one with MarshalText or
+// AppendText on a pointer receiver only, since encoding/json calls those only
+// for a value it can take the address of. Nor can a recursive type, a channel,
+// a function or a complex number. That is a programming error, so DeriveSchema
+// panics, naming the type.
 func DeriveSchema[T any]() map[string]any {
 	schema, err := deriveStructure(reflect.TypeFor[T]())
 	if err != nil {
@@ -175,17 +210,24 @@ func (d *deriver) structure(valueType reflect.Type) (map[string]any, error) {
 	if valueType == timeType {
 		return map[string]any{"type": "string", "format": "date-time"}, nil
 	}
-	if valueType.Implements(jsonMarshalerType) || reflect.PointerTo(valueType).Implements(jsonMarshalerType) {
-		return nil, fmt.Errorf("%v encodes itself with MarshalJSON, so its schema can not be derived; give it a Schema function", valueType)
+
+	// A json.Number encodes itself, but what it writes is known: the number
+	// literal it holds, or 0 if it is empty.
+	if valueType == numberType {
+		return map[string]any{"type": "number"}, nil
 	}
-	if valueType.Implements(textMarshalerType) {
+
+	if encodesAsJSON(valueType) {
+		return nil, fmt.Errorf("%v encodes itself with MarshalJSON or MarshalJSONTo, so its schema can not be derived; give it a Schema function", valueType)
+	}
+	if encodesAsText(valueType) {
 		return map[string]any{"type": "string"}, nil
 	}
-	if reflect.PointerTo(valueType).Implements(textMarshalerType) {
-		// encoding/json calls MarshalText with a pointer receiver only if the
-		// value is addressable, so whether it is written as a string depends on
-		// where the value is.
-		return nil, fmt.Errorf("%v encodes itself with MarshalText on a pointer only, so its schema can not be derived; give it a Schema function", valueType)
+	if encodesAsTextOnPointer(valueType) {
+		// encoding/json calls MarshalText and AppendText with a pointer receiver
+		// only if the value is addressable, so whether it is written as a string
+		// depends on where the value is.
+		return nil, fmt.Errorf("%v encodes itself with MarshalText or AppendText on a pointer only, so its schema can not be derived; give it a Schema function", valueType)
 	}
 
 	switch valueType.Kind() {
@@ -413,7 +455,7 @@ func jsonFields(structType reflect.Type) ([]jsonField, error) {
 					index:      index,
 					isTagged:   name != "",
 					isOptional: embedded.isBehindAPointer || hasOption(options, "omitempty") || hasOption(options, "omitzero"),
-					isQuoted:   hasOption(options, "string") && isQuotable(structField.Type) && !encodesItself(structField.Type),
+					isQuoted:   hasOption(options, "string") && isQuotable(structField.Type) && (isNumber(structField.Type) || !encodesItself(structField.Type)),
 				}
 				if field.name == "" {
 					field.name = structField.Name
@@ -528,13 +570,23 @@ func isMapKey(keyType reflect.Type) bool {
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return true
 	default:
-		return keyType.Implements(textMarshalerType)
+		return encodesAsText(keyType)
 	}
 }
 
 func encodesItself(valueType reflect.Type) bool {
-	return valueType.Implements(jsonMarshalerType) || reflect.PointerTo(valueType).Implements(jsonMarshalerType) ||
-		valueType.Implements(textMarshalerType) || reflect.PointerTo(valueType).Implements(textMarshalerType)
+	return encodesAsJSON(valueType) || encodesAsText(valueType) || encodesAsTextOnPointer(valueType)
+}
+
+// isNumber reports whether a type is a json.Number, also behind an unnamed
+// pointer. It encodes itself, but encoding/json quotes it for the string option
+// all the same, as it does for the numbers it writes.
+func isNumber(valueType reflect.Type) bool {
+	if valueType.Name() == "" && valueType.Kind() == reflect.Pointer {
+		valueType = valueType.Elem()
+	}
+
+	return valueType == numberType
 }
 
 // nullable allows null in addition to what the given schema allows.
