@@ -115,7 +115,7 @@ func TestReconnect(t *testing.T) {
 		observed := &reconnects{}
 
 		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io",
-			architecturekit.WithReconnectDelays(time.Millisecond, 4*time.Millisecond),
+			architecturekit.WithReconnectDelays(testInitialDelay, testMaxDelay),
 			architecturekit.WithReconnectObserver(observed.observe),
 		)
 
@@ -134,7 +134,7 @@ func TestReconnect(t *testing.T) {
 			assert.Equal(t, i+1, report.Attempt, "attempt %d", i)
 		}
 
-		assert.Equal(t, []time.Duration{time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond},
+		assert.Equal(t, []time.Duration{testInitialDelay, 2 * testInitialDelay, testMaxDelay},
 			[]time.Duration{reports[0].Delay, reports[1].Delay, reports[2].Delay})
 	})
 

@@ -59,14 +59,20 @@ type State[TState any] struct {
 	// built, or an empty string to build it from the first event.
 	fromLatest string
 
-	// clone copies a state, for a store with a state cache, or is nil if the
-	// state has none.
+	// clone copies a state, for a store with a state cache, for Step, and for
+	// the initial value at the start of every read, or is nil if the state has
+	// none.
 	clone func(TState) TState
 
 	// isValue caches whether TState consists of values only, since that is
 	// found by reflection and does not change.
 	isValue     bool
 	isValueOnce sync.Once
+
+	// sharesInitial caches whether the initial value shares data with its
+	// copies, since that is found by reflection and does not change either.
+	sharesInitial     bool
+	sharesInitialOnce sync.Once
 }
 
 // EventSchema holds an event schema for registration with the database.
@@ -75,7 +81,18 @@ type EventSchema struct {
 	Schema    map[string]any
 }
 
-// NewState creates a state that starts out as initial.
+// NewState creates a state that starts out as initial. Every read starts from
+// a copy of it, in Execute, Load, Replay, and ReplayStored alike, so that an
+// Evolve rule never changes what the next read starts from.
+//
+// An initial value that consists of values only, or whose maps, slices and
+// pointers are nil, needs nothing else, since a copy shares no data with it.
+// One that holds a map, a slice with room for elements, or a pointer that is
+// not nil, at any depth, shares that with every copy, so the state needs a
+// Clone function to copy it. Without one, every read fails with an error of
+// the category ErrPermanent, rather than let an Evolve rule write into the
+// initial value. A slice without room for elements, such as []string{}, needs
+// none, since appending to it allocates a new array.
 func NewState[TState any](initial TState) *State[TState] {
 	return &State[TState]{
 		initial: initial,
@@ -215,6 +232,11 @@ func (s *State[TState]) FromLatest[TEvent Event]() *State[TState] {
 // otherwise share and change the same data. A state that consists of values
 // only needs no Clone function.
 //
+// The same function lets Step and StepStored leave the given state unchanged,
+// and copies the initial value at the start of every read. An initial value
+// that holds a map, a slice with room for elements, or a pointer that is not
+// nil needs it, since reading would change it otherwise (see NewState).
+//
 // Calling Clone twice is a programming error, so it panics while the state is
 // being built.
 func (s *State[TState]) Clone(clone func(TState) TState) *State[TState] {
@@ -245,6 +267,24 @@ func (s *State[TState]) copyOf(state TState) TState {
 	}
 
 	return state
+}
+
+// copyOfInitial returns a copy of the initial value that shares no data with
+// it, for a read to start from. It fails permanently for an initial value that
+// shares data with its copies if the state has no Clone function, since an
+// Evolve rule would then write into the initial value of every later read.
+func (s *State[TState]) copyOfInitial() (TState, error) {
+	s.sharesInitialOnce.Do(func() {
+		s.sharesInitial = sharesData(reflect.ValueOf(&s.initial).Elem())
+	})
+
+	if s.sharesInitial && s.clone == nil {
+		var zero TState
+		return zero, fmt.Errorf("%w: %s holds slices, maps or pointers in its initial value, so it needs a "+
+			"Clone function to start every read from a copy of the initial value", ErrPermanent, reflect.TypeFor[TState]())
+	}
+
+	return s.copyOf(s.initial), nil
 }
 
 // Schemas returns the schemas of all events the state evolves by, for
@@ -292,7 +332,10 @@ type Decider[TCommand Command, TState any] struct {
 // Replay folds a sequence of events into a state. It is meant for tests, where
 // the history is available as typed events.
 func Replay[TState any](state *State[TState], history ...Event) (TState, error) {
-	current := state.initial
+	current, err := state.copyOfInitial()
+	if err != nil {
+		return current, err
+	}
 
 	if state.fromLatest != "" {
 		for i := len(history) - 1; i >= 0; i-- {
@@ -304,7 +347,6 @@ func Replay[TState any](state *State[TState], history ...Event) (TState, error) 
 	}
 
 	for _, event := range history {
-		var err error
 		current, err = state.evolveBy(current, event)
 		if err != nil {
 			return current, err
@@ -321,7 +363,10 @@ func ReplayStored[TState any](
 	state *State[TState],
 	history ...eventsourcingdb.Event,
 ) (TState, error) {
-	current := state.initial
+	current, err := state.copyOfInitial()
+	if err != nil {
+		return current, err
+	}
 
 	if state.fromLatest != "" {
 		for i := len(history) - 1; i >= 0; i-- {
@@ -333,7 +378,6 @@ func ReplayStored[TState any](
 	}
 
 	for _, stored := range history {
-		var err error
 		current, err = state.evolveByStored(current, stored)
 		if err != nil {
 			return current, err

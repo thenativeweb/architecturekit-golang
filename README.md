@@ -235,6 +235,8 @@ The event type is taken from the event's `EventType` function, so it does not ha
 
 *Note that calling `Evolve` twice for the same event type panics.*
 
+Every read starts from a copy of the initial value, so an `Evolve` function may change the state it gets without changing what the next read starts from. A copy shares nothing with a value like `Book{}`, and neither with an initial value whose maps, slices and pointers are `nil`, so leave them `nil`, and let the `Evolve` functions create them when they need them. If the initial value holds a map, a slice with room for elements, or a pointer that is not `nil`, every copy shares it, and the state needs a `Clone` function that copies it (see [Caching States](#caching-states)). Without one, reading the state fails with an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)), rather than let an `Evolve` function change the initial value of every later read.
+
 Reading an event without a rule fails, since it usually points to a missing rule or a wrong subject. If a subject holds events that matter for no decision, such as `BookInspected`, which only records that somebody looked at a book, call the `Ignore` function for their type. The state then takes them without changing, and says so, rather than an `Evolve` function that returns the state unchanged and needs a comment to explain why:
 
 ```go
@@ -341,6 +343,8 @@ if err != nil {
 
 Every event the decider returns needs a rule on the state of the decider, an `Evolve` function or `Ignore`. `Execute` writes the events to the subject that the same state reads for the next command, and the database keeps every event, so an event without a rule would leave a subject that the state can not read any more. If the state has no rule for one of the events, `Execute` writes none of them, and fails with an error of the category `ErrPermanent` that names the event type (see [Handling Errors](#handling-errors)). The test fixture reports such an event the same way (see [Testing Deciders](#testing-deciders)).
 
+Nor does `Execute` write any of the events if the data of one of them can not be encoded as JSON, for example because it holds a float `NaN`. It then fails with an error of the category `ErrPermanent` that names the event type and the reason, since trying again would fail the same way.
+
 The written events come as they are stored, with their data as JSON. To read the data of one of them, call the `Decode` function with the type of the event. It returns an `Envelope`, the same a projection gets (see [Defining Projections](#defining-projections)), with the data in its `Data` field:
 
 ```go
@@ -369,7 +373,7 @@ Every command declares at least one precondition, so that writing without any ch
 - `Require` turns a precondition of the client SDK into one of the command, for example to check a revision the caller hands over.
 - `Unconditionally` writes without any check.
 
-Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything.
+Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`.
 
 #### Guarding Against Concurrent Changes
 
@@ -653,7 +657,7 @@ if errors.Is(err, architecturekit.ErrConflict) {
 }
 ```
 
-`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
+`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. If the data of one of the events can not be encoded as JSON, nothing is written either, and the error belongs to the category `ErrPermanent`. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
 
 Like a command, a write declares at least one precondition, made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state.
 
@@ -668,7 +672,7 @@ Every failure of architecturekit itself in reading and writing belongs to one of
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
 - `ErrTransient` means that trying again may help, for example if the database can not be reached.
-- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if it does not match the schema of its type, if a subject contains an event type the state has no rule for, or if a decider returns one.
+- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if the data of an event can not be encoded as JSON, such as a float `NaN`, if an event does not match the schema of its type, if a subject contains an event type the state has no rule for, or if a decider returns one.
 
 A failure of the database is sorted by what its answer means, the same way for reading and for writing:
 
@@ -758,7 +762,7 @@ var libraryUpcasters = architecturekit.NewUpcasters().
   )
 ```
 
-The function has the type `Upcaster`. Upcasters may return more than one event. If a returned event has an upcaster of its own, that one runs as well, so every version needs only a single step to the next one. The translated events are never written back.
+The function has the type `Upcaster`. Upcasters may return more than one event, for example to split an event that recorded two facts into one event per fact. Derive each of them from the stored event, as above, so that they all keep its ID. A projection then applies every one of them to a view, also if several of them change the same item (see [Defining Views](#defining-views)). If a returned event has an upcaster of its own, that one runs as well, so every version needs only a single step to the next one. The translated events are never written back.
 
 To use the upcasters, call the `UpcastWith` function on the state and hand over the set. The upcasters then run before the `Evolve` rules:
 
@@ -841,7 +845,9 @@ var shelfState = architecturekit.NewState(Shelf{}).
   })
 ```
 
-Without a `Clone` function, such a state is read as without a cache. The same function lets `Step` and `StepStored` leave a state unchanged (see [Stepping Through States](#stepping-through-states)).
+Without a `Clone` function, such a state is read as without a cache. The same function lets `Step` and `StepStored` leave a state unchanged (see [Stepping Through States](#stepping-through-states)), and copies the initial value at the start of every read, which an initial value with a map, a slice with room for elements, or a pointer that is not `nil` requires (see [Defining State](#defining-state)).
+
+*Note that as an initial value, `Shelf{}`, whose `BookIDs` are `nil`, does not require a `Clone` function, and neither does `Shelf{BookIDs: []string{}}`, since appending to a slice without room for elements allocates a new array. `Shelf{BookIDs: make([]string, 0, 10)}` does, since appending to it writes into the array that every copy shares.*
 
 *Note that a `time.Time` counts as a value, since its location never changes.*
 
@@ -964,6 +970,8 @@ So far, subjects have been composed by hand. To define their structure once, cal
 var bookSubject = architecturekit.NewSubjectScheme("/books/{book}")
 ```
 
+Each segment of a subject may only contain the characters that EventSourcingDB allows: the letters `A-Z` and `a-z`, the digits `0-9`, underscores, and hyphens. This applies to the literal segments of the pattern as well as to the values that fill its placeholders.
+
 The function returns a `*SubjectScheme`. To compose a subject, call the `Build` function with one value per placeholder, in the order in which they appear in the pattern. Use it in every command that acts on a book:
 
 ```go
@@ -980,7 +988,7 @@ func (c ReturnBook) Subject() string {
 }
 ```
 
-To take a subject apart, call the `Match` function. It returns the values by placeholder name, and `false` if the subject does not follow the pattern:
+To take a subject apart, call the `Match` function. It returns the values by placeholder name, and `false` if the subject does not follow the pattern or has a value that `Build` would refuse:
 
 ```go
 values, ok := bookSubject.Match("/books/42")
@@ -997,9 +1005,9 @@ run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree(b
 
 *Note that other subjects may lie under the same root, such as `/books/42/reviews/7` under `/books`. Use `Match` in the projection to tell them apart.*
 
-*Note that a malformed pattern panics, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains a slash.*
+*Note that a malformed pattern panics, including one with a literal segment that contains a character EventSourcingDB does not allow, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains such a character, for example a slash, a dot, or a space.*
 
-Values that come from outside, such as an ID in a request, may well be empty or contain a slash, and that is not a programming error. To check them before building a subject, call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, instead of panicking:
+Values that come from outside, such as an ID in a request, may well be empty or contain such characters, and that is not a programming error. So always check them before building a subject: call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, such as which characters a value may contain, instead of panicking:
 
 ```go
 if err := bookSubject.Check(bookID); err != nil {
@@ -1039,7 +1047,9 @@ Every item has a revision of its own, which is the ID of the last event that cha
 
 The revision of an item fits such a precondition only if the item stands for exactly one subject, and the projection applies every event type of that subject to the item. The precondition checks the last event of the subject, so as soon as an event lands in the subject that the view does not apply to the item, the two drift apart, and every command with the revision of the item fails with an error of the category `ErrConflict`, until an event changes the item again. Apply an event type that does not change the item, such as one the state ignores, with a change that does nothing (see [Defining Projections](#defining-projections)). For an item that gathers several subjects, such as all books a reader has borrowed, there is no single subject its revision could stand for, so use `OnStateRead` for the commands instead (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
 
-Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing. All functions take a context and return an error, which the view in memory hardly needs, but a view in a database would. So a view in a database can offer the same functions later on, without the projections that write to it having to change.
+Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing. All functions take a context and return an error, as a view in a database would need. So a view in a database can offer the same functions later on, without the projections that write to it having to change.
+
+If an upcaster splits a stored event into several events, they all carry the ID of the stored event (see [Versioning Events](#versioning-events)). A projection created with `NewProjection` hands each of them to its handler with a context that holds its position among them, and the view reads it from the context it gets. For the same ID, the view counts a later event as newer than an earlier one, so every one of them is applied, in order, also if several of them change the same item. Applying the stored event again still changes nothing, and the revision of the item stays the ID of the stored event. That is why a handler always hands the context it gets on to the view, rather than one of its own, such as `context.Background()`.
 
 *Note that the view as a whole has a revision as well, which is the last event it has seen at all, rather than the last one that changed a particular item (see [Reading Your Own Writes](#reading-your-own-writes)).*
 
@@ -1142,6 +1152,8 @@ changed, err := catalog.UpdateWhere(ctx, isByClarke, event.ID, func(item *BookIt
 
 removed, err := catalog.DeleteWhere(ctx, isByClarke, event.ID)
 ```
+
+*Note that the view stays locked while it runs a function you hand over, such as a change, or the function that selects the items for `UpdateWhere` and `DeleteWhere`. Such a function must not use the same view, not even to read an item with `Get` or `All`, since that blocks forever. The same holds for `Upsert`, and for the `Update` function of an index. To copy data from another item of the view into the one you change, read it before, and use it inside the change.*
 
 #### Sharing Items with Readers
 
@@ -1355,7 +1367,9 @@ return run.Err()
 
 *Note that if the database can not be reached at the start, the run keeps trying, and `CaughtUp` stays open. To wait for a limited time only, add a case with `time.After` to the `select` statement.*
 
-If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again. To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
+If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again, or has followed the stream for longer than the delay had grown to, even if no event arrived. That way, a load balancer that ends long-lived connections regularly does not hold back a quiet projection, while a database that fails before the projection has caught up, or right after, is given ever more time.
+
+To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
 
 ```go
 store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
@@ -1374,7 +1388,7 @@ The observer receives a `Reconnect` with these fields:
 - `Subject` is the subject the projection reads.
 - `Err` is the reason, which is `nil` if the database ended the stream.
 - `Delay` is how long the projection waits before the next attempt.
-- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event.
+- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event, or has followed the stream for longer than the delay had grown to.
 
 *Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable. A failure that trying again will not fix, for example a rejected API token, ends the run (see [Handling Errors](#handling-errors)).*
 
@@ -1838,7 +1852,7 @@ mux := http.NewServeMux()
 
 If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so does an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
 
-*Note that to answer an error that has a status code of its own with `401 Unauthorized` all the same, the function wraps it with `httpapi.ErrUnauthorized` itself, for example with `fmt.Errorf("%w: %v", httpapi.ErrUnauthorized, err)`.*
+*Note that to answer an error that has a status code of its own with `401 Unauthorized` all the same, the function wraps it with `httpapi.ErrUnauthorized` itself, for example with `fmt.Errorf("%w: %w", httpapi.ErrUnauthorized, err)`.*
 
 For an application without authentication, call the `NewPublicAPI` function instead. Commands and queries then receive `httpapi.NoUser` as user:
 
@@ -1846,7 +1860,7 @@ For an application without authentication, call the `NewPublicAPI` function inst
 api := httpapi.NewPublicAPI(store)
 ```
 
-Everything that answers through an API logs every error it does not explain to the caller in full, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. A failure of the server is logged at level `Error`, and a refusal with `401` or `409`, whose details the caller is not told, at level `Info` (see [Handling Commands over HTTP](#handling-commands-over-http)). By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
+Everything that answers through an API logs every error it does not explain to the caller in full, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. A failure of the server is logged at level `Error`, and a refusal with `401` or `409`, whose details the caller is not told, at level `Info` (see [Handling Commands over HTTP](#handling-commands-over-http)). A panic is logged with its value and its stack. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
 
 ```go
 api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
@@ -1854,7 +1868,7 @@ api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
 
 #### Determining the User
 
-To determine the user in a handler of your own, call the `UserOf` function. If the user cannot be determined, it returns an error that wraps `httpapi.ErrUnauthorized`, unless the error of the function has a status code of its own, which it then returns as it is (see [Setting Up an HTTP API](#setting-up-an-http-api)):
+To determine the user in a handler of your own, call the `UserOf` function. If the user cannot be determined, it returns an error that wraps `httpapi.ErrUnauthorized` as well as the error of the function, so that `errors.Is` and `errors.As` find either. If the error of the function has a status code of its own, though, it returns that error as it is (see [Setting Up an HTTP API](#setting-up-an-http-api)):
 
 ```go
 mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
@@ -1895,7 +1909,7 @@ func (r borrowBookRequest) ToCommand(user User) (BorrowBook, error) {
 }
 ```
 
-`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`. Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a slash (see [Composing Subjects](#composing-subjects)). And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
+`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
 
 Then call the `Route` function with the request type, the API, the mux, a pattern, and the decider:
 
@@ -1935,6 +1949,10 @@ The message is the error message if the error is written for the caller, such as
 
 The actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)): at level `Info` for `401` and `409`, since the server did not fail, and at level `Error` for `500` and above.
 
+If handling a request panics, for example because `Build` received an ID that `ToCommand` did not check, the route answers with `500 Internal Server Error` and the message `internal server error`, like any other internal failure, and logs the panic at level `Error`, with its value and its stack. Otherwise, `net/http` would close the connection, and the caller would get no answer at all.
+
+*Note that a panic with `http.ErrAbortHandler` is passed on, since `net/http` expects it to abort the response.*
+
 To answer this way in a handler of your own, call the `Respond` function with the response writer, the request, the API, the written events, and the error. Like the route, it logs through the logger of the API, with the route of the request.
 
 #### Adding to the Answer
@@ -1973,7 +1991,7 @@ The route then answers with both:
 
 The function is only called if the command has succeeded. If it returns an error, the events are written all the same, so the route still answers with `200 OK` and the revision, which the caller needs to read its own writes, and must not take for a reason to send the command again. The answer then holds whatever fields the function returned along with the error, or none, and the error is logged through the logger of the API, with the route.
 
-The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
+The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object, so they must not hold `NaN`, for example, which JSON has no number for. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
 
 *Note that the written events are available in `Handled` as well. Add them only deliberately: they are the inner model of the application, every caller that reads them depends on their shape, and they may contain data that is not meant for the caller.*
 
@@ -1999,6 +2017,8 @@ mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Req
 
 *Note that `Handled` contains the command even if executing it fails.*
 
+*Note that `Handle` returns a panic as an error, which `StatusFor` maps to `500`, and which `Respond` logs with the value and the stack of the panic.*
+
 #### Authorizing Commands
 
 To refuse a command, return `httpapi.ErrForbidden` from `ToCommand`. The request is then answered with `403 Forbidden`, and the command is not executed:
@@ -2018,7 +2038,9 @@ func (r acquireBookRequest) ToCommand(user User) (AcquireBook, error) {
 }
 ```
 
-The same applies to the other errors of the `httpapi` package, such as `httpapi.ErrNotFound`, and to errors of the category `ErrDomain`: they keep their status code. Any other error returned from `ToCommand` is answered with `400 Bad Request`.
+The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if `ToCommand` looks something up in another service, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
+
+Any other error returned from `ToCommand` is answered with `400 Bad Request`, with the error as the message. In `Handle`, it wraps `httpapi.ErrMalformed` as well as the original error, so that `errors.Is` and `errors.As` find either.
 
 #### Validating Requests
 
@@ -2026,7 +2048,7 @@ Before a request reaches `ToCommand`, it is validated:
 
 - The `Content-Type` header must be `application/json`, otherwise the request is answered with `415 Unsupported Media Type`, and the error is `httpapi.ErrUnsupportedMediaType`.
 - The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`.
-- The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case.
+- The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`, which wraps the error of decoding, so that `errors.As` finds it. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case.
 
 *Note that parsers disagree on what a name that occurs twice means, and on data after the value: one takes the first value, another the last, and one stops after the value, while another reads on. A filter or a proxy in front of the application might then check another value than the one the application uses, which is why both are refused.*
 
@@ -2094,7 +2116,7 @@ Then call the `Query` function with the API, the mux, a pattern, the function th
 httpapi.Query(api, mux, "GET /api/books", toListBooks, answerBooks(listBooks(catalog)))
 ```
 
-The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. Errors are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
+The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
 
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error.
 
@@ -2114,6 +2136,8 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
   // ...
 })
 ```
+
+*Note that `Ask` returns a panic as an error, as `Handle` does (see [Answering Commands in Your Own Format](#answering-commands-in-your-own-format)).*
 
 #### Reading Queries from the Body
 
@@ -2190,6 +2214,10 @@ It checks the categories in this order:
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged.*
 
+*Note that an error of `ToCommand`, of the function that returns a query, or of the function that determines the user keeps its status code only if it has one of its own, or belongs to the category `ErrPermanent`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
+
+*Note that a panic while a route handles a request is answered with `500 Internal Server Error` as well (see [Handling Commands over HTTP](#handling-commands-over-http)).*
+
 *Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, and `500` and above, as `Respond` and `RespondResult` do, since it may name internals (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
 ### Reading Your Own Writes over HTTP
@@ -2212,6 +2240,8 @@ curl http://localhost:8080/api/books \
 The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. Without the header, it does not wait at all. If the header holds something that is not a revision, the request is answered with `400 Bad Request`.
 
 Once the view has seen at least one event, the response contains the revision it shows in the `Revision` header, as well as an `ETag` header and `Cache-Control: private, no-cache`. If the caller sends the `ETag` in the `If-None-Match` header, asks the same, and the view has not changed since, the request is answered with `304 Not Modified`. `private` keeps shared caches, such as proxies, from keeping the answer.
+
+The header is read as HTTP has it: it may hold a list of tags, separated by commas, or `*`, which stands for any tag. A tag also counts if it is marked as weak, as `W/"…"`, which a proxy does when it compresses the answer.
 
 The `ETag` holds the query that was asked, with every field. So two callers get the same `ETag` only if their queries are equal: a query that holds the user, or anything else that tells callers apart, gets an `ETag` of its own for each of them. That matters as soon as callers share a browser one after the other, since the browser asks with the `ETag` it kept for the one before. The query is built before the route waits or answers `304 Not Modified`, so a caller who may not ask is refused first.
 
@@ -2271,7 +2301,7 @@ httpapi.Query(api, mux, "GET /api/books-due-today", toListBooksDueToday, answerB
 
 #### Waiting for a Revision in a Handler of Your Own
 
-To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error. It returns an error if the header holds something that is not a revision, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
+To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error. It returns an error if the header holds something that is not a revision, which wraps `httpapi.ErrMalformed` as well as `architecturekit.ErrNotARevision`, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
 
 ```go
 mux.HandleFunc("GET /api/books.csv", func(w http.ResponseWriter, r *http.Request) {
@@ -2371,7 +2401,7 @@ func TestBorrowBook(t *testing.T) {
 
 `Given` returns a `*Fixture`, and `When` returns an `*Outcome`. The functions that check the outcome return the outcome again, so they can be chained.
 
-Like `Execute`, `When` refuses an event that the state of the decider has no rule for (see [Executing Commands](#executing-commands)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the event type, and `ThenFailed(architecturekit.ErrPermanent)` matches.
+Like `Execute`, `When` refuses an event that the state of the decider has no rule for (see [Executing Commands](#executing-commands)), and it checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
 
 *Note that `Given` accepts any value that provides the `Helper` and `Fatalf` functions, as described by the `TestingT` interface.*
 
