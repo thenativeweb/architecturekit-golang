@@ -146,7 +146,7 @@ func Query[TUser any, TQuery any, TResult any](
 
 		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			result, err := Ask(r, api, toQuery, answer)
-			respondResult(w, result, err, api.logFailure(r))
+			respondResult(w, result, err, api.explain(r))
 		}))
 
 		return
@@ -155,9 +155,11 @@ func Query[TUser any, TQuery any, TResult any](
 	mux.Handle(pattern, answerRevisioned(api, toQuery, answer, settings))
 }
 
-// RespondResult writes a query result, or maps the error the way Respond does
-// for commands, logging an internal failure through the logger of the API,
-// with the route of the request (see WithLogger).
+// RespondResult writes a query result, or answers the error the way Respond
+// does for commands, with the same messages: a fixed one for 401, 409, and
+// 500 and above, while the error is logged through the logger of the API,
+// with the route of the request (see WithLogger), and the error itself
+// otherwise.
 func RespondResult[TUser any, TResult any](
 	w http.ResponseWriter,
 	r *http.Request,
@@ -165,16 +167,15 @@ func RespondResult[TUser any, TResult any](
 	result TResult,
 	err error,
 ) {
-	respondResult(w, result, err, api.logFailure(r))
+	respondResult(w, result, err, api.explain(r))
 }
 
-// respondResult writes a query result, and logs an internal failure with
-// logFailure.
+// respondResult writes a query result, and explains an error with explain.
 func respondResult[TResult any](
 	w http.ResponseWriter,
 	result TResult,
 	err error,
-	logFailure func(status int, err error),
+	explain func(status int, err error) string,
 ) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -185,12 +186,7 @@ func respondResult[TResult any](
 	}
 
 	status := StatusFor(err)
-	message := err.Error()
-	if status >= http.StatusInternalServerError {
-		// Internal failures are not explained to the caller, but logged.
-		message = "internal server error"
-		logFailure(status, err)
-	}
+	message := explain(status, err)
 
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": message})

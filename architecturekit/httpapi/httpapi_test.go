@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -335,6 +337,29 @@ func TestRoute(t *testing.T) {
 		assert.Contains(t, response.Body.String(), "txt", "the answer should name the unknown field")
 	})
 
+	t.Run("ambiguous JSON is rejected", func(t *testing.T) {
+		mux := muxFor(t, deadStore(t))
+
+		for _, c := range []struct {
+			label string
+			body  string
+		}{
+			{"a second value", `{"id":"1","text":"a"} {"id":"1","text":"b"}`},
+			{"garbage after the value", `{"id":"1","text":"a"} garbage`},
+			{"a name that occurs twice", `{"id":"1","text":"a","text":"b"}`},
+		} {
+			t.Run(c.label, func(t *testing.T) {
+				response := send(t, mux, request{
+					user:        "golo",
+					contentType: "application/json",
+					body:        c.body,
+				})
+
+				assert.Equal(t, http.StatusBadRequest, response.Code)
+			})
+		}
+	})
+
 	t.Run("a command that cannot be built is rejected", func(t *testing.T) {
 		response := send(t, muxFor(t, deadStore(t)), request{
 			user:        "golo",
@@ -463,4 +488,94 @@ func TestUserOf(t *testing.T) {
 		assert.ErrorIs(t, err, httpapi.ErrUnauthorized)
 		assert.Equal(t, http.StatusUnauthorized, httpapi.StatusFor(err))
 	})
+
+	for _, failure := range userFromFailures {
+		t.Run("hands back an error of userFrom "+failure.label, func(t *testing.T) {
+			api := httpapi.NewAPI(deadStore(t), userFromFailing(failure.err))
+
+			_, err := httpapi.UserOf(httptest.NewRequest(http.MethodGet, "/", nil), api)
+
+			assert.Equal(t, failure.status, httpapi.StatusFor(err))
+			if failure.isKept {
+				assert.Equal(t, failure.err, err, "the error has to come back as it is")
+			} else {
+				assert.ErrorIs(t, err, httpapi.ErrUnauthorized)
+				assert.ErrorContains(t, err, failure.err.Error(), "the error has to say why")
+			}
+		})
+	}
+}
+
+// userFromFailing returns a function that fails to determine the user, with
+// the given error.
+func userFromFailing(err error) func(*http.Request) (user, error) {
+	return func(*http.Request) (user, error) { return user{}, err }
+}
+
+// userFromFailures are errors of userFrom, and the statuses they are answered
+// with. An error that has a status of its own keeps it, and so does a
+// permanent one, while every other error means that the caller is unknown.
+var userFromFailures = []struct {
+	label  string
+	err    error
+	status int
+	isKept bool
+}{
+	{"without a category", errors.New("the token has expired"), http.StatusUnauthorized, false},
+	{"that is wrapped as unauthorized", fmt.Errorf("%w: the token has expired", httpapi.ErrUnauthorized), http.StatusUnauthorized, true},
+	{"that is transient", fmt.Errorf("%w: the session store is down", architecturekit.ErrTransient), http.StatusServiceUnavailable, true},
+	{"that is transient, but wrapped as unauthorized", fmt.Errorf("%w: %v", httpapi.ErrUnauthorized, fmt.Errorf("%w: the session store is down", architecturekit.ErrTransient)), http.StatusUnauthorized, true},
+	{"that is forbidden", fmt.Errorf("%w: the account is locked", httpapi.ErrForbidden), http.StatusForbidden, true},
+	{"that is permanent", fmt.Errorf("%w: the session key is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, true},
+	{"that is unverified", fmt.Errorf("%w: the session is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, true},
+	{"of the domain", architecturekit.NewDomainError("the reader is suspended"), http.StatusUnprocessableEntity, true},
+	{"because the caller went away", fmt.Errorf("reading the session: %w", context.Canceled), 499, true},
+	{"because the deadline ran out", fmt.Errorf("reading the session: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, true},
+}
+
+func TestFailingUserFrom(t *testing.T) {
+	// Every entry point determines the caller with UserOf, so each of them has
+	// to answer with the status of the error.
+	entryPoints := map[string]func(t *testing.T, api *httpapi.API[user]) *httptest.ResponseRecorder{
+		"a command": func(t *testing.T, api *httpapi.API[user]) *httptest.ResponseRecorder {
+			return postNote(t, routed(api), `{"id":"1","text":"hello"}`)
+		},
+		"a query": func(t *testing.T, api *httpapi.API[user]) *httptest.ResponseRecorder {
+			mux := http.NewServeMux()
+			httpapi.Query(api, mux, "GET /notes", toListNotes, answerListNotes)
+
+			return ask(t, mux, "/notes", "golo")
+		},
+		"a revisioned query": func(t *testing.T, api *httpapi.API[user]) *httptest.ResponseRecorder {
+			mux := http.NewServeMux()
+			httpapi.Query(api, mux, "GET /notes", toListNotes, answerListNotes, httpapi.Revisioned(noteView(), time.Second))
+
+			return ask(t, mux, "/notes", "golo")
+		},
+	}
+
+	for name, enter := range entryPoints {
+		for _, failure := range userFromFailures {
+			t.Run(name+" answers an error of userFrom "+failure.label+" with "+strconv.Itoa(failure.status), func(t *testing.T) {
+				var logs bytes.Buffer
+				api := httpapi.NewAPI(deadStore(t), userFromFailing(failure.err), httpapi.WithLogger(loggerInto(&logs)))
+
+				response := enter(t, api)
+
+				assert.Equal(t, failure.status, response.Code)
+			})
+		}
+
+		t.Run(name+" logs a transient error of userFrom as an internal failure", func(t *testing.T) {
+			var logs bytes.Buffer
+			api := httpapi.NewAPI(deadStore(t), userFromFailing(fmt.Errorf("%w: the session store is down", architecturekit.ErrTransient)), httpapi.WithLogger(loggerInto(&logs)))
+
+			response := enter(t, api)
+
+			require.Equal(t, http.StatusServiceUnavailable, response.Code)
+			assert.JSONEq(t, `{"message": "internal server error"}`, response.Body.String())
+			assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
+			assert.Contains(t, logs.String(), "the session store is down")
+		})
+	}
 }

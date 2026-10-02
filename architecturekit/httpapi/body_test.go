@@ -13,8 +13,18 @@ import (
 )
 
 type previewRequest struct {
-	CustomerID string `json:"customerId"`
-	Quantity   int    `json:"quantity"`
+	CustomerID string          `json:"customerId"`
+	Quantity   int             `json:"quantity"`
+	Delivery   *deliveryOption `json:"delivery,omitempty"`
+	Items      []previewItem   `json:"items,omitempty"`
+}
+
+type deliveryOption struct {
+	Address string `json:"address"`
+}
+
+type previewItem struct {
+	BookID string `json:"bookId"`
 }
 
 func bodyRequest(contentType string, body io.Reader) *http.Request {
@@ -78,7 +88,9 @@ func TestBodyOf(t *testing.T) {
 			names string
 		}{
 			{label: "malformed", body: `not json`, names: "invalid character"},
-			{label: "an unknown field", body: `{"customerId":"42","quantiy":3}`, names: "quantiy"},
+			{label: "empty", body: ``, names: "unexpected end of JSON input"},
+			{label: "an unknown field", body: `{"customerId":"42","quantiy":3}`, names: `unknown field "quantiy"`},
+			{label: "a nested unknown field", body: `{"delivery":{"adress":"Main Street 1"}}`, names: `unknown field "adress"`},
 			{label: "a value of the wrong type", body: `{"quantity":"three"}`, names: "quantity"},
 		} {
 			t.Run(test.label, func(t *testing.T) {
@@ -90,6 +102,71 @@ func TestBodyOf(t *testing.T) {
 				assert.Zero(t, preview, "nothing half-decoded may be handed back")
 			})
 		}
+	})
+
+	t.Run("rejects anything but whitespace after the value", func(t *testing.T) {
+		// Another parser might read on, and use the second value instead of
+		// the first.
+		for _, test := range []struct {
+			label string
+			body  string
+		}{
+			{label: "a second value", body: `{"customerId":"42"} {"customerId":"43"}`},
+			{label: "a second value without a space", body: `{"customerId":"42"}{"customerId":"43"}`},
+			{label: "garbage", body: `{"customerId":"42"} garbage`},
+			{label: "a closing bracket", body: `{"customerId":"42"}]`},
+		} {
+			t.Run(test.label, func(t *testing.T) {
+				request := bodyRequest("application/json", strings.NewReader(test.body))
+
+				preview, err := httpapi.BodyOf[previewRequest](request)
+				require.ErrorIs(t, err, httpapi.ErrMalformed)
+				assert.ErrorContains(t, err, "after top-level value", "the error has to say what is wrong")
+				assert.Zero(t, preview, "nothing half-decoded may be handed back")
+			})
+		}
+	})
+
+	t.Run("accepts whitespace after the value", func(t *testing.T) {
+		request := bodyRequest("application/json", strings.NewReader(`{"customerId":"42"}`+" \t\r\n"))
+
+		preview, err := httpapi.BodyOf[previewRequest](request)
+		require.NoError(t, err)
+		assert.Equal(t, previewRequest{CustomerID: "42"}, preview)
+	})
+
+	t.Run("rejects a name that occurs twice", func(t *testing.T) {
+		// Parsers disagree on which value counts, so a filter in front of the
+		// application might check another value than the one it uses.
+		for _, test := range []struct {
+			label string
+			body  string
+			names string
+		}{
+			{label: "at the top", body: `{"customerId":"42","customerId":"43"}`, names: `"customerId"`},
+			{label: "in a nested object", body: `{"delivery":{"address":"a","address":"b"}}`, names: `"address" within "/delivery"`},
+			{label: "in an object in a list", body: `{"items":[{"bookId":"1"},{"bookId":"2","bookId":"3"}]}`, names: `"bookId" within "/items/1"`},
+			{label: "spelled with an escape", body: `{"customerId":"42","customer\u0049d":"43"}`, names: `"customerId"`},
+			{label: "in a different case", body: `{"customerId":"42","CUSTOMERID":"43"}`, names: `"CUSTOMERID"`},
+		} {
+			t.Run(test.label, func(t *testing.T) {
+				request := bodyRequest("application/json", strings.NewReader(test.body))
+
+				preview, err := httpapi.BodyOf[previewRequest](request)
+				require.ErrorIs(t, err, httpapi.ErrMalformed)
+				assert.ErrorContains(t, err, "duplicate object member name "+test.names, "the error has to say which name and where")
+				assert.Zero(t, preview, "nothing half-decoded may be handed back")
+			})
+		}
+	})
+
+	t.Run("still matches names regardless of case", func(t *testing.T) {
+		request := bodyRequest("application/json",
+			strings.NewReader(`{"CUSTOMERID":"42","Quantity":3,"delivery":{"ADDRESS":"Main Street 1"}}`))
+
+		preview, err := httpapi.BodyOf[previewRequest](request)
+		require.NoError(t, err)
+		assert.Equal(t, previewRequest{CustomerID: "42", Quantity: 3, Delivery: &deliveryOption{Address: "Main Street 1"}}, preview)
 	})
 
 	t.Run("rejects a body that can not be read", func(t *testing.T) {
@@ -114,6 +191,8 @@ func TestBodyOf(t *testing.T) {
 			{label: "not JSON", contentType: "text/plain", body: `{"customerId":"42"}`, status: http.StatusUnsupportedMediaType},
 			{label: "too large", contentType: "application/json", body: strings.Repeat(" ", httpapi.MaxRequestBody+1), status: http.StatusRequestEntityTooLarge},
 			{label: "an unknown field", contentType: "application/json", body: `{"name":"42"}`, status: http.StatusBadRequest},
+			{label: "a second value", contentType: "application/json", body: `{"customerId":"42"} {"customerId":"43"}`, status: http.StatusBadRequest},
+			{label: "a name that occurs twice", contentType: "application/json", body: `{"customerId":"42","customerId":"43"}`, status: http.StatusBadRequest},
 		} {
 			t.Run(test.label, func(t *testing.T) {
 				response := httptest.NewRecorder()
