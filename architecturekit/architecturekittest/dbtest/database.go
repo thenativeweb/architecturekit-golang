@@ -1,4 +1,11 @@
-package architecturekittest
+// Package dbtest starts an EventSourcingDB in a container for the tests that
+// need a real one, and hands out stores on it.
+//
+// It is a package of its own because starting a container takes Testcontainers
+// and the Docker client, and Go compiles a package with everything it imports.
+// Keeping them out of architecturekittest means that a test that only checks a
+// decider or a projection builds without either.
+package dbtest
 
 import (
 	"context"
@@ -159,7 +166,7 @@ func IsolatedStore(
 // if a test has started it. Call it from TestMain:
 //
 //	func TestMain(m *testing.M) {
-//		architecturekittest.Main(m)
+//		dbtest.Main(m)
 //	}
 //
 // A TestMain that has more to do once the tests have run, such as closing a
@@ -185,7 +192,7 @@ func StopSharedDatabase() error {
 // run.
 func finish(code int, log io.Writer) int {
 	if err := StopSharedDatabase(); err != nil {
-		_, _ = fmt.Fprintf(log, "architecturekittest: stopping the shared database: %v\n", err)
+		_, _ = fmt.Fprintf(log, "architecturekittest/dbtest: stopping the shared database: %v\n", err)
 		return 1
 	}
 

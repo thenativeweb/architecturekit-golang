@@ -1,18 +1,31 @@
 package architecturekittest
 
 import (
+	"fmt"
+	"reflect"
+	"strings"
+
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
 // Precondition is what a command declared, in a shape a test can compare.
 //
 // The client keeps its precondition types unexported, so this is reconstructed
-// from the methods they expose. One consequence: a check for a pristine
-// subject and one for a populated subject both surface as a bare Subject,
-// because the client gives nothing else away to tell them apart.
+// from the methods they expose. A check for a pristine subject and one for a
+// populated subject expose the same method, so they are told apart by
+// comparing them with one built anew.
 type Precondition struct {
 	// Subject is set for every precondition of the client that guards one.
 	Subject string
+
+	// Pristine is set only for a check that the subject has no events yet, as
+	// built by eventsourcingdb.NewIsSubjectPristinePrecondition.
+	Pristine bool
+
+	// Populated is set only for a check that the subject has events, as built
+	// by eventsourcingdb.NewIsSubjectPopulatedPrecondition.
+	Populated bool
 
 	// EventID is set only for a revision check.
 	EventID string
@@ -81,16 +94,70 @@ func PreconditionsOf(cmd architecturekit.Command) []Precondition {
 		case queryPrecondition:
 			described = append(described, Precondition{Query: typed.Query()})
 		case subjectPrecondition:
-			described = append(described, Precondition{Subject: typed.Subject()})
+			subject := typed.Subject()
+
+			described = append(described, Precondition{
+				Subject:   subject,
+				Pristine:  isEqual(database, eventsourcingdb.NewIsSubjectPristinePrecondition(subject)),
+				Populated: isEqual(database, eventsourcingdb.NewIsSubjectPopulatedPrecondition(subject)),
+			})
 		}
 	}
 
 	return described
 }
 
-// OnSubject describes a precondition that only guards a subject.
-func OnSubject(subject string) Precondition {
-	return Precondition{Subject: subject}
+// isEqual tells whether a precondition of the client equals one built anew.
+// The client's preconditions are plain structs, so they are equal exactly when
+// the same function built both from the same values.
+//
+// Comparing values of a type that cannot be compared panics. The client's
+// types can be compared, so such a type would take a change to the client.
+// It is reported as unequal then, so that the test that expects it fails,
+// instead of the whole run panicking.
+func isEqual(declared, built eventsourcingdb.Precondition) bool {
+	if !reflect.ValueOf(declared).Comparable() {
+		return false
+	}
+
+	return declared == built
+}
+
+// describePrecondition spells out the fields that are set, so that a failure
+// shows at a glance which kind was declared and which was expected.
+func describePrecondition(precondition Precondition) string {
+	value := reflect.ValueOf(precondition)
+	fields := make([]string, 0, value.NumField())
+
+	for i := range value.NumField() {
+		if value.Field(i).IsZero() {
+			continue
+		}
+
+		fields = append(fields, fmt.Sprintf("%s: %#v", value.Type().Field(i).Name, value.Field(i).Interface()))
+	}
+
+	return "{" + strings.Join(fields, ", ") + "}"
+}
+
+func describePreconditions(preconditions []Precondition) string {
+	described := make([]string, len(preconditions))
+	for i, precondition := range preconditions {
+		described[i] = describePrecondition(precondition)
+	}
+
+	return "[" + strings.Join(described, ", ") + "]"
+}
+
+// OnPristineSubject describes a check that the subject has no events yet,
+// which is what a command that creates something usually declares.
+func OnPristineSubject(subject string) Precondition {
+	return Precondition{Subject: subject, Pristine: true}
+}
+
+// OnPopulatedSubject describes a check that the subject has events.
+func OnPopulatedSubject(subject string) Precondition {
+	return Precondition{Subject: subject, Populated: true}
 }
 
 // OnEventID describes a revision check.
