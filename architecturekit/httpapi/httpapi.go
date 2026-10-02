@@ -184,8 +184,8 @@ func (api *API[TUser]) loggerOrDefault() *slog.Logger {
 //
 // Use it when you write a handler of your own, such as a stream, a download,
 // or a page, so that it treats callers exactly like the routes the kit wires
-// up. An
-// unknown caller comes back as ErrUnauthorized, which StatusFor maps to 401.
+// up. An unknown caller comes back as ErrUnauthorized, which StatusFor maps to
+// 401.
 //
 // An error of userFrom that StatusFor maps to a status of its own comes back
 // as it is, and so does one of the category architecturekit.ErrPermanent, so
