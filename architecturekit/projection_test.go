@@ -79,7 +79,7 @@ func TestProjection(t *testing.T) {
 		seed(t, subject, 3)
 
 		target := &collector{}
-		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, target))
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject), target))
 
 		assert.Len(t, target.IDs(), 3)
 	})
@@ -91,7 +91,7 @@ func TestProjection(t *testing.T) {
 		seed(t, base+"/b", 1)
 
 		target := &collector{}
-		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, base, true, target))
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, architecturekit.SubjectTree(base), target))
 
 		assert.Len(t, target.IDs(), 3, "events across both subjects")
 	})
@@ -102,14 +102,14 @@ func TestProjection(t *testing.T) {
 		seed(t, subject, 3)
 
 		first := &resumingCollector{}
-		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, first))
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject), first))
 		require.Len(t, first.IDs(), 3)
 
 		// More events arrive, and a second run starts where the first stopped.
 		seed(t, subject, 2)
 
 		second := &resumingCollector{checkpoint: first.checkpoint}
-		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, second))
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject), second))
 
 		assert.Len(t, second.IDs(), 2, "a resumed run must only see the new events")
 	})
@@ -119,13 +119,13 @@ func TestProjection(t *testing.T) {
 		subject := subjectFor(t)
 
 		target := &resumingCollector{}
-		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, target))
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject), target))
 
 		assert.Empty(t, target.IDs())
 		assert.Empty(t, target.checkpoint, "nothing was applied, so no checkpoint")
 	})
 
-	t.Run("RunProjection follows the stream and ends with its context", func(t *testing.T) {
+	t.Run("StartProjection follows the stream and ends with its context", func(t *testing.T) {
 		store := requireStore(t)
 		subject := subjectFor(t)
 		seed(t, subject, 1)
@@ -134,7 +134,7 @@ func TestProjection(t *testing.T) {
 		ctx, stop := context.WithCancel(context.Background())
 
 		done := make(chan error, 1)
-		go func() { done <- architecturekit.RunProjection(ctx, store, subject, false, target) }()
+		go func() { done <- runUntilDone(ctx, store, architecturekit.ExactSubject(subject), target) }()
 
 		// Wait until the catch-up phase has arrived, then write again and watch
 		// the live phase pick it up.
@@ -148,7 +148,7 @@ func TestProjection(t *testing.T) {
 		case err := <-done:
 			assert.NoError(t, err, "ending through the context is not a failure")
 		case <-time.After(5 * time.Second):
-			assert.Fail(t, "RunProjection did not return after its context ended")
+			assert.Fail(t, "the run did not end after its context ended")
 		}
 	})
 
@@ -157,7 +157,7 @@ func TestProjection(t *testing.T) {
 		subject := subjectFor(t)
 		seed(t, subject, 1)
 
-		err := architecturekit.CatchUpProjection(context.Background(), store, subject, false, &refusingCollector{})
+		err := architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject), &refusingCollector{})
 
 		assert.ErrorContains(t, err, "not today")
 	})
@@ -167,7 +167,7 @@ func TestProjection(t *testing.T) {
 		subject := subjectFor(t)
 		seed(t, subject, 1)
 
-		err := architecturekit.CatchUpProjection(context.Background(), store, subject, false,
+		err := architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject),
 			&unreadableCheckpoint{})
 
 		assert.ErrorContains(t, err, "checkpoint is gone")
@@ -179,7 +179,7 @@ func TestProjection(t *testing.T) {
 		seed(t, subject, 3)
 
 		target := &batchedTransactionalCollector{}
-		require.NoError(t, architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target))
+		require.NoError(t, architecturekit.CatchUpTransactionalProjection(t.Context(), store, architecturekit.ExactSubject(subject), target))
 
 		ids := target.IDs()
 		require.Len(t, ids, 3)
@@ -194,16 +194,16 @@ func TestProjection(t *testing.T) {
 		seed(t, subject, 2)
 
 		target := &transactionalCollector{}
-		require.NoError(t, architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target))
+		require.NoError(t, architecturekit.CatchUpTransactionalProjection(t.Context(), store, architecturekit.ExactSubject(subject), target))
 
 		seed(t, subject, 1)
 
-		require.NoError(t, architecturekit.CatchUpTransactionalProjection(t.Context(), store, subject, false, target))
+		require.NoError(t, architecturekit.CatchUpTransactionalProjection(t.Context(), store, architecturekit.ExactSubject(subject), target))
 
 		assert.Len(t, target.IDs(), 3, "a resumed run must only add the new event")
 	})
 
-	t.Run("RunTransactionalProjection follows the stream and ends with its context", func(t *testing.T) {
+	t.Run("StartTransactionalProjection follows the stream and ends with its context", func(t *testing.T) {
 		store := requireStore(t)
 		subject := subjectFor(t)
 		seed(t, subject, 1)
@@ -212,7 +212,7 @@ func TestProjection(t *testing.T) {
 		ctx, stop := context.WithCancel(t.Context())
 
 		done := make(chan error, 1)
-		go func() { done <- architecturekit.RunTransactionalProjection(ctx, store, subject, false, target) }()
+		go func() { done <- runTransactionalUntilDone(ctx, store, architecturekit.ExactSubject(subject), target) }()
 
 		waitFor(t, func() bool { return len(target.IDs()) == 1 })
 		seed(t, subject, 1)
@@ -224,19 +224,19 @@ func TestProjection(t *testing.T) {
 		case err := <-done:
 			assert.NoError(t, err, "ending through the context is not a failure")
 		case <-time.After(5 * time.Second):
-			assert.Fail(t, "RunTransactionalProjection did not return after its context ended")
+			assert.Fail(t, "the transactional run did not end after its context ended")
 		}
 	})
 
-	t.Run("RunProjection refuses a projection that is transactional as well", func(t *testing.T) {
+	t.Run("refuses a projection that is transactional as well", func(t *testing.T) {
 		// Driving it through Apply would bypass its transactions without anyone
 		// noticing, so both entry points refuse it before reading anything.
 		for name, run := range map[string]func(){
-			"RunProjection": func() {
-				_ = architecturekit.RunProjection(t.Context(), nil, "/", true, &transactionalWithApply{})
+			"StartProjection": func() {
+				_ = architecturekit.StartProjection(t.Context(), nil, architecturekit.SubjectTree("/"), &transactionalWithApply{})
 			},
 			"CatchUpProjection": func() {
-				_ = architecturekit.CatchUpProjection(t.Context(), nil, "/", true, &transactionalWithApply{})
+				_ = architecturekit.CatchUpProjection(t.Context(), nil, architecturekit.SubjectTree("/"), &transactionalWithApply{})
 			},
 		} {
 			t.Run(name, func(t *testing.T) {
@@ -330,7 +330,7 @@ type batchedTransactionalCollector struct {
 func (c *batchedTransactionalCollector) BatchSizes() (int, int) { return 2, 1 }
 
 // transactionalWithApply is transactional, but has an Apply as well, which
-// RunProjection would call instead of going through a transaction.
+// StartProjection would call instead of going through a transaction.
 type transactionalWithApply struct {
 	collector
 	transactionalCollector
@@ -344,3 +344,20 @@ func (*unreadableCheckpoint) Checkpoint(context.Context) (string, error) {
 }
 
 func (*unreadableCheckpoint) SaveCheckpoint(context.Context, string) error { return nil }
+
+// runUntilDone starts a projection and waits until it ends, as a process does
+// that runs nothing else, and returns what it ended with.
+func runUntilDone(ctx context.Context, store *architecturekit.Store, subjects architecturekit.Subjects, projection architecturekit.Projection) error {
+	run := architecturekit.StartProjection(ctx, store, subjects, projection)
+	<-run.Done()
+
+	return run.Err()
+}
+
+// runTransactionalUntilDone is runUntilDone for a transactional projection.
+func runTransactionalUntilDone(ctx context.Context, store *architecturekit.Store, subjects architecturekit.Subjects, projection architecturekit.Transactional) error {
+	run := architecturekit.StartTransactionalProjection(ctx, store, subjects, projection)
+	<-run.Done()
+
+	return run.Err()
+}

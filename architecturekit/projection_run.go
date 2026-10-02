@@ -56,6 +56,7 @@ type ProjectionStatus struct {
 // StartProjection or StartTransactionalProjection. It tells when the
 // projection has caught up, when it has ended, and where it stands.
 type ProjectionRun struct {
+	name         string
 	caughtUp     chan struct{}
 	caughtUpOnce sync.Once
 	done         chan struct{}
@@ -65,11 +66,13 @@ type ProjectionRun struct {
 	err    error
 }
 
-// StartProjection runs a projection in the background, the way RunProjection
-// does, and returns at once. The returned run tells when the projection has
-// caught up, which is when an application can start to answer queries:
+// StartProjection runs a projection in the background and returns at once. It
+// first catches up from the checkpoint with a finite read, then follows the
+// stream live. The returned run tells when the projection has caught up, which
+// is when an application can start to answer queries:
 //
-//	run := architecturekit.StartProjection(ctx, store, "/books", true, catalogProjection)
+//	run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("/books"), catalogProjection,
+//	  architecturekit.Named("catalog"))
 //
 //	select {
 //	case <-run.CaughtUp():
@@ -77,44 +80,58 @@ type ProjectionRun struct {
 //	  return run.Err()
 //	}
 //
-// The run ends when the context ends, or on a failure that trying again will
-// not fix, exactly as RunProjection does.
+// If reading fails, or if the database ends the stream, for example on a
+// restart, it waits and catches up again from where it stopped, with a delay
+// that grows with every attempt in a row (see WithReconnectDelays and
+// WithReconnectObserver). Only a failure that trying again will not fix, such
+// as an error from Apply, ends the run, and Err returns it. Ending the context
+// is how a projection is stopped, so Err returns nil then.
+//
+// To wait for the run to end, as a process does that does nothing else:
+//
+//	<-run.Done()
+//	return run.Err()
 //
 // A projection that is transactional as well is a programming error and
 // panics; use StartTransactionalProjection for it.
 func StartProjection(
 	ctx context.Context,
 	store *Store,
-	subject string,
-	recursive bool,
+	subjects Subjects,
 	projection Projection,
+	options ...ProjectionOption,
 ) *ProjectionRun {
+	requireSubjects(subjects)
 	refuseTransactional(projection)
 
-	return start(func(progress *ProjectionRun) error {
-		return run(ctx, store, subject, recursive, writerFor(projection), projection, progress)
+	return start(projectionSettingsOf(options), func(progress *ProjectionRun) error {
+		return run(ctx, store, subjects, writerFor(projection), projection, progress)
 	})
 }
 
 // StartTransactionalProjection is StartProjection for a transactional
-// projection.
+// projection. Every batch is applied within one transaction, which is
+// committed together with the ID of its last event.
 func StartTransactionalProjection(
 	ctx context.Context,
 	store *Store,
-	subject string,
-	recursive bool,
+	subjects Subjects,
 	projection Transactional,
+	options ...ProjectionOption,
 ) *ProjectionRun {
-	return start(func(progress *ProjectionRun) error {
-		return run(ctx, store, subject, recursive,
+	requireSubjects(subjects)
+
+	return start(projectionSettingsOf(options), func(progress *ProjectionRun) error {
+		return run(ctx, store, subjects,
 			&transactionalWriter{projection: projection}, projection, progress)
 	})
 }
 
 // start runs a projection in a goroutine of its own, reporting to the returned
 // run.
-func start(runProjection func(progress *ProjectionRun) error) *ProjectionRun {
+func start(settings projectionSettings, runProjection func(progress *ProjectionRun) error) *ProjectionRun {
 	progress := &ProjectionRun{
+		name:     settings.name,
 		caughtUp: make(chan struct{}),
 		done:     make(chan struct{}),
 		status:   ProjectionStatus{Phase: PhaseCatchingUp, Since: time.Now()},
@@ -125,6 +142,12 @@ func start(runProjection func(progress *ProjectionRun) error) *ProjectionRun {
 	}()
 
 	return progress
+}
+
+// Name returns the name the projection was given with Named, or an empty
+// string if it has none.
+func (r *ProjectionRun) Name() string {
+	return r.name
 }
 
 // CaughtUp is closed once the run has applied the events that were stored
@@ -157,17 +180,11 @@ func (r *ProjectionRun) Status() ProjectionStatus {
 	return r.status
 }
 
-// The functions below report the progress of a run. RunProjection and the
-// catch-up functions run without a ProjectionRun, so they all accept a nil
-// receiver and do nothing then.
+// The functions below report the progress of a run.
 
 // caughtUpNow records that the run has caught up, initially or after a
 // disruption.
 func (r *ProjectionRun) caughtUpNow() {
-	if r == nil {
-		return
-	}
-
 	r.mutex.Lock()
 	r.status.Phase = PhaseLive
 	r.status.Since = time.Now()
@@ -182,10 +199,6 @@ func (r *ProjectionRun) caughtUpNow() {
 // disrupted records that reading failed or the stream ended, and that the run
 // is about to try again.
 func (r *ProjectionRun) disrupted(err error) {
-	if r == nil {
-		return
-	}
-
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
@@ -199,7 +212,9 @@ func (r *ProjectionRun) disrupted(err error) {
 	r.status.Attempts++
 }
 
-// committed records the last event that has been applied and committed.
+// committed records the last event that has been applied and committed. The
+// catch-up functions run without a ProjectionRun, so it accepts a nil receiver
+// and does nothing then.
 func (r *ProjectionRun) committed(eventID string) {
 	if r == nil {
 		return

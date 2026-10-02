@@ -978,7 +978,7 @@ To get the pattern and the names of the placeholders, call the `Pattern` and the
 To read or observe the events of all books, for example in a projection, start from the subject that all of them lie under. Call the `Root` function to get it from the scheme, rather than writing it down a second time. It returns the literal segments before the first placeholder, here `/books`, or `/` if the pattern starts with a placeholder:
 
 ```go
-run := architecturekit.StartProjection(ctx, store, bookSubject.Root(), true, projection)
+run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree(bookSubject.Root()), projection)
 ```
 
 *Note that other subjects may lie under the same root, such as `/books/42/reviews/7` under `/books`. Use `Match` in the projection to tell them apart.*
@@ -1241,55 +1241,14 @@ logProjection := architecturekit.ProjectionFunc(func(ctx context.Context, event 
 
 ### Running Projections
 
-To run a projection, call the `RunProjection` function with a context, the store, the subject, whether to read recursively, and the projection. The function first applies all events that are already stored, then observes new events until the context is canceled. Since it blocks, run it in a goroutine:
+To run a projection, call the `StartProjection` function with a context, the store, the subjects to read, and the projection. Say which subjects with the `SubjectTree` function, which stands for the given subject together with every subject below it, or with the `ExactSubject` function, which stands for the given subject alone. A projection usually reads a tree, such as every book below `/books`. There is no default, so that every projection says which one it means, since the client SDK reads a single subject unless told otherwise.
+
+The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that:
 
 ```go
-ctx, cancel := context.WithCancel(context.TODO())
-
-go func() {
-  err := architecturekit.RunProjection(ctx, store, "/books", true, catalogProjection)
-  if err != nil {
-    // ...
-  }
-}()
-
-// Somewhere else, cancel the context, which will cause
-// the projection to stop.
-cancel()
-```
-
-Canceling the context is not an error. If `Apply` returns an error, the function stops and returns it.
-
-If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the function waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again. To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
-
-```go
-store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
-  architecturekit.WithReconnectDelays(500*time.Millisecond, 30*time.Second),
-  architecturekit.WithReconnectObserver(func(err error, delay time.Duration) {
-    log.Println("observing again", err, delay)
-  }),
+run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("/books"), catalogProjection,
+  architecturekit.Named("catalog"),
 )
-```
-
-The observer receives the reason, which is `nil` if the database ended the stream, and the delay before the next attempt.
-
-*Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable. A failure that trying again will not fix, for example a rejected API token, stops the function, which returns it (see [Handling Errors](#handling-errors)).*
-
-To only apply the events that are already stored, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied. If the context ends before that, it returns the error of the context, so that a read model that is only partly built does not look complete:
-
-```go
-err := architecturekit.CatchUpProjection(context.TODO(), store, "/books", true, catalogProjection)
-if err != nil {
-  // ...
-}
-```
-
-### Starting Projections
-
-An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly. Calling `CatchUpProjection` first and `RunProjection` afterwards reads the whole history twice, and applies it to the view twice. Call the `StartProjection` function instead. It takes the same arguments as `RunProjection`, runs the projection in the background, and returns a `*ProjectionRun` at once:
-
-```go
-run := architecturekit.StartProjection(ctx, store, "/books", true, catalogProjection)
 
 select {
 case <-run.CaughtUp():
@@ -1302,16 +1261,46 @@ case <-run.Done():
 // Start to answer queries.
 ```
 
-`CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix, as with `RunProjection`. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did.
+The options after the projection are optional. `Named` gives the projection a name, by which the observer of reconnects and the health checks report it (see [Checking Health over HTTP](#checking-health-over-http)). The `Name` function of the run returns it.
+
+`CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did, since canceling the context is how a projection is stopped. If `Apply` returns an error that trying again will not fix, the run ends, and `Err` returns it.
+
+To wait until the run ends, as a process does that runs nothing else, wait for `Done`:
+
+```go
+<-run.Done()
+return run.Err()
+```
 
 *Note that if the database can not be reached at the start, the run keeps trying, and `CaughtUp` stays open. To wait for a limited time only, add a case with `time.After` to the `select` statement.*
+
+If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again. To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
+
+```go
+store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
+  architecturekit.WithReconnectDelays(500*time.Millisecond, 30*time.Second),
+  architecturekit.WithReconnectObserver(func(reconnect architecturekit.Reconnect) {
+    log.Println("observing again", reconnect.Projection, reconnect.Attempt, reconnect.Err, reconnect.Delay)
+  }),
+)
+```
+
+The observer receives a `Reconnect` with these fields:
+
+- `Projection` is the name the projection was given with `Named`, or empty if it has none.
+- `Subject` is the subject the projection reads.
+- `Err` is the reason, which is `nil` if the database ended the stream.
+- `Delay` is how long the projection waits before the next attempt.
+- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event.
+
+*Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable. A failure that trying again will not fix, for example a rejected API token, ends the run (see [Handling Errors](#handling-errors)).*
 
 To find out where a run stands, call the `Status` function. It returns a `ProjectionStatus` with these fields:
 
 - `Phase` is `PhaseCatchingUp`, `PhaseLive`, `PhaseReconnecting`, or `PhaseStopped`.
 - `Since` is when the phase began. For `PhaseReconnecting`, that is when the disruption began, not when the latest attempt did.
 - `Err` is why the run is reconnecting or has stopped. It is `nil` if the database ended the stream, or if the run stopped because its context ended.
-- `Attempts` counts the attempts to read again within the current disruption.
+- `Attempts` counts the attempts to read again within the current disruption. Unlike `Attempt` of `Reconnect`, it starts over whenever the run has caught up, even if the stream ends again right after.
 - `Revision` is the ID of the last event the run has applied and committed.
 - `HasCaughtUp` tells whether the run has caught up at least once. Like `CaughtUp`, it stays `true` while the run reconnects later on.
 
@@ -1323,7 +1312,16 @@ if status.Phase == architecturekit.PhaseReconnecting && time.Since(status.Since)
 }
 ```
 
-For health checks that answer by the status of the runs, see [Checking Health over HTTP](#checking-health-over-http). For a transactional projection, call the `StartTransactionalProjection` function instead (see [Resuming Projections](#resuming-projections)).
+To only apply the events that are already stored, for example for a batch job or in a test, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied. If the context ends before that, it returns the error of the context, so that a read model that is only partly built does not look complete:
+
+```go
+err := architecturekit.CatchUpProjection(context.TODO(), store, architecturekit.SubjectTree("/books"), catalogProjection)
+if err != nil {
+  // ...
+}
+```
+
+For a transactional projection, call the `StartTransactionalProjection` and the `CatchUpTransactionalProjection` function instead (see [Resuming Projections](#resuming-projections)).
 
 ### Resuming Projections
 
@@ -1434,16 +1432,15 @@ type bookTableTx struct {
 }
 ```
 
-To run a transactional projection, call the `RunTransactionalProjection` or the `CatchUpTransactionalProjection` function instead of `RunProjection` or `CatchUpProjection`. They take the same arguments:
+To run a transactional projection, call the `StartTransactionalProjection` or the `CatchUpTransactionalProjection` function instead of `StartProjection` or `CatchUpProjection`. They take the same arguments:
 
 ```go
-err := architecturekit.RunTransactionalProjection(ctx, store, "/books", true, &TransactionalBookTableProjection{})
-if err != nil {
-  // ...
-}
+run := architecturekit.StartTransactionalProjection(ctx, store, architecturekit.SubjectTree("/books"), &TransactionalBookTableProjection{},
+  architecturekit.Named("book-table"),
+)
 ```
 
-*Note that `RunProjection`, `CatchUpProjection`, and `Tracking` panic for a projection that implements `Transactional` in addition to `Apply`, since calling `Apply` would bypass the transactions.*
+*Note that `StartProjection`, `CatchUpProjection`, and `Tracking` panic for a projection that implements `Transactional` in addition to `Apply`, since calling `Apply` would bypass the transactions.*
 
 ### Batching Events
 
@@ -1499,10 +1496,12 @@ func (m *LoanMailer) SaveCheckpoint(ctx context.Context, eventID string) error {
 }
 ```
 
-Here, `Mailer` and `CheckpointStore` stand for whatever your application uses to send mails and to keep a value. Start the projection as any other (see [Starting Projections](#starting-projections)):
+Here, `Mailer` and `CheckpointStore` stand for whatever your application uses to send mails and to keep a value. Start the projection as any other (see [Running Projections](#running-projections)):
 
 ```go
-run := architecturekit.StartProjection(ctx, store, "/books", true, NewLoanMailer(mailer, checkpoints))
+run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("/books"), NewLoanMailer(mailer, checkpoints),
+  architecturekit.Named("loan-mailer"),
+)
 ```
 
 Since publishing rides on a projection, it behaves like one:
@@ -2146,16 +2145,18 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
 
 ### Checking Health over HTTP
 
-An orchestrator such as Kubernetes regularly asks an application whether it can serve requests, and whether it is alive. To answer both by the state of the projections, hand the runs started with `StartProjection` over to the `Readiness` and `Liveness` functions, by name, and serve the handlers they return on paths of your choice:
+An orchestrator such as Kubernetes regularly asks an application whether it can serve requests, and whether it is alive. To answer both by the state of the projections, hand the runs started with `StartProjection` over to the `Readiness` and `Liveness` functions, and serve the handlers they return on paths of your choice. They list each projection by the name it was given with `Named`:
 
 ```go
-run := architecturekit.StartProjection(ctx, store, "/books", true, catalogProjection)
+run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("/books"), catalogProjection,
+  architecturekit.Named("catalog"),
+)
 
-projections := map[string]*architecturekit.ProjectionRun{"catalog": run}
-
-mux.Handle("GET /ready", httpapi.Readiness(projections))
-mux.Handle("GET /live", httpapi.Liveness(projections))
+mux.Handle("GET /ready", httpapi.Readiness(run))
+mux.Handle("GET /live", httpapi.Liveness(run))
 ```
+
+*Note that a run without a name, or two runs of the same name, make `Readiness` and `Liveness` panic.*
 
 Both answer with `200 OK` or `503 Service Unavailable`, depending on where the projections stand:
 

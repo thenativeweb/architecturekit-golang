@@ -97,7 +97,7 @@ type batchedRecorder struct {
 
 func (r *batchedRecorder) BatchSizes() (int, int) { return r.catchUp, r.live }
 
-// inTransactions is the writer RunTransactionalProjection uses.
+// inTransactions is the writer StartTransactionalProjection uses.
 func inTransactions(projection Transactional) projectionWriter {
 	return &transactionalWriter{projection: projection}
 }
