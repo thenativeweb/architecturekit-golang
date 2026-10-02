@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,6 +318,61 @@ func TestRevisioned(t *testing.T) {
 	})
 }
 
+// TestIfNoneMatch covers the ways HTTP lets a caller send back the tags it
+// holds: a proxy that compresses an answer marks its tag as weak, and a cache
+// that holds several answers sends all of their tags at once.
+func TestIfNoneMatch(t *testing.T) {
+	view := noteView()
+	view.Seen("4")
+
+	mux := servingNotes(t, view, time.Second)
+
+	tag := askNotes(mux, nil).Header().Get("ETag")
+	require.NotEmpty(t, tag, "the answer carries no entity tag")
+
+	for _, test := range []struct {
+		label  string
+		lines  []string
+		status int
+	}{
+		{"the tag", []string{tag}, http.StatusNotModified},
+		{"the tag, marked as weak", []string{"W/" + tag}, http.StatusNotModified},
+		{"a list that holds the tag", []string{`"other", ` + tag + `, "third"`}, http.StatusNotModified},
+		{"a list that holds the tag, without spaces", []string{`"other",` + tag}, http.StatusNotModified},
+		{"a list that holds the tag, with a tab", []string{"\"other\",\t" + tag}, http.StatusNotModified},
+		{"a list that holds the tag, marked as weak", []string{`W/"other", W/` + tag}, http.StatusNotModified},
+		{"a list over several lines that holds the tag", []string{`"other"`, tag}, http.StatusNotModified},
+		{"a list that holds the tag after one with a comma", []string{`"a,b", ` + tag}, http.StatusNotModified},
+		{"*", []string{"*"}, http.StatusNotModified},
+		{"another tag", []string{`"other"`}, http.StatusOK},
+		{"another tag, marked as weak", []string{`W/"other"`}, http.StatusOK},
+		{"a list without the tag", []string{`"other", W/"third"`}, http.StatusOK},
+		{"a tag that holds * between commas", []string{`"a,*,b"`}, http.StatusOK},
+		{"the tag without its opening quote", []string{strings.TrimPrefix(tag, `"`)}, http.StatusOK},
+		{"the tag without its closing quote", []string{strings.TrimSuffix(tag, `"`)}, http.StatusOK},
+	} {
+		t.Run("with "+test.label+" is answered with "+strconv.Itoa(test.status), func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+			request.Header.Set("X-User", "someone")
+			for _, line := range test.lines {
+				request.Header.Add("If-None-Match", line)
+			}
+
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, request)
+
+			require.Equal(t, test.status, response.Code)
+			assert.Equal(t, tag, response.Header().Get("ETag"), "the answer carries the tag as it is")
+		})
+	}
+
+	t.Run("with * is answered in full if the answer has no tag", func(t *testing.T) {
+		response := askNotes(servingNotes(t, noteView(), time.Second), map[string]string{"If-None-Match": "*"})
+
+		assert.Equal(t, http.StatusOK, response.Code, "an answer without a tag was taken for unchanged")
+	})
+}
+
 // The read side for callers who are told apart: everybody owns notes, and
 // asks for their own. This is how an application with users usually reads,
 // and why a tag must not be shared between them.
@@ -508,6 +565,16 @@ func TestAwait(t *testing.T) {
 
 		assert.NoError(t, err, "running out of time is no error, and neither is a caller who went away")
 		assert.Less(t, time.Since(started), time.Second, "waited for a caller who is gone")
+	})
+
+	t.Run("refuses a revision that is not one, and says why", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request.Header.Set(httpapi.HeaderWaitFor, "soon")
+
+		err := httpapi.Await(request, noteView(), time.Second)
+
+		assert.ErrorIs(t, err, httpapi.ErrMalformed)
+		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "the error has to stay inspectable")
 	})
 
 	t.Run("passes on what the view reports", func(t *testing.T) {

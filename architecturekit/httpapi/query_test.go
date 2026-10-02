@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -315,4 +316,67 @@ func TestRespondResult(t *testing.T) {
 
 		assert.Empty(t, logs.String(), "a failure the caller can fix must not be logged")
 	})
+}
+
+func TestResultsThatCanNotBeEncoded(t *testing.T) {
+	// A result that can not be encoded is a mistake in the code, so it is
+	// answered like any other internal failure, rather than with 200 and an
+	// empty body, and whatever category the error of encoding it claims.
+	results := map[string]httpapi.Answer[countNotes, any]{
+		"NaN, which JSON has no number for": func(context.Context, countNotes) (any, error) {
+			return []float64{math.NaN()}, nil
+		},
+		"an error with a category": func(context.Context, countNotes) (any, error) {
+			return unencodable{}, nil
+		},
+	}
+
+	for name, options := range map[string][]httpapi.QueryOption{
+		"a query":            nil,
+		"a revisioned query": {httpapi.Revisioned(seenView("4"), time.Second)},
+	} {
+		for result, answer := range results {
+			t.Run(name+" answers a result with "+result+" with 500, and logs why", func(t *testing.T) {
+				var logs bytes.Buffer
+				api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
+				mux := http.NewServeMux()
+				httpapi.Query(api, mux, "GET /notes", allNotes, answer, options...)
+
+				response := ask(t, mux, "/notes", "golo")
+
+				assert.Equal(t, http.StatusInternalServerError, response.Code)
+				assert.JSONEq(t, `{"message": "internal server error"}`, response.Body.String())
+				assert.Empty(t, response.Header().Get("ETag"), "an answer that never came was tagged")
+				assert.Empty(t, response.Header().Get(httpapi.HeaderRevision), "an answer that never came carries a revision")
+				assert.Empty(t, response.Header().Get("Cache-Control"))
+
+				assert.Equal(t, 1, strings.Count(logs.String(), "\n"), "want exactly one entry")
+				assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: internal failure"`)
+				assert.Contains(t, logs.String(), "method=GET")
+				assert.Contains(t, logs.String(), `route="GET /notes"`)
+				assert.Contains(t, logs.String(), "httpapi: encoding the result")
+			})
+		}
+	}
+
+	t.Run("RespondResult answers a result with NaN with 500, and logs why", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+		recorder := httptest.NewRecorder()
+
+		httpapi.RespondResult(recorder, request, api, []float64{math.NaN()}, nil)
+
+		assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+		assert.JSONEq(t, `{"message": "internal server error"}`, recorder.Body.String())
+		assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: internal failure"`)
+		assert.Contains(t, logs.String(), "unsupported value: NaN")
+	})
+}
+
+// seenView is a view of notes that has seen the given revision.
+func seenView(revision string) *architecturekit.InMemoryView[string, noteItem] {
+	view := noteView()
+	view.Seen(revision)
+
+	return view
 }

@@ -1848,7 +1848,7 @@ mux := http.NewServeMux()
 
 If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so does an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
 
-*Note that to answer an error that has a status code of its own with `401 Unauthorized` all the same, the function wraps it with `httpapi.ErrUnauthorized` itself, for example with `fmt.Errorf("%w: %v", httpapi.ErrUnauthorized, err)`.*
+*Note that to answer an error that has a status code of its own with `401 Unauthorized` all the same, the function wraps it with `httpapi.ErrUnauthorized` itself, for example with `fmt.Errorf("%w: %w", httpapi.ErrUnauthorized, err)`.*
 
 For an application without authentication, call the `NewPublicAPI` function instead. Commands and queries then receive `httpapi.NoUser` as user:
 
@@ -1856,7 +1856,7 @@ For an application without authentication, call the `NewPublicAPI` function inst
 api := httpapi.NewPublicAPI(store)
 ```
 
-Everything that answers through an API logs every error it does not explain to the caller in full, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. A failure of the server is logged at level `Error`, and a refusal with `401` or `409`, whose details the caller is not told, at level `Info` (see [Handling Commands over HTTP](#handling-commands-over-http)). By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
+Everything that answers through an API logs every error it does not explain to the caller in full, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. A failure of the server is logged at level `Error`, and a refusal with `401` or `409`, whose details the caller is not told, at level `Info` (see [Handling Commands over HTTP](#handling-commands-over-http)). A panic is logged with its value and its stack. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
 
 ```go
 api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
@@ -1864,7 +1864,7 @@ api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
 
 #### Determining the User
 
-To determine the user in a handler of your own, call the `UserOf` function. If the user cannot be determined, it returns an error that wraps `httpapi.ErrUnauthorized`, unless the error of the function has a status code of its own, which it then returns as it is (see [Setting Up an HTTP API](#setting-up-an-http-api)):
+To determine the user in a handler of your own, call the `UserOf` function. If the user cannot be determined, it returns an error that wraps `httpapi.ErrUnauthorized` as well as the error of the function, so that `errors.Is` and `errors.As` find either. If the error of the function has a status code of its own, though, it returns that error as it is (see [Setting Up an HTTP API](#setting-up-an-http-api)):
 
 ```go
 mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
@@ -1905,7 +1905,7 @@ func (r borrowBookRequest) ToCommand(user User) (BorrowBook, error) {
 }
 ```
 
-`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`. Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)). And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
+`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
 
 Then call the `Route` function with the request type, the API, the mux, a pattern, and the decider:
 
@@ -1945,6 +1945,10 @@ The message is the error message if the error is written for the caller, such as
 
 The actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)): at level `Info` for `401` and `409`, since the server did not fail, and at level `Error` for `500` and above.
 
+If handling a request panics, for example because `Build` received an ID that `ToCommand` did not check, the route answers with `500 Internal Server Error` and the message `internal server error`, like any other internal failure, and logs the panic at level `Error`, with its value and its stack. Otherwise, `net/http` would close the connection, and the caller would get no answer at all.
+
+*Note that a panic with `http.ErrAbortHandler` is passed on, since `net/http` expects it to abort the response.*
+
 To answer this way in a handler of your own, call the `Respond` function with the response writer, the request, the API, the written events, and the error. Like the route, it logs through the logger of the API, with the route of the request.
 
 #### Adding to the Answer
@@ -1983,7 +1987,7 @@ The route then answers with both:
 
 The function is only called if the command has succeeded. If it returns an error, the events are written all the same, so the route still answers with `200 OK` and the revision, which the caller needs to read its own writes, and must not take for a reason to send the command again. The answer then holds whatever fields the function returned along with the error, or none, and the error is logged through the logger of the API, with the route.
 
-The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
+The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object, so they must not hold `NaN`, for example, which JSON has no number for. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
 
 *Note that the written events are available in `Handled` as well. Add them only deliberately: they are the inner model of the application, every caller that reads them depends on their shape, and they may contain data that is not meant for the caller.*
 
@@ -2009,6 +2013,8 @@ mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Req
 
 *Note that `Handled` contains the command even if executing it fails.*
 
+*Note that `Handle` returns a panic as an error, which `StatusFor` maps to `500`, and which `Respond` logs with the value and the stack of the panic.*
+
 #### Authorizing Commands
 
 To refuse a command, return `httpapi.ErrForbidden` from `ToCommand`. The request is then answered with `403 Forbidden`, and the command is not executed:
@@ -2028,7 +2034,9 @@ func (r acquireBookRequest) ToCommand(user User) (AcquireBook, error) {
 }
 ```
 
-The same applies to the other errors of the `httpapi` package, such as `httpapi.ErrNotFound`, and to errors of the category `ErrDomain`: they keep their status code. Any other error returned from `ToCommand` is answered with `400 Bad Request`.
+The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if `ToCommand` looks something up in another service, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
+
+Any other error returned from `ToCommand` is answered with `400 Bad Request`, with the error as the message. In `Handle`, it wraps `httpapi.ErrMalformed` as well as the original error, so that `errors.Is` and `errors.As` find either.
 
 #### Validating Requests
 
@@ -2036,7 +2044,7 @@ Before a request reaches `ToCommand`, it is validated:
 
 - The `Content-Type` header must be `application/json`, otherwise the request is answered with `415 Unsupported Media Type`, and the error is `httpapi.ErrUnsupportedMediaType`.
 - The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`.
-- The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case.
+- The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`, which wraps the error of decoding, so that `errors.As` finds it. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case.
 
 *Note that parsers disagree on what a name that occurs twice means, and on data after the value: one takes the first value, another the last, and one stops after the value, while another reads on. A filter or a proxy in front of the application might then check another value than the one the application uses, which is why both are refused.*
 
@@ -2104,7 +2112,7 @@ Then call the `Query` function with the API, the mux, a pattern, the function th
 httpapi.Query(api, mux, "GET /api/books", toListBooks, answerBooks(listBooks(catalog)))
 ```
 
-The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. Errors are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
+The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
 
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error.
 
@@ -2124,6 +2132,8 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
   // ...
 })
 ```
+
+*Note that `Ask` returns a panic as an error, as `Handle` does (see [Answering Commands in Your Own Format](#answering-commands-in-your-own-format)).*
 
 #### Reading Queries from the Body
 
@@ -2200,6 +2210,10 @@ It checks the categories in this order:
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged.*
 
+*Note that an error of `ToCommand`, of the function that returns a query, or of the function that determines the user keeps its status code only if it has one of its own, or belongs to the category `ErrPermanent`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
+
+*Note that a panic while a route handles a request is answered with `500 Internal Server Error` as well (see [Handling Commands over HTTP](#handling-commands-over-http)).*
+
 *Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, and `500` and above, as `Respond` and `RespondResult` do, since it may name internals (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
 ### Reading Your Own Writes over HTTP
@@ -2222,6 +2236,8 @@ curl http://localhost:8080/api/books \
 The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. Without the header, it does not wait at all. If the header holds something that is not a revision, the request is answered with `400 Bad Request`.
 
 Once the view has seen at least one event, the response contains the revision it shows in the `Revision` header, as well as an `ETag` header and `Cache-Control: private, no-cache`. If the caller sends the `ETag` in the `If-None-Match` header, asks the same, and the view has not changed since, the request is answered with `304 Not Modified`. `private` keeps shared caches, such as proxies, from keeping the answer.
+
+The header is read as HTTP has it: it may hold a list of tags, separated by commas, or `*`, which stands for any tag. A tag also counts if it is marked as weak, as `W/"…"`, which a proxy does when it compresses the answer.
 
 The `ETag` holds the query that was asked, with every field. So two callers get the same `ETag` only if their queries are equal: a query that holds the user, or anything else that tells callers apart, gets an `ETag` of its own for each of them. That matters as soon as callers share a browser one after the other, since the browser asks with the `ETag` it kept for the one before. The query is built before the route waits or answers `304 Not Modified`, so a caller who may not ask is refused first.
 
@@ -2281,7 +2297,7 @@ httpapi.Query(api, mux, "GET /api/books-due-today", toListBooksDueToday, answerB
 
 #### Waiting for a Revision in a Handler of Your Own
 
-To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error. It returns an error if the header holds something that is not a revision, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
+To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error. It returns an error if the header holds something that is not a revision, which wraps `httpapi.ErrMalformed` as well as `architecturekit.ErrNotARevision`, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
 
 ```go
 mux.HandleFunc("GET /api/books.csv", func(w http.ResponseWriter, r *http.Request) {

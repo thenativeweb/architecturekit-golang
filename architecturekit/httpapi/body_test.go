@@ -1,6 +1,8 @@
 package httpapi_test
 
 import (
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -169,9 +171,19 @@ func TestBodyOf(t *testing.T) {
 		assert.Equal(t, previewRequest{CustomerID: "42", Quantity: 3, Delivery: &deliveryOption{Address: "Main Street 1"}}, preview)
 	})
 
+	t.Run("keeps the error of decoding inspectable", func(t *testing.T) {
+		_, err := httpapi.BodyOf[previewRequest](bodyRequest("application/json", strings.NewReader(`{"quantity":"three"}`)))
+		require.ErrorIs(t, err, httpapi.ErrMalformed)
+
+		mismatch, isMismatch := errors.AsType[*json.UnmarshalTypeError](err)
+		require.True(t, isMismatch, "errors.As has to find the error of decoding")
+		assert.Equal(t, "quantity", mismatch.Field)
+	})
+
 	t.Run("rejects a body that can not be read", func(t *testing.T) {
 		_, err := httpapi.BodyOf[previewRequest](bodyRequest("application/json", failingReader{}))
 		assert.ErrorIs(t, err, httpapi.ErrMalformed)
+		assert.ErrorIs(t, err, errBrokenBody, "the error of reading has to stay inspectable")
 	})
 
 	t.Run("answers with the statuses of a command", func(t *testing.T) {
