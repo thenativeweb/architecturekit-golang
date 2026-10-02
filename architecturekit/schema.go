@@ -6,6 +6,7 @@ import (
 	jsonv2 "encoding/json/v2"
 	"fmt"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -69,9 +70,11 @@ type derivedSchema struct {
 //
 //   - A struct is an object with the fields encoding/json writes: named by
 //     their json tags, without fields tagged "-" and unexported ones, with the
-//     fields of embedded structs in place of the embedded struct. Fields with
-//     omitempty or omitzero, and fields of an embedded pointer, are optional,
-//     all others are required, and no other fields are allowed.
+//     fields of embedded structs in place of the embedded struct, each
+//     described by its own type, even if the embedded struct has a Schema
+//     function. Fields with omitempty or omitzero, and fields of an embedded
+//     pointer, are optional, all others are required, and no other fields are
+//     allowed.
 //   - A string is a string, a bool a boolean, an integer an integer, and a
 //     floating-point number a number. The string option of a json tag turns
 //     such a field into a string.
@@ -98,6 +101,14 @@ type derivedSchema struct {
 // for a value it can take the address of. Nor can a recursive type, a channel,
 // a function or a complex number. That is a programming error, so DeriveSchema
 // panics, naming the type.
+//
+// DeriveSchema also refuses a type that has its Schema function only from an
+// embedded field, as Evolve does for an event and for the type of a field: Go
+// promotes the function to the struct, but it describes the embedded type
+// alone, while encoding/json writes the other fields of the struct next to
+// those of the embedded type. That is a programming error as well, so
+// DeriveSchema panics, naming the type and the embedded field. Give the type a
+// Schema function of its own, or make the embedded type a named field.
 func DeriveSchema[T any]() map[string]any {
 	schema, err := deriveStructure(reflect.TypeFor[T]())
 	if err != nil {
@@ -108,9 +119,13 @@ func DeriveSchema[T any]() map[string]any {
 }
 
 // eventSchemaOf returns the schema of an event type: its own, if it has a
-// Schema function, and the derived one otherwise.
+// Schema function, and the derived one otherwise. It refuses an event type
+// that has its Schema function only from an embedded field.
 func eventSchemaOf[TEvent Event]() (map[string]any, error) {
 	eventType := reflect.TypeFor[TEvent]()
+	if err := refuseEmbeddedSchema(eventType); err != nil {
+		return nil, err
+	}
 	if schema, hasOwn := ownSchema(eventType); hasOwn {
 		return schema, nil
 	}
@@ -120,7 +135,9 @@ func eventSchemaOf[TEvent Event]() (map[string]any, error) {
 
 // ownSchema calls the Schema function of a type, if it has one, with either a
 // value or a pointer receiver. A pointer has no schema of its own, since it
-// only borrows the functions of the type it points to.
+// only borrows the functions of the type it points to. It does not tell a
+// Schema function the type has only from an embedded field from one of its
+// own; refuseEmbeddedSchema does.
 func ownSchema(valueType reflect.Type) (map[string]any, bool) {
 	switch {
 	case valueType.Kind() == reflect.Pointer:
@@ -134,10 +151,120 @@ func ownSchema(valueType reflect.Type) (map[string]any, bool) {
 	}
 }
 
+// refuseEmbeddedSchema returns an error if a type has its Schema function only
+// from an embedded field. Go promotes the function to the struct that embeds
+// the field, but the function describes the embedded type alone, while
+// encoding/json writes the other fields of the struct next to those of the
+// embedded type, or, for an embedded field with a json tag, the embedded type
+// as a field of its own. The schema would not describe what encoding/json
+// writes, and it can not be changed once it is registered.
+func refuseEmbeddedSchema(valueType reflect.Type) error {
+	field, isEmbedded := embeddedSchemaField(valueType)
+	if !isEmbedded {
+		return nil
+	}
+
+	return fmt.Errorf("%[1]v has a Schema function only from its embedded field %[2]s, which describes %[2]s alone; "+
+		"give %[1]v a Schema function of its own, or make %[2]s a named field", valueType, field)
+}
+
+// embeddedSchemaField returns the embedded field a type has its Schema function
+// from, as the path of embedded fields to the type that declares the function,
+// such as Base.Money. It returns false if the type declares the function
+// itself, or has none. A pointer has none of its own, since it only borrows the
+// functions of the type it points to.
+//
+// It looks at the embedded fields one depth after the other, since Go promotes
+// the function of the least deeply embedded field. A type without a Schema
+// function is not looked into, since none of its embedded fields can have
+// given it one. So the search ends at the depth of the type that declares the
+// function, even if types embed each other through pointers.
+func embeddedSchemaField(valueType reflect.Type) (string, bool) {
+	if valueType.Kind() == reflect.Pointer {
+		return "", false
+	}
+
+	type embedding struct {
+		valueType reflect.Type
+		path      []string
+	}
+
+	current := []embedding{{valueType: valueType}}
+	for len(current) > 0 {
+		var next []embedding
+
+		for _, embedded := range current {
+			function, hasOne := schemaFunction(embedded.valueType)
+			if !hasOne {
+				continue
+			}
+			if !isPromoted(function) {
+				return strings.Join(embedded.path, "."), len(embedded.path) > 0
+			}
+
+			// Only a struct has promoted functions, so this one has fields.
+			for field := range embedded.valueType.Fields() {
+				if !field.Anonymous {
+					continue
+				}
+
+				fieldType := field.Type
+				if fieldType.Kind() == reflect.Pointer {
+					fieldType = fieldType.Elem()
+				}
+				next = append(next, embedding{valueType: fieldType, path: append(slices.Clone(embedded.path), field.Name)})
+			}
+		}
+
+		current = next
+	}
+
+	return "", false
+}
+
+// schemaFunction returns the Schema function of a type, with either a value or
+// a pointer receiver. It looks at the type itself first, since a pointer also
+// has the functions with a value receiver, through a function the compiler
+// generates (see isPromoted).
+func schemaFunction(valueType reflect.Type) (reflect.Method, bool) {
+	for _, receiverType := range []reflect.Type{valueType, reflect.PointerTo(valueType)} {
+		if receiverType.Implements(describesSchemaType) {
+			return receiverType.MethodByName("Schema")
+		}
+	}
+
+	return reflect.Method{}, false
+}
+
+// isPromoted reports whether a method is promoted from an embedded field,
+// rather than declared for its type. reflect does not say, and the embedded
+// fields can not tell either, since a type that declares a method hides the
+// one of an embedded field with the same name. The compiler does tell: for a
+// promoted method, it generates a function that calls the method of the
+// embedded field, and gives it the position <autogenerated>, whereas a declared
+// method keeps the position of its declaration, also for an instance of a
+// generic type. The method of an interface has no function, and the interface
+// declares it.
+func isPromoted(method reflect.Method) bool {
+	if !method.Func.IsValid() {
+		return false
+	}
+
+	code := method.Func.Pointer()
+	file, _ := runtime.FuncForPC(code).FileLine(code)
+
+	return file == "<autogenerated>"
+}
+
 // deriveStructure derives the schema of a type from its structure, without
 // calling its own Schema function, and returns a copy that belongs to the
-// caller.
+// caller. It refuses a type that has its Schema function only from an embedded
+// field, as Evolve does.
 func deriveStructure(valueType reflect.Type) (map[string]any, error) {
+	if err := refuseEmbeddedSchema(valueType); err != nil {
+		return nil, err
+	}
+
 	cached, isCached := derivedSchemas.Load(valueType)
 	if !isCached {
 		schema, err := (&deriver{inProgress: map[reflect.Type]bool{}}).structure(valueType)
@@ -175,8 +302,12 @@ type deriver struct {
 }
 
 // schemaOf describes a type the way it appears as a field: by its own Schema
-// function, if it has one, and by its structure otherwise.
+// function, if it has one, and by its structure otherwise. It refuses a type
+// that has its Schema function only from an embedded field.
 func (d *deriver) schemaOf(valueType reflect.Type) (map[string]any, error) {
+	if err := refuseEmbeddedSchema(valueType); err != nil {
+		return nil, err
+	}
 	if schema, hasOwn := ownSchema(valueType); hasOwn {
 		if schema == nil {
 			return nil, fmt.Errorf("the Schema function of %v returns nil", valueType)
