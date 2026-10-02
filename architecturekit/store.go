@@ -384,13 +384,17 @@ func (s *Store) write(
 // the database refuses the given one, e.g. because stored events of the type
 // do not match it, RegisterSchemas fails permanently. To change the shape of
 // an event, introduce a new event type and an upcaster instead.
-func (s *Store) RegisterSchemas(schemas ...[]EventSchema) error {
+//
+// If the context ends first, RegisterSchemas fails with the context's error.
+// The client registers a schema without a context, so a registration that has
+// begun is finished, but none begins once the context has ended.
+func RegisterSchemas(ctx context.Context, store *Store, schemas ...[]EventSchema) error {
 	given, err := collectSchemas(schemas)
 	if err != nil {
 		return err
 	}
 
-	registered, err := s.readRegisteredSchemas()
+	registered, err := store.readRegisteredSchemas(ctx)
 	if err != nil {
 		return err
 	}
@@ -399,7 +403,11 @@ func (s *Store) RegisterSchemas(schemas ...[]EventSchema) error {
 		current, isRegistered := registered[schema.EventType]
 
 		if !isRegistered {
-			refusal := s.client.RegisterEventSchema(schema.EventType, schema.Schema)
+			if ctx.Err() != nil {
+				return contextEnded(ctx, fmt.Sprintf("registering schema for %q", schema.EventType))
+			}
+
+			refusal := store.client.RegisterEventSchema(schema.EventType, schema.Schema)
 			if refusal == nil {
 				continue
 			}
@@ -411,7 +419,7 @@ func (s *Store) RegisterSchemas(schemas ...[]EventSchema) error {
 			// meantime, or the database refused it, e.g. because stored events
 			// of the type do not match it. Only the registered schemas tell the
 			// two apart.
-			registered, err = s.readRegisteredSchemas()
+			registered, err = store.readRegisteredSchemas(ctx)
 			if err != nil {
 				return err
 			}
@@ -466,12 +474,12 @@ func collectSchemas(groups [][]EventSchema) ([]EventSchema, error) {
 // It reads all event types to the end, and deliberately does not ask for a
 // single one: after reading a single event type that further event types
 // follow, EventSourcingDB 1.2.0 stops answering writes.
-func (s *Store) readRegisteredSchemas() (map[string]map[string]any, error) {
+func (s *Store) readRegisteredSchemas(ctx context.Context) (map[string]map[string]any, error) {
 	registered := map[string]map[string]any{}
 
-	for eventType, err := range s.client.ReadEventTypes(context.Background()) {
+	for eventType, err := range s.client.ReadEventTypes(ctx) {
 		if err != nil {
-			return nil, databaseFailure(err, "reading the registered schemas")
+			return nil, readFailure(ctx, err, "reading the registered schemas")
 		}
 		if eventType.Schema != nil {
 			registered[eventType.EventType] = *eventType.Schema

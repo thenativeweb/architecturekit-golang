@@ -152,11 +152,21 @@ func TestSharedDatabase(t *testing.T) {
 		assert.NoError(t, client.Ping())
 	})
 
+	t.Run("hands its options to the store", func(t *testing.T) {
+		applied := 0
+		option := architecturekit.StoreOption(func(*architecturekit.Store) { applied++ })
+
+		architecturekittest.SharedDatabase(t).Store(t, journalSource, journalState.Schemas(), option)
+		architecturekittest.Store(t, journalSource, journalState.Schemas(), option)
+
+		assert.Equal(t, 2, applied, "the options were not handed to the store")
+	})
+
 	t.Run("is what Store uses", func(t *testing.T) {
 		store := architecturekittest.Store(t, journalSource, journalState.Schemas())
 		name, _ := writeAndRead(t, store, "through Store")
 
-		viaShared := architecturekittest.SharedDatabase(t).Store(t, journalSource)
+		viaShared := architecturekittest.SharedDatabase(t).Store(t, journalSource, nil)
 		current, err := architecturekit.Load(context.Background(), viaShared, journalState, "/journals/"+name)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"through Store"}, current.Entries)
@@ -181,7 +191,7 @@ func TestIsolatedDatabase(t *testing.T) {
 			assert.Equal(t, []string{"isolated entry"}, current.Entries)
 
 			inShared, err := architecturekit.Load(context.Background(),
-				architecturekittest.SharedDatabase(t).Store(t, journalSource), journalState, "/journals/"+name)
+				architecturekittest.SharedDatabase(t).Store(t, journalSource, nil), journalState, "/journals/"+name)
 			require.NoError(t, err)
 			assert.Empty(t, inShared.Entries, "the shared database must not see the events of an isolated one")
 		})
@@ -190,10 +200,14 @@ func TestIsolatedDatabase(t *testing.T) {
 		assert.Error(t, isolated.Client().Ping(), "the database has to be stopped once the test is over")
 	})
 
-	t.Run("is what IsolatedStore uses", func(t *testing.T) {
-		store := architecturekittest.IsolatedStore(t, journalSource, journalState.Schemas())
+	t.Run("is what IsolatedStore uses with the options it is given", func(t *testing.T) {
+		applied := 0
+		option := architecturekit.StoreOption(func(*architecturekit.Store) { applied++ })
+
+		store := architecturekittest.IsolatedStore(t, journalSource, journalState.Schemas(), option)
 
 		_, current := writeAndRead(t, store, "through IsolatedStore")
 		assert.Equal(t, []string{"through IsolatedStore"}, current.Entries)
+		assert.Equal(t, 1, applied, "the options were not handed to the store")
 	})
 }

@@ -3,6 +3,7 @@ package architecturekit_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -220,7 +221,7 @@ func TestExecute(t *testing.T) {
 	t.Run("reports a schema violation as permanent", func(t *testing.T) {
 		store := requireStore(t)
 
-		err := store.RegisterSchemas([]architecturekit.EventSchema{{
+		err := architecturekit.RegisterSchemas(context.Background(), store, []architecturekit.EventSchema{{
 			EventType: (labelled{}).EventType(),
 			Schema:    (labelled{}).Schema(),
 		}})
@@ -289,13 +290,68 @@ func TestConflict(t *testing.T) {
 	})
 }
 
+// endsBeforeRegistering is a context that counts as ended to whoever asks
+// for its error, while its Done channel stays open. The client only watches
+// Done while it reads, so reading succeeds, and the first one to ask is the
+// check right before a schema would be registered.
+type endsBeforeRegistering struct {
+	context.Context
+}
+
+func (endsBeforeRegistering) Err() error { return context.Canceled }
+
+func registeredSchemaOf(t *testing.T, eventType string) bool {
+	t.Helper()
+
+	for registered, err := range rawClient(t).ReadEventTypes(context.Background()) {
+		require.NoError(t, err)
+		if registered.EventType == eventType && registered.Schema != nil {
+			return true
+		}
+	}
+
+	return false
+}
+
+func TestRegisterSchemasWithAContextThatEnds(t *testing.T) {
+	t.Run("fails with the error of the context while reading", func(t *testing.T) {
+		store := requireStore(t)
+
+		// With every schema registered already, reading the registered ones is
+		// all that is left to do, so that is where the context has to count.
+		require.NoError(t, architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas()))
+
+		ended, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err := architecturekit.RegisterSchemas(ended, store, counterState().Schemas())
+
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.NotErrorIs(t, err, architecturekit.ErrTransient, "an ended context is no failure of the database")
+	})
+
+	t.Run("registers nothing once the context has ended", func(t *testing.T) {
+		store := requireStore(t)
+		eventType := fmt.Sprintf("io.thenativeweb.test.never-registered-%d", time.Now().UnixNano())
+
+		err := architecturekit.RegisterSchemas(endsBeforeRegistering{context.Background()}, store, []architecturekit.EventSchema{{
+			EventType: eventType,
+			Schema:    map[string]any{"type": "object"},
+		}})
+
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Contains(t, err.Error(), eventType, "the error names the schema it did not register")
+		assert.False(t, registeredSchemaOf(t, eventType), "a schema was registered after the context had ended")
+	})
+}
+
 func TestRegisterSchemas(t *testing.T) {
 	t.Run("is idempotent", func(t *testing.T) {
 		store := requireStore(t)
 
-		assert.NoError(t, store.RegisterSchemas(counterState().Schemas(), counterState().Schemas()),
+		assert.NoError(t, architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas(), counterState().Schemas()),
 			"duplicates within one call")
-		assert.NoError(t, store.RegisterSchemas(counterState().Schemas()), "second call")
+		assert.NoError(t, architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas()), "second call")
 	})
 
 	t.Run("keeps the database writable", func(t *testing.T) {
@@ -320,7 +376,7 @@ func TestRegisterSchemas(t *testing.T) {
 			Schema:    objectSchema(map[string]any{}),
 		}}
 		for range 2 {
-			require.NoError(t, store.RegisterSchemas(schemas))
+			require.NoError(t, architecturekit.RegisterSchemas(context.Background(), store, schemas))
 		}
 
 		written := make(chan error, 1)
@@ -345,7 +401,7 @@ func TestRegisterSchemas(t *testing.T) {
 	t.Run("reports an unreachable database", func(t *testing.T) {
 		store := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
 
-		err := store.RegisterSchemas(counterState().Schemas())
+		err := architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas())
 
 		assert.ErrorIs(t, err, architecturekit.ErrTransient, "an unreachable database is transient")
 		assert.ErrorContains(t, err, "reading the registered schemas")
@@ -357,7 +413,7 @@ func TestRegisterSchemas(t *testing.T) {
 		notJSON := map[string]any{"type": make(chan int)}
 
 		// Twice within one call, where the schemas are compared with each other.
-		err := store.RegisterSchemas(
+		err := architecturekit.RegisterSchemas(context.Background(), store,
 			[]architecturekit.EventSchema{{EventType: eventType, Schema: objectSchema(map[string]any{})}},
 			[]architecturekit.EventSchema{{EventType: eventType, Schema: notJSON}},
 		)
@@ -365,11 +421,11 @@ func TestRegisterSchemas(t *testing.T) {
 		assert.ErrorContains(t, err, "comparing schemas", "within one call")
 
 		// Once registered, where the schema is compared with the registered one.
-		require.NoError(t, store.RegisterSchemas([]architecturekit.EventSchema{{
+		require.NoError(t, architecturekit.RegisterSchemas(context.Background(), store, []architecturekit.EventSchema{{
 			EventType: eventType,
 			Schema:    objectSchema(map[string]any{}),
 		}}))
-		err = store.RegisterSchemas([]architecturekit.EventSchema{{EventType: eventType, Schema: notJSON}})
+		err = architecturekit.RegisterSchemas(context.Background(), store, []architecturekit.EventSchema{{EventType: eventType, Schema: notJSON}})
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "against the registered one")
 		assert.ErrorContains(t, err, "comparing schemas", "against the registered one")
 	})
@@ -402,7 +458,7 @@ func TestRegisterSchemas(t *testing.T) {
 		require.NoError(t, err)
 		store := architecturekit.NewStore(client, "https://thenativeweb.io")
 
-		err = store.RegisterSchemas(counterState().Schemas())
+		err = architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas())
 
 		assert.ErrorIs(t, err, architecturekit.ErrTransient, "a failing read is transient")
 		assert.ErrorContains(t, err, "reading the registered schemas")
@@ -411,7 +467,7 @@ func TestRegisterSchemas(t *testing.T) {
 	t.Run("fails on an invalid schema", func(t *testing.T) {
 		store := requireStore(t)
 
-		err := store.RegisterSchemas([]architecturekit.EventSchema{{
+		err := architecturekit.RegisterSchemas(context.Background(), store, []architecturekit.EventSchema{{
 			EventType: "io.thenativeweb.test.invalid",
 			Schema:    map[string]any{"type": "this-is-not-a-json-schema-type"},
 		}})
@@ -424,14 +480,14 @@ func TestRegisterSchemas(t *testing.T) {
 		store := requireStore(t)
 		eventType := "io.thenativeweb.test.changed"
 
-		err := store.RegisterSchemas([]architecturekit.EventSchema{{
+		err := architecturekit.RegisterSchemas(context.Background(), store, []architecturekit.EventSchema{{
 			EventType: eventType,
 			Schema:    objectSchema(map[string]any{"text": map[string]any{"type": "string"}}),
 		}})
 		require.NoError(t, err, "first registration")
 
 		// The same event type, now with an additional field.
-		err = store.RegisterSchemas([]architecturekit.EventSchema{{
+		err = architecturekit.RegisterSchemas(context.Background(), store, []architecturekit.EventSchema{{
 			EventType: eventType,
 			Schema: objectSchema(map[string]any{
 				"text": map[string]any{"type": "string"},
@@ -456,7 +512,7 @@ func TestRegisterSchemas(t *testing.T) {
 		}}, nil)
 		require.NoError(t, err)
 
-		err = store.RegisterSchemas([]architecturekit.EventSchema{{
+		err = architecturekit.RegisterSchemas(context.Background(), store, []architecturekit.EventSchema{{
 			EventType: eventType,
 			Schema:    objectSchema(map[string]any{"text": map[string]any{"type": "string"}}),
 		}})
@@ -472,7 +528,7 @@ func TestRegisterSchemas(t *testing.T) {
 		// The schema is checked before the database is contacted.
 		store := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
 
-		err := store.RegisterSchemas([]architecturekit.EventSchema{{
+		err := architecturekit.RegisterSchemas(context.Background(), store, []architecturekit.EventSchema{{
 			EventType: "io.thenativeweb.test.schemaless",
 		}})
 
@@ -484,7 +540,7 @@ func TestRegisterSchemas(t *testing.T) {
 		store := requireStore(t)
 		eventType := "io.thenativeweb.test.twofold"
 
-		err := store.RegisterSchemas(
+		err := architecturekit.RegisterSchemas(context.Background(), store,
 			[]architecturekit.EventSchema{{
 				EventType: eventType,
 				Schema:    objectSchema(map[string]any{}),

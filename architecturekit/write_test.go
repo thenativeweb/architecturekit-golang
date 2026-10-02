@@ -61,7 +61,7 @@ func TestWrite(t *testing.T) {
 
 	t.Run("reports a schema violation as permanent", func(t *testing.T) {
 		store := requireStore(t)
-		require.NoError(t, store.RegisterSchemas([]architecturekit.EventSchema{{
+		require.NoError(t, architecturekit.RegisterSchemas(context.Background(), store, []architecturekit.EventSchema{{
 			EventType: (labelled{}).EventType(),
 			Schema:    (labelled{}).Schema(),
 		}}))

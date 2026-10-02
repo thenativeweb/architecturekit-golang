@@ -83,7 +83,7 @@ func TestDatabaseFailures(t *testing.T) {
 		store := architecturekit.NewStore(
 			refusingDatabase(t, "/api/v1/read-event-types", http.StatusUnauthorized, "unauthorized"), "https://thenativeweb.io")
 
-		err := store.RegisterSchemas(counterState().Schemas())
+		err := architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas())
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a rejected API token is permanent")
 		assert.NotErrorIs(t, err, architecturekit.ErrTransient)
@@ -94,7 +94,7 @@ func TestDatabaseFailures(t *testing.T) {
 			refusingDatabase(t, "/api/v1/register-event-schema", http.StatusServiceUnavailable, "shutting down"),
 			"https://thenativeweb.io")
 
-		err := store.RegisterSchemas(counterState().Schemas())
+		err := architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas())
 
 		assert.ErrorIs(t, err, architecturekit.ErrTransient, "an unavailable database is transient")
 		assert.NotErrorIs(t, err, architecturekit.ErrPermanent)
