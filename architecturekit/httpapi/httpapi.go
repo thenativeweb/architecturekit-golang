@@ -1,4 +1,6 @@
-// Package httpapi exposes commands over HTTP. It is optional: the kit's core
+// Package httpapi exposes commands and queries over HTTP, lets a caller read
+// its own writes (see Revisioned and Await), and answers the health checks of
+// an orchestrator (see Readiness and Liveness). It is optional: the kit's core
 // knows nothing about transports, and everything here can be replaced by a
 // handler of your own.
 package httpapi
@@ -180,9 +182,10 @@ func (api *API[TUser]) loggerOrDefault() *slog.Logger {
 
 // UserOf determines who is asking, the same way Handle and Ask do.
 //
-// Use it when you write a handler of your own -- a stream, a download, a page
-// -- so that it treats callers exactly like the routes the kit wires up. An
-// unknown caller comes back as ErrUnauthorized, which StatusFor maps to 401.
+// Use it when you write a handler of your own, such as a stream, a download,
+// or a page, so that it treats callers exactly like the routes the kit wires
+// up. An unknown caller comes back as ErrUnauthorized, which StatusFor maps to
+// 401.
 //
 // An error of userFrom that StatusFor maps to a status of its own comes back
 // as it is, and so does one of the category architecturekit.ErrPermanent, so

@@ -16,11 +16,12 @@ import (
 // turns "wait a moment and hope" into a condition the server can check.
 //
 // The request names the revision it needs in the Wait-For-Revision header; the
-// response says in its ETag which revision it actually shows. Both headers carry the
-// same kind of value, but they mean different things, which is why the
-// standard If-None-Match is not used for the waiting: an ETag is opaque and
-// compares only for equality, while a revision is ordered. A server that is
-// behind would answer "not equal, here you go" and hand out stale data.
+// response says in the Revision header which revision it actually shows, and
+// builds its ETag from it. The ETag means something other than the revision,
+// though, which is why the standard If-None-Match is not used for the waiting:
+// an ETag is opaque and compares only for equality, while a revision is
+// ordered. A server that is behind would answer "not equal, here you go" and
+// hand out stale data.
 const (
 	// HeaderWaitFor is what a caller sends to name the revision it needs.
 	HeaderWaitFor = "Wait-For-Revision"
@@ -41,9 +42,9 @@ const DefaultWait = 5 * time.Second
 //
 // It returns nil when the view reached the revision and when the request asked
 // for none. Running out of time is not an error either: the caller answers
-// with what the view has, and the ETag says which revision that is. Only a
-// revision that cannot be read as one is refused, because that is a mistake in
-// the request rather than a slow projection.
+// with what the view has. Only a revision that cannot be read as one is
+// refused, because that is a mistake in the request rather than a slow
+// projection.
 func Await(
 	r *http.Request,
 	view architecturekit.Revisioned,
@@ -74,7 +75,7 @@ func Await(
 // as a string that changes when the answer would.
 //
 // A revision describes the read model and nothing else. That is enough while
-// the answer follows from the stored events alone -- and it stops being
+// the answer follows from the stored events alone, and it stops being
 // enough the moment anything outside them takes part. "Everything due today"
 // is the plain case: the same events mean something different after
 // midnight, without a single event being written. A tag built from the
@@ -179,7 +180,7 @@ func writeRevision(w http.ResponseWriter, revision, tag string) {
 
 // etagOf ties the revision to the resource it describes and to the query that
 // was asked. Every query over the same view shares a revision, so a tag that
-// held nothing else would match across resources and across callers -- and a
+// held nothing else would match across resources and across callers, and a
 // caller that sent a tag it got elsewhere would be told, wrongly, that nothing
 // had changed.
 //

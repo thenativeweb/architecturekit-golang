@@ -159,7 +159,7 @@ For `BookBorrowed`, this yields the following schema:
 
 These rules do not change, since a registered schema can not change either.
 
-To constrain a value further than its Go type does, declare a type for it with a `Schema` function, which returns the JSON schema of the type. Wherever a field has that type, the derived schema takes it over. For example, to make sure that `borrowedUntil` is a date, declare a `Date` type and use it for the field:
+To constrain a value further than its Go type does, declare a type for it with a `Schema` function, which returns the JSON schema of the type. Wherever a field has that type, the derived schema takes it over. For example, `borrowedUntil` accepts any string so far. To make sure that it is a date, `BookBorrowed` could use a `Date` type for the field:
 
 ```go
 type Date string
@@ -173,6 +173,8 @@ type BookBorrowed struct {
   BorrowedUntil Date   `json:"borrowedUntil"`
 }
 ```
+
+*Note that the other examples in this README keep `BorrowedUntil` a `string`. With the `Date` type, they would convert between the two, as in `Date(cmd.BorrowedUntil)`.*
 
 A type that encodes itself with a `MarshalJSON` function, or with `MarshalJSONTo` of `encoding/json/v2`, which `encoding/json` calls as well, needs such a `Schema` function, too, since the kit can not know what the function writes. So does a type that has its `MarshalText` or `AppendText` function on a pointer receiver only: `encoding/json` calls it only for a value it can take the address of, so whether such a value is written as a string depends on where it is. If the schema of an event can not be derived, for example because of such a type, a recursive type, or a channel, `Evolve` panics and names the field.
 
@@ -268,7 +270,7 @@ var acquireBook = architecturekit.Decider[AcquireBook, Book]{
 }
 ```
 
-To reject a command, return an error created with the `NewDomainError` function. It takes a format string and arguments, like `fmt.Errorf`, and returns a `*DomainError`, whose message is exactly the formatted text, and which belongs to the category `ErrDomain` (see [Handling Errors](#handling-errors)).
+To reject a command, return an error created with the `NewDomainError` function. It takes a format string and arguments, like `fmt.Errorf`, and returns an error of the type `*DomainError`, whose message is exactly the formatted text, and which belongs to the category `ErrDomain` (see [Handling Errors](#handling-errors)).
 
 A decider may check several rules:
 
@@ -387,7 +389,7 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", 
 
 `Execute` then reads the state anew, and the decider decides on it, up to four more times. Once the retries are used up, the command fails with `ErrConflict`, as without the option.
 
-*Note that this only applies to commands whose preconditions include `OnStateRead`. A command that checks a revision the caller hands over is never decided again, since the caller has to learn about the conflict, and deciding again would fail the same way (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)).*
+*Note that this only applies to commands whose preconditions include `OnStateRead`. A command that checks only a revision the caller hands over is never decided again, since the caller has to learn about the conflict, and deciding again would fail the same way (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). A command that checks both is decided again, since the database does not say which precondition did not hold. If the revision of the caller is outdated, every attempt fails the same way, until the retries are used up. On the same subject, one of the two is enough: if the revision of the caller holds, so does `OnStateRead`.*
 
 #### Checking the Revision of the Caller
 
@@ -651,13 +653,13 @@ if errors.Is(err, architecturekit.ErrConflict) {
 
 Like a command, a write declares at least one precondition, made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state.
 
-*Note that `Write` never decides again, since there is nothing to decide. If nothing is to be written, call it with no events, which writes nothing.*
+*Note that `Write` never decides again, since there is nothing to decide. If nothing is to be written, call it with no events, which writes nothing. It still needs preconditions, though, as any other write, and fails with an error of the category `ErrPermanent` without them, so declare them, for example with `Unconditionally()`.*
 
 *Note that `Write` knows no state, so unlike `Execute`, it does not refuse an event that a state has no rule for. Every state that reads one of the subjects needs a rule for the events written to it, since reading the subject fails otherwise.*
 
 ### Handling Errors
 
-Every error architecturekit returns belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
+Every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
 
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
@@ -689,6 +691,8 @@ case errors.Is(err, architecturekit.ErrPermanent):
 ```
 
 *Note that `ErrConflict` is a special case of `ErrTransient`, so check for it first.*
+
+An error that your own code returns, for example from a decider or a projection, passes through unchanged, so it belongs to a category only if you wrap it with one, as `NewDomainError` does. The `httpapi` and `query` packages have errors of their own, which `StatusFor` maps to status codes (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes) and [Getting a Single Item](#getting-a-single-item)).
 
 If the context ends, reading and writing stop, and the error is the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides.
 
@@ -933,7 +937,7 @@ if !ok {
 }
 ```
 
-The store checks every event it reads, for `Execute` and `Load` as well as for every kind of projection, and it does so before any upcaster sees the event. The events that `Execute` has just written are not checked, since they are not read. If an event fails its verification, reading fails with an error of the category `ErrUnverified`, which is a special case of `ErrPermanent` (see [Handling Errors](#handling-errors)). A projection stops rather than skipping the event.
+The store checks every event it reads, for `Execute`, `Load`, and `Read` as well as for every kind of projection, and it does so before any upcaster sees the event. The events that `Execute` has just written are not checked, since they are not read. If an event fails its verification, reading fails with an error of the category `ErrUnverified`, which is a special case of `ErrPermanent` (see [Handling Errors](#handling-errors)). A projection stops rather than skipping the event.
 
 The two checks prove different things:
 
@@ -1088,11 +1092,11 @@ for item := range items {
 To change the item with a given key, call the `Update` function with a function that changes it. To remove it, call the `Delete` function. Both return an `Outcome`, which tells what they did:
 
 ```go
-outcome, err := catalog.Update(ctx, "42", event.ID, func(item *BookItem) {
+updated, err := catalog.Update(ctx, "42", event.ID, func(item *BookItem) {
   item.IsBorrowed = true
 })
 
-outcome, err := catalog.Delete(ctx, "42", event.ID)
+deleted, err := catalog.Delete(ctx, "42", event.ID)
 ```
 
 | Outcome | Meaning |
@@ -1857,7 +1861,7 @@ mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
 
 ### Handling Commands over HTTP
 
-To accept a command over HTTP, define a request type with JSON annotations, and implement the `ToCommand` function, which receives the user and returns the command:
+To accept a command over HTTP, define a request type with JSON annotations, and implement the `ToCommand` function, which receives the user and returns the command. For example, for the `BorrowBook` that checks the revision of the caller (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)):
 
 ```go
 type borrowBookRequest struct {
@@ -2250,7 +2254,7 @@ Both answer with `200 OK` or `503 Service Unavailable`, depending on where the p
 
 The application is ready once every projection has caught up, since a half-built view answers wrongly. A projection that reconnects later on, for example because the database restarts, keeps it ready: its view is behind, but consistent, and every instance shares the database, so taking them all out would answer nothing instead of something that is behind. A projection that has stopped makes the application neither ready nor alive, since its view never changes again. The orchestrator then restarts the application, which builds the view anew, with a configuration that may have been fixed in the meantime. There is no time limit for reconnecting, since a restart does not bring the database back.
 
-The body tells where each projection stands:
+The body of `Readiness` tells whether the application is ready, and where each projection stands:
 
 ```json
 {
@@ -2266,6 +2270,8 @@ The body tells where each projection stands:
   }
 }
 ```
+
+The body of `Liveness` has the same shape, but tells whether the application is alive, with `isAlive` instead of `isReady`.
 
 *Note that the body does not tell why a projection reconnects or has stopped, since health checks are usually reachable without signing in, and the reason may name internal addresses. Log it instead, for example by waiting for `Done` and calling `Err`.*
 
@@ -2289,10 +2295,9 @@ func TestBorrowBook(t *testing.T) {
     },
   ).
     When(BorrowBook{
-      BookID:          "42",
-      ReaderID:        "23",
-      BorrowedUntil:   "2026-10-24",
-      ExpectedEventID: "0",
+      BookID:        "42",
+      ReaderID:      "23",
+      BorrowedUntil: "2026-10-24",
     }).
     ThenEvents(BookBorrowed{
       BorrowedBy:    "23",
@@ -2350,7 +2355,7 @@ architecturekittest.Given(t, borrowBook).
 
 #### Expecting Preconditions
 
-To expect exactly the given preconditions, in the given order, call the `ThenPreconditions` function. Describe the preconditions of the kit with the `OnStateRead` and `Unconditionally` functions, and those of the client SDK with the `OnPristineSubject`, `OnPopulatedSubject`, `OnEventID`, and `OnQuery` functions:
+To expect exactly the given preconditions, in the given order, call the `ThenPreconditions` function. Describe the preconditions of the kit with the `OnStateRead` and `Unconditionally` functions, and those of the client SDK with the `OnPristineSubject`, `OnPopulatedSubject`, `OnEventID`, and `OnQuery` functions. For example, the `BorrowBook` that checks the revision of the caller requires its subject to be on the event ID the command carries (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)):
 
 ```go
 architecturekittest.Given(t, borrowBook, BookAcquired{}).
