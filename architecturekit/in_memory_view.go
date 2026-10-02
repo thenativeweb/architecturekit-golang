@@ -94,8 +94,19 @@ type inMemoryViewOptions[TItem any] struct {
 // subjects, use OnStateRead instead.
 //
 // Without this option, the view keeps the revisions to itself.
+//
+// A nil function, or giving RevisionIn twice, is a programming error, so it
+// panics while the view is being built.
 func RevisionIn[TItem any](field func(item *TItem) *string) InMemoryViewOption[TItem] {
+	if field == nil {
+		panic("architecturekit: RevisionIn needs a function, not nil")
+	}
+
 	return func(options *inMemoryViewOptions[TItem]) {
+		if options.revisionIn != nil {
+			panic("architecturekit: RevisionIn is given twice")
+		}
+
 		options.revisionIn = field
 	}
 }
