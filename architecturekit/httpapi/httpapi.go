@@ -72,8 +72,9 @@ type apiSettings struct {
 // WithLogger has everything that answers through the API log every failure it
 // does not explain to the caller through the given logger, once, with the
 // method and the route of the request: the routes the API wires up, and
-// Respond, RespondResult and RespondResultAt in a handler of your own. Without
-// it, they log through the default logger of log/slog.
+// Respond and RespondResult in a handler of your own. The same goes for an
+// answer that Adding could not complete. Without it, they log through the
+// default logger of log/slog.
 //
 // A nil logger is a programming error, so WithLogger panics.
 func WithLogger(logger *slog.Logger) APIOption {
@@ -115,14 +116,28 @@ func (api *API[TUser]) logFailure(r *http.Request) func(status int, err error) {
 	}
 
 	return func(status int, err error) {
-		logger := api.logger
-		if logger == nil {
-			logger = slog.Default()
-		}
-
-		logger.Error("httpapi: internal failure",
+		api.loggerOrDefault().Error("httpapi: internal failure",
 			"method", r.Method, "route", r.Pattern, "status", status, "error", err)
 	}
+}
+
+// logIncomplete logs that a command has succeeded, but that the fields its
+// answer should hold could not be completed (see Adding). The caller gets the
+// revision all the same, so it is no internal failure, but it is worth
+// knowing.
+func (api *API[TUser]) logIncomplete(r *http.Request, err error) {
+	api.loggerOrDefault().Error("httpapi: incomplete answer",
+		"method", r.Method, "route", r.Pattern, "error", err)
+}
+
+// loggerOrDefault is the logger of the API, or the default one of slog if it
+// has none (see WithLogger).
+func (api *API[TUser]) loggerOrDefault() *slog.Logger {
+	if api.logger == nil {
+		return slog.Default()
+	}
+
+	return api.logger
 }
 
 // UserOf determines who is asking, the same way Handle and Ask do.
@@ -206,13 +221,20 @@ func Handle[
 type RouteOption[TCommand any] func(*routeSettings[TCommand])
 
 type routeSettings[TCommand any] struct {
-	fields func(Handled[TCommand]) any
+	fields func(Handled[TCommand]) (any, error)
 }
 
 // Adding has a route answer with further fields next to the revision, such as
 // the ID of an aggregate the command created. The function receives what the
 // command did, and returns a value that encodes to a JSON object, usually a
 // struct with json tags. It is only called after the command has succeeded.
+//
+// If the function fails, the command has succeeded all the same, and its
+// events are written. So the answer stays a success, with the revision, which
+// the caller needs to read its own writes, and must not take for a reason to
+// send the command again. It holds whatever fields the function returned along
+// with its error, or none, and the error is logged through the logger of the
+// API, with the route of the request (see WithLogger).
 //
 // The kit adds the revision itself, so the fields must not contain one. A
 // value that holds a revision, or that does not encode to a JSON object, is a
@@ -221,7 +243,7 @@ type routeSettings[TCommand any] struct {
 //
 // A nil function, or giving Adding twice, is a programming error, so it
 // panics.
-func Adding[TCommand any](fields func(Handled[TCommand]) any) RouteOption[TCommand] {
+func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOption[TCommand] {
 	if fields == nil {
 		panic("architecturekit/httpapi: Adding needs a function, not nil")
 	}
@@ -261,7 +283,11 @@ func Route[
 
 		var fields any
 		if err == nil && settings.fields != nil {
-			fields = settings.fields(handled)
+			var failure error
+			fields, failure = settings.fields(handled)
+			if failure != nil {
+				api.logIncomplete(r, failure)
+			}
 		}
 
 		respond(w, handled.Events, fields, err, api.logFailure(r))
@@ -317,7 +343,7 @@ func StatusFor(err error) int {
 
 // Respond writes the kit's default answer to a command. On success, that is
 // the revision the command wrote, the ID of the last event, which a caller
-// hands to a query to read its own writes (see QueryRevisioned):
+// hands to a query to read its own writes (see Revisioned):
 //
 //	{"revision": "42"}
 //

@@ -1,7 +1,6 @@
 package httpapi_test
 
 import (
-	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -59,7 +58,7 @@ func servingNotes(t *testing.T, view *architecturekit.InMemoryView[string, noteI
 	mux := http.NewServeMux()
 	api := httpapi.NewAPI(deadStore(t), userFrom)
 
-	httpapi.QueryRevisioned(api, mux, "GET /notes", view, allNotes, countNotesIn(view), wait)
+	httpapi.Query(api, mux, "GET /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, wait))
 
 	return mux
 }
@@ -79,7 +78,63 @@ func askNotes(mux *http.ServeMux, headers map[string]string) *httptest.ResponseR
 	return recorder
 }
 
-func TestQueryRevisioned(t *testing.T) {
+func TestQueryOptions(t *testing.T) {
+	answer := func(context.Context, countNotes) (int, error) { return 0, nil }
+	wire := func(options ...httpapi.QueryOption) {
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "GET /notes", allNotes, answer, options...)
+	}
+	day := func(*http.Request) string { return "2026-10-02" }
+
+	for name, test := range map[string]struct {
+		message string
+		wire    func()
+	}{
+		"Revisioned without a view": {
+			"architecturekit/httpapi: Revisioned needs a view, not nil",
+			func() { httpapi.Revisioned(nil, time.Second) },
+		},
+		"Revisioned with a negative wait": {
+			"architecturekit/httpapi: Revisioned needs a wait that is not negative, not -1s",
+			func() { httpapi.Revisioned(noteView(), -time.Second) },
+		},
+		"Revisioned twice": {
+			"architecturekit/httpapi: Revisioned is given twice",
+			func() { wire(httpapi.Revisioned(noteView(), time.Second), httpapi.Revisioned(noteView(), time.Second)) },
+		},
+		"Varying without a function": {
+			"architecturekit/httpapi: Varying needs a function, not nil",
+			func() { httpapi.Varying(nil) },
+		},
+		"Varying twice": {
+			"architecturekit/httpapi: Varying is given twice",
+			func() { wire(httpapi.Revisioned(noteView(), time.Second), httpapi.Varying(day), httpapi.Varying(day)) },
+		},
+		"Varying without Revisioned": {
+			"architecturekit/httpapi: Varying needs Revisioned, since only a revisioned query has a tag",
+			func() { wire(httpapi.Varying(day)) },
+		},
+	} {
+		t.Run(name+" panics", func(t *testing.T) {
+			assert.PanicsWithValue(t, test.message, test.wire)
+		})
+	}
+
+	t.Run("a query that is not revisioned answers without a revision", func(t *testing.T) {
+		view := noteView()
+		view.Seen("3")
+
+		mux := http.NewServeMux()
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "GET /notes", allNotes, countNotesIn(view))
+
+		response := askNotes(mux, map[string]string{httpapi.HeaderWaitFor: "99"})
+
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.Empty(t, response.Header().Get("Revision"))
+		assert.Empty(t, response.Header().Get("ETag"))
+	})
+}
+
+func TestRevisioned(t *testing.T) {
 	t.Run("a query without a wanted revision answers at once", func(t *testing.T) {
 		view := noteView()
 		insertNote(t, view, "1", noteItem{Text: "one"})
@@ -90,6 +145,7 @@ func TestQueryRevisioned(t *testing.T) {
 		assert.Equal(t, http.StatusOK, response.Code)
 
 		assert.Equal(t, "3", response.Header().Get(httpapi.HeaderRevision))
+		assert.Equal(t, "3", response.Header().Get("Revision"), "the header has no X- prefix")
 
 		assert.NotEmpty(t, response.Header().Get("ETag"))
 	})
@@ -181,8 +237,8 @@ func TestQueryRevisioned(t *testing.T) {
 		mux := http.NewServeMux()
 		api := httpapi.NewAPI(deadStore(t), userFrom)
 
-		httpapi.QueryRevisioned(api, mux, "GET /notes", view, allNotes, countNotesIn(view), time.Second)
-		httpapi.QueryRevisioned(api, mux, "GET /other", view, allNotes, countNotesIn(view), time.Second)
+		httpapi.Query(api, mux, "GET /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
+		httpapi.Query(api, mux, "GET /other", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
 
 		tag := askNotes(mux, nil).Header().Get("ETag")
 
@@ -235,7 +291,7 @@ func TestQueryRevisioned(t *testing.T) {
 			return 0, architecturekit.NewDomainError("nothing to count")
 		}
 
-		httpapi.QueryRevisioned(api, mux, "GET /notes", view, allNotes, failing, time.Second)
+		httpapi.Query(api, mux, "GET /notes", allNotes, failing, httpapi.Revisioned(view, time.Second))
 
 		response := askNotes(mux, nil)
 
@@ -246,7 +302,7 @@ func TestQueryRevisioned(t *testing.T) {
 
 	// The plain case stays honest: an answer that follows from the read model
 	// alone needs nothing extra, and its tag still holds across requests.
-	t.Run("is QueryVarying without a variance", func(t *testing.T) {
+	t.Run("is Varying without a variance", func(t *testing.T) {
 		view := noteView()
 		view.Seen("3")
 
@@ -316,7 +372,7 @@ func servingOwnNotes(t *testing.T, wait time.Duration) *http.ServeMux {
 	mux := http.NewServeMux()
 	api := httpapi.NewAPI(deadStore(t), userFrom)
 
-	httpapi.QueryRevisioned(api, mux, "GET /notes", view, askOwnNotes, answerOwnNotes(view), wait)
+	httpapi.Query(api, mux, "GET /notes", askOwnNotes, answerOwnNotes(view), httpapi.Revisioned(view, wait))
 
 	return mux
 }
@@ -410,12 +466,12 @@ func TestTagsOfCallers(t *testing.T) {
 
 		type filtered struct{ Keep func(noteItem) bool }
 
-		httpapi.QueryRevisioned(api, mux, "GET /notes", view,
+		httpapi.Query(api, mux, "GET /notes",
 			func(*http.Request, user) (filtered, error) {
 				return filtered{Keep: func(noteItem) bool { return true }}, nil
 			},
 			func(context.Context, filtered) (int, error) { return 0, nil },
-			time.Second)
+			httpapi.Revisioned(view, time.Second))
 
 		response := askNotes(mux, nil)
 
@@ -434,7 +490,24 @@ func TestAwait(t *testing.T) {
 
 		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
 
-		assert.NoError(t, httpapi.Await(t.Context(), request, view, time.Millisecond))
+		assert.NoError(t, httpapi.Await(request, view, time.Millisecond))
+	})
+
+	t.Run("stops waiting once the request is over", func(t *testing.T) {
+		view := noteView()
+		view.Seen("1")
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		request := httptest.NewRequestWithContext(ctx, http.MethodGet, "/notes", nil)
+		request.Header.Set(httpapi.HeaderWaitFor, "99")
+
+		started := time.Now()
+		err := httpapi.Await(request, view, 10*time.Second)
+
+		assert.NoError(t, err, "running out of time is no error, and neither is a caller who went away")
+		assert.Less(t, time.Since(started), time.Second, "waited for a caller who is gone")
 	})
 
 	t.Run("passes on what the view reports", func(t *testing.T) {
@@ -442,44 +515,9 @@ func TestAwait(t *testing.T) {
 		request.Header.Set(httpapi.HeaderWaitFor, "5")
 
 		// A view that refuses rather than waits.
-		err := httpapi.Await(t.Context(), request, refusingView{}, time.Second)
+		err := httpapi.Await(request, refusingView{}, time.Second)
 
 		assert.Error(t, err, "waited without an error")
-	})
-}
-
-func TestServeUnchanged(t *testing.T) {
-	// The tag that RespondResultAt hands out is the one ServeUnchanged checks.
-	tagFor := func(t *testing.T, revision string) string {
-		t.Helper()
-
-		var logs bytes.Buffer
-		request, api := inAHandler(&logs)
-		recorder := httptest.NewRecorder()
-
-		httpapi.RespondResultAt(recorder, request, api, revision, []int{}, nil, nil)
-
-		return recorder.Header().Get("ETag")
-	}
-
-	t.Run("answers Not Modified for the tag of the same revision", func(t *testing.T) {
-		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
-		request.Header.Set("If-None-Match", tagFor(t, "7"))
-		recorder := httptest.NewRecorder()
-
-		require.True(t, httpapi.ServeUnchanged(recorder, request, "7", nil))
-
-		assert.Equal(t, http.StatusNotModified, recorder.Code)
-		assert.Equal(t, "private, no-cache", recorder.Header().Get("Cache-Control"))
-	})
-
-	t.Run("leaves the answer to the caller for any other tag", func(t *testing.T) {
-		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
-		request.Header.Set("If-None-Match", tagFor(t, "6"))
-		recorder := httptest.NewRecorder()
-
-		assert.False(t, httpapi.ServeUnchanged(recorder, request, "7", nil))
-		assert.Empty(t, recorder.Header().Get("ETag"), "headers were written although the caller answers")
 	})
 }
 
@@ -491,13 +529,13 @@ func (refusingView) WaitFor(context.Context, string) error {
 	return architecturekit.ErrNotARevision
 }
 
-// TestQueryVarying covers the case the revision alone cannot describe. An answer
+// TestVarying covers the case the revision alone cannot describe. An answer
 // such as "everything due today" changes at midnight although no event is
 // written, so the revision stays put -- and a tag built from it alone would
 // tell the caller, wrongly, that nothing had changed. That is exactly how an
 // application can end up showing yesterday's list until something unrelated
 // happens.
-func TestQueryVarying(t *testing.T) {
+func TestVarying(t *testing.T) {
 	t.Run("an answer that depends on more than the revision", func(t *testing.T) {
 		view := noteView()
 		view.Seen("7")
@@ -507,8 +545,9 @@ func TestQueryVarying(t *testing.T) {
 		mux := http.NewServeMux()
 		api := httpapi.NewAPI(deadStore(t), userFrom)
 
-		httpapi.QueryVarying(api, mux, "GET /notes", view, allNotes, countNotesIn(view),
-			time.Second, func(*http.Request) string { return day })
+		httpapi.Query(api, mux, "GET /notes", allNotes, countNotesIn(view),
+			httpapi.Revisioned(view, time.Second),
+			httpapi.Varying(func(*http.Request) string { return day }))
 
 		first := askNotes(mux, nil)
 		require.Equal(t, http.StatusOK, first.Code)
