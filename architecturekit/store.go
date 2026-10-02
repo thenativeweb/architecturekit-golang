@@ -379,23 +379,39 @@ func (s *Store) verify(event eventsourcingdb.Event) error {
 	return nil
 }
 
-// write appends the events under the given preconditions and returns them as
-// the database recorded them, including their IDs.
-func (s *Store) write(
-	subject string,
-	events []Event,
-	preconditions []eventsourcingdb.Precondition,
-) ([]eventsourcingdb.Event, error) {
-	candidates := make([]eventsourcingdb.EventCandidate, len(events))
-	for i, event := range events {
-		candidates[i] = eventsourcingdb.EventCandidate{
-			Source:  s.source,
-			Subject: subject,
-			Type:    event.EventType(),
-			Data:    event,
-		}
+// candidateFor turns an event into what the client writes, with the source of
+// the store and with its data encoded already. Data that can not be encoded,
+// such as a float NaN, fails permanently, naming the event type, the subject
+// and the reason.
+//
+// The client would encode the data itself, but it reports data it can not
+// encode like a database it can not reach, which counts as transient, although
+// trying again never helps. So the data is encoded here, with encoding/json, as
+// the client does, and handed over as a json.RawMessage, which the client
+// writes as it is. The database receives exactly the JSON the client would
+// have written itself.
+func (s *Store) candidateFor(subject string, event Event) (eventsourcingdb.EventCandidate, error) {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return eventsourcingdb.EventCandidate{}, fmt.Errorf("%w: refusing to write an event of type %q to %q, "+
+			"since its data can not be encoded as JSON: %v", ErrPermanent, event.EventType(), subject, err)
 	}
 
+	return eventsourcingdb.EventCandidate{
+		Source:  s.source,
+		Subject: subject,
+		Type:    event.EventType(),
+		Data:    json.RawMessage(data),
+	}, nil
+}
+
+// write appends the candidates to a subject under the given preconditions and
+// returns them as the database recorded them, including their IDs.
+func (s *Store) write(
+	subject string,
+	candidates []eventsourcingdb.EventCandidate,
+	preconditions []eventsourcingdb.Precondition,
+) ([]eventsourcingdb.Event, error) {
 	written, err := s.client.WriteEvents(candidates, preconditions)
 	if err != nil {
 		return nil, databaseFailure(err, fmt.Sprintf("writing %q", subject))
@@ -564,6 +580,11 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // that names the event type, rather than leave a subject the state can not
 // read any more.
 //
+// The same goes for an event whose data can not be encoded as JSON, for
+// example because it holds a float NaN: Execute writes none of the events and
+// fails with an error of the category ErrPermanent that names the event type
+// and the reason, since trying again would fail the same way.
+//
 // If the context ends before the events are written, Execute writes nothing
 // and fails with the context's error, also if it ends while the decider
 // decides. Once the write has begun, it is finished, since the client writes
@@ -621,11 +642,20 @@ func executeOnce[TCommand Command, TState any](
 		return nil, err
 	}
 
+	// Nor is any of them written if the data of one of them can not be
+	// encoded.
+	candidates := make([]eventsourcingdb.EventCandidate, len(events))
+	for i, event := range events {
+		if candidates[i], err = store.candidateFor(subject, event); err != nil {
+			return nil, err
+		}
+	}
+
 	// The client writes without a context, so a context that has ended by now,
 	// for example while deciding, must not lead to a write anyway.
 	if ctx.Err() != nil {
 		return nil, contextEnded(ctx, fmt.Sprintf("writing to %q", subject))
 	}
 
-	return store.write(subject, events, resolvePreconditions(subject, declared, lastEventID))
+	return store.write(subject, candidates, resolvePreconditions(subject, declared, lastEventID))
 }

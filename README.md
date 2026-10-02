@@ -339,6 +339,8 @@ if err != nil {
 
 Every event the decider returns needs a rule on the state of the decider, an `Evolve` function or `Ignore`. `Execute` writes the events to the subject that the same state reads for the next command, and the database keeps every event, so an event without a rule would leave a subject that the state can not read any more. If the state has no rule for one of the events, `Execute` writes none of them, and fails with an error of the category `ErrPermanent` that names the event type (see [Handling Errors](#handling-errors)). The test fixture reports such an event the same way (see [Testing Deciders](#testing-deciders)).
 
+Nor does `Execute` write any of the events if the data of one of them can not be encoded as JSON, for example because it holds a float `NaN`. It then fails with an error of the category `ErrPermanent` that names the event type and the reason, since trying again would fail the same way.
+
 The written events come as they are stored, with their data as JSON. To read the data of one of them, call the `Decode` function with the type of the event. It returns an `Envelope`, the same a projection gets (see [Defining Projections](#defining-projections)), with the data in its `Data` field:
 
 ```go
@@ -651,7 +653,7 @@ if errors.Is(err, architecturekit.ErrConflict) {
 }
 ```
 
-`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
+`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. If the data of one of the events can not be encoded as JSON, nothing is written either, and the error belongs to the category `ErrPermanent`. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
 
 Like a command, a write declares at least one precondition, made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state.
 
@@ -666,7 +668,7 @@ Every failure of architecturekit itself in reading and writing belongs to one of
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
 - `ErrTransient` means that trying again may help, for example if the database can not be reached.
-- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if it does not match the schema of its type, if a subject contains an event type the state has no rule for, or if a decider returns one.
+- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if the data of an event can not be encoded as JSON, such as a float `NaN`, if an event does not match the schema of its type, if a subject contains an event type the state has no rule for, or if a decider returns one.
 
 A failure of the database is sorted by what its answer means, the same way for reading and for writing:
 

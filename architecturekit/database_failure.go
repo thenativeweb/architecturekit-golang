@@ -50,7 +50,9 @@ func contextEnded(ctx context.Context, doing string) error {
 // what its answer means. The same rules apply to reading and to writing:
 //
 //   - Without an answer, the database is unreachable or the connection broke,
-//     which is transient.
+//     which is transient. The client reports data it can not encode without an
+//     answer as well, which is why candidateFor encodes the data of every event
+//     before it is written.
 //   - An answer from a server that is not an EventSourcingDB is transient as
 //     well. It may come from a wrong address, but also from a proxy in front of
 //     the database, which answers on its own while the database restarts, and
