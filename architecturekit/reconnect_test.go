@@ -270,3 +270,53 @@ func TestStartProjectionWithReconnects(t *testing.T) {
 		}
 	})
 }
+
+func TestWithReconnectDelays(t *testing.T) {
+	t.Run("panics on an initial delay of zero", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: WithReconnectDelays needs an initial delay that is positive, not 0s",
+			func() { architecturekit.WithReconnectDelays(0, time.Second) })
+	})
+
+	t.Run("panics on a negative initial delay", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: WithReconnectDelays needs an initial delay that is positive, not -1ms",
+			func() { architecturekit.WithReconnectDelays(-time.Millisecond, time.Second) })
+	})
+
+	t.Run("panics on a maximum delay below the initial delay", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: WithReconnectDelays needs a maximum delay that is not below the initial delay of 2ms, not 1ms",
+			func() { architecturekit.WithReconnectDelays(2*time.Millisecond, time.Millisecond) })
+	})
+
+	t.Run("names the initial delay if the maximum delay is below it as well", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: WithReconnectDelays needs an initial delay that is positive, not -1ms",
+			func() { architecturekit.WithReconnectDelays(-time.Millisecond, -time.Second) })
+	})
+
+	t.Run("accepts delays that are equal, and then waits as long on every attempt", func(t *testing.T) {
+		database := &fakeDatabase{
+			endObserving: func(int) bool { return true },
+		}
+		observed := &reconnects{}
+
+		var option architecturekit.StoreOption
+		require.NotPanics(t, func() { option = architecturekit.WithReconnectDelays(2*time.Millisecond, 2*time.Millisecond) })
+
+		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io",
+			option, architecturekit.WithReconnectObserver(observed.observe))
+		stop := runInBackground(t, store, &collector{})
+
+		waitFor(t, func() bool { return observed.count() >= 3 })
+		require.NoError(t, stop(t))
+
+		_, delays := observed.recorded()
+		assert.Equal(t, []time.Duration{2 * time.Millisecond, 2 * time.Millisecond, 2 * time.Millisecond}, delays[:3])
+	})
+
+	t.Run("accepts a maximum delay above the initial delay", func(t *testing.T) {
+		assert.NotPanics(t, func() { architecturekit.WithReconnectDelays(500*time.Millisecond, 30*time.Second) })
+	})
+}

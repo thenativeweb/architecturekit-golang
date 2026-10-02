@@ -131,6 +131,17 @@ func accountState() *architecturekit.State[account] {
 	return state
 }
 
+// uncomparableSubjectPrecondition stands for a change to the client that makes
+// its subject checks impossible to compare. It satisfies the client's sealed
+// interface by embedding it.
+type uncomparableSubjectPrecondition struct {
+	eventsourcingdb.Precondition
+
+	subject []string
+}
+
+func (p uncomparableSubjectPrecondition) Subject() string { return p.subject[0] }
+
 func decider() architecturekit.Decider[open, account] {
 	return architecturekit.Decider[open, account]{
 		State: accountState(),
@@ -434,14 +445,38 @@ func TestPreconditionsOf(t *testing.T) {
 		architecturekittest.Given(t, decider()).
 			When(cmd).
 			ThenPreconditions(
-				// A pristine and a populated check look alike from outside,
-				// because the client exposes only the subject for both.
-				architecturekittest.OnSubject("/account/1"),
-				architecturekittest.OnSubject("/account/2"),
+				architecturekittest.OnPristineSubject("/account/1"),
+				architecturekittest.OnPopulatedSubject("/account/2"),
 				architecturekittest.OnEventID("/account/3", "9"),
 				architecturekittest.OnQuery("FROM e IN events PROJECT INTO true"),
 				architecturekittest.OnStateRead(),
 			)
+	})
+
+	t.Run("tells a pristine from a populated subject", func(t *testing.T) {
+		declared := architecturekittest.PreconditionsOf(open{
+			preconditions: []architecturekit.Precondition{
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1")),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1")),
+			},
+		})
+
+		assert.Equal(t, []architecturekittest.Precondition{
+			{Subject: "/account/1", Pristine: true},
+			{Subject: "/account/1", Populated: true},
+		}, declared)
+	})
+
+	t.Run("a subject check of a type that cannot be compared is neither", func(t *testing.T) {
+		// Such a type would take a change to the client. It must not panic,
+		// but show up as a subject of no known kind, so that a test fails.
+		declared := architecturekittest.PreconditionsOf(open{
+			preconditions: []architecturekit.Precondition{
+				architecturekit.Require(uncomparableSubjectPrecondition{subject: []string{"/account/1"}}),
+			},
+		})
+
+		assert.Equal(t, []architecturekittest.Precondition{{Subject: "/account/1"}}, declared)
 	})
 
 	t.Run("an unconditional command", func(t *testing.T) {
@@ -609,9 +644,26 @@ func TestThenPreconditions(t *testing.T) {
 
 		architecturekittest.Given(recorder, decider()).
 			When(open{Owner: "golo"}).
-			ThenPreconditions(architecturekittest.OnSubject("/account/1"))
+			ThenPreconditions(architecturekittest.OnPristineSubject("/account/1"))
 
-		recorder.expectFailure(t, "expected 1 precondition(s), got 0")
+		recorder.expectFailure(t, "expected 1 precondition(s), got 0: []")
+	})
+
+	t.Run("shows the kinds when the count is wrong", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{
+				Owner: "golo",
+				preconditions: []architecturekit.Precondition{
+					architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1")),
+					architecturekit.OnStateRead(),
+				},
+			}).
+			ThenPreconditions(architecturekittest.OnPristineSubject("/account/1"))
+
+		recorder.expectFailure(t,
+			`expected 1 precondition(s), got 2: [{Subject: "/account/1", Populated: true}, {OnStateRead: true}]`)
 	})
 
 	t.Run("fails on wrong content", func(t *testing.T) {
@@ -624,9 +676,72 @@ func TestThenPreconditions(t *testing.T) {
 					architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1")),
 				},
 			}).
-			ThenPreconditions(architecturekittest.OnSubject("/account/other"))
+			ThenPreconditions(architecturekittest.OnPristineSubject("/account/other"))
 
 		recorder.expectFailure(t, "/account/other")
+	})
+
+	t.Run("fails on a populated subject where a pristine one is expected", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{
+				Owner: "golo",
+				preconditions: []architecturekit.Precondition{
+					architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1")),
+				},
+			}).
+			ThenPreconditions(architecturekittest.OnPristineSubject("/account/1"))
+
+		require.Len(t, recorder.failures, 1)
+		assert.Equal(t,
+			`precondition 0: got {Subject: "/account/1", Populated: true}, want {Subject: "/account/1", Pristine: true}`,
+			recorder.firstFailure())
+	})
+
+	t.Run("fails on a pristine subject where a populated one is expected", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{
+				Owner: "golo",
+				preconditions: []architecturekit.Precondition{
+					architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1")),
+				},
+			}).
+			ThenPreconditions(architecturekittest.OnPopulatedSubject("/account/1"))
+
+		require.Len(t, recorder.failures, 1)
+		assert.Equal(t,
+			`precondition 0: got {Subject: "/account/1", Pristine: true}, want {Subject: "/account/1", Populated: true}`,
+			recorder.firstFailure())
+	})
+
+	t.Run("fails instead of panicking on a subject check that cannot be compared", func(t *testing.T) {
+		recorder := &spy{}
+
+		assert.NotPanics(t, func() {
+			architecturekittest.Given(recorder, decider()).
+				When(open{
+					Owner: "golo",
+					preconditions: []architecturekit.Precondition{
+						architecturekit.Require(uncomparableSubjectPrecondition{subject: []string{"/account/1"}}),
+					},
+				}).
+				ThenPreconditions(architecturekittest.OnPristineSubject("/account/1"))
+		})
+
+		recorder.expectFailure(t, `precondition 0: got {Subject: "/account/1"}, want {Subject: "/account/1", Pristine: true}`)
+	})
+
+	t.Run("shows an invalid precondition as one without fields", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "golo", preconditions: []architecturekit.Precondition{{}}}).
+			ThenPreconditions(architecturekittest.Unconditionally())
+
+		recorder.expectFailure(t, "precondition 0: got {}, want {Unconditional: true}")
 	})
 }
 

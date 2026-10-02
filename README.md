@@ -6,7 +6,7 @@ architecturekit covers both sides of an event-sourced application: commands, eve
 
 For more information on EventSourcingDB, see its [official documentation](https://docs.eventsourcingdb.io/).
 
-architecturekit includes a test package to test deciders, projections, and queries without a database. For details, see [Testing Deciders](#testing-deciders).
+architecturekit includes a test package to test deciders, projections, and queries without a database. For details, see [Testing Deciders](#testing-deciders). For the tests that need a real database, a second package starts one in a container (see [Testing with a Database](#testing-with-a-database)).
 
 ## Getting Started
 
@@ -1294,6 +1294,8 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
 )
 ```
 
+*Note that an initial delay of zero or less panics, since the projections would then read again without any pause, and so does a maximum delay below the initial one.*
+
 The observer receives a `Reconnect` with these fields:
 
 - `Projection` is the name the projection was given with `Named`, or empty if it has none.
@@ -2268,7 +2270,7 @@ architecturekittest.Given(t, borrowBook).
 
 #### Expecting Preconditions
 
-To expect exactly the given preconditions, in the given order, call the `ThenPreconditions` function. Describe the preconditions of the kit with the `OnStateRead` and `Unconditionally` functions, and those of the client SDK with the `OnSubject`, `OnEventID`, and `OnQuery` functions:
+To expect exactly the given preconditions, in the given order, call the `ThenPreconditions` function. Describe the preconditions of the kit with the `OnStateRead` and `Unconditionally` functions, and those of the client SDK with the `OnPristineSubject`, `OnPopulatedSubject`, `OnEventID`, and `OnQuery` functions:
 
 ```go
 architecturekittest.Given(t, borrowBook, BookAcquired{}).
@@ -2276,13 +2278,19 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
   ThenPreconditions(architecturekittest.OnEventID("/books/42", "0"))
 ```
 
-To get the preconditions of a command directly, call the `PreconditionsOf` function. It returns a slice of `Precondition`, with the fields `Subject`, `EventID`, `Query`, `OnStateRead`, and `Unconditional`:
+`OnPristineSubject` describes a precondition created with `NewIsSubjectPristinePrecondition`, and `OnPopulatedSubject` one created with `NewIsSubjectPopulatedPrecondition`. A test that expects the one fails for a command that declares the other, and the failure names both. For example, `AcquireBook` requires a pristine subject (see [Preventing Duplicates](#preventing-duplicates)):
+
+```go
+architecturekittest.Given(t, acquireBook).
+  When(AcquireBook{BookID: "42"}).
+  ThenPreconditions(architecturekittest.OnPristineSubject("/books/42"))
+```
+
+To get the preconditions of a command directly, call the `PreconditionsOf` function. It returns a slice of `Precondition`, with the fields `Subject`, `Pristine`, `Populated`, `EventID`, `Query`, `OnStateRead`, and `Unconditional`:
 
 ```go
 preconditions := architecturekittest.PreconditionsOf(ReturnBook{BookID: "42"})
 ```
-
-*Note that the preconditions created with `NewIsSubjectPristinePrecondition` and `NewIsSubjectPopulatedPrecondition` can not be told apart. Both are described with `OnSubject`.*
 
 #### Inspecting State
 
@@ -2425,11 +2433,17 @@ api := httpapi.NewAPI(nil, userFrom)
 
 ### Testing with a Database
 
-Some tests need a real database, for example to run commands from end to end. To get one, call the `Store` function with a `*testing.T`, the source, and the schemas to register. It returns a store on a database that all tests of the package share, which the first test that asks for it starts in a container. Options for the store, such as `WithStateCache`, follow the schemas, so that a test runs with the same store as the application:
+Some tests need a real database, for example to run commands from end to end. To get one, use the `dbtest` package:
+
+```go
+import "github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest/dbtest"
+```
+
+Call the `Store` function with a `*testing.T`, the source, and the schemas to register. It returns a store on a database that all tests of the package share, which the first test that asks for it starts in a container. Options for the store, such as `WithStateCache`, follow the schemas, so that a test runs with the same store as the application:
 
 ```go
 func TestAcquireBook(t *testing.T) {
-  store := architecturekittest.Store(t, "https://library.eventsourcingdb.io", bookState.Schemas())
+  store := dbtest.Store(t, "https://library.eventsourcingdb.io", bookState.Schemas())
 
   _, err := architecturekit.Execute(context.TODO(), store, acquireBook, AcquireBook{
     BookID: uuid.NewString(),
@@ -2445,7 +2459,7 @@ To stop the database once all tests have run, call the `Main` function from `Tes
 
 ```go
 func TestMain(m *testing.M) {
-  architecturekittest.Main(m)
+  dbtest.Main(m)
 }
 ```
 
@@ -2456,7 +2470,7 @@ func TestMain(m *testing.M) {
   code := m.Run()
   closeBrowser()
 
-  if err := architecturekittest.StopSharedDatabase(); err != nil {
+  if err := dbtest.StopSharedDatabase(); err != nil {
     fmt.Fprintln(os.Stderr, err)
     code = 1
   }
@@ -2472,7 +2486,7 @@ The tests share the events as well, so a test writes to subjects of its own, for
 For a test that connects by itself, such as one that starts a whole server, call the `SharedDatabase` or the `IsolatedDatabase` function. Each returns a `*Database`, whose `URL` and `APIToken` fields are what a client needs. Its `Client` function returns a client, for example to write an event that no command would, and its `Store` function returns a store, as above:
 
 ```go
-database := architecturekittest.SharedDatabase(t)
+database := dbtest.SharedDatabase(t)
 
 config := server.Config{
   DatabaseURL: database.URL.String(),
@@ -2481,3 +2495,5 @@ config := server.Config{
 ```
 
 *Note that with `-short` every test that asks for a database is skipped, so that the other tests run without Docker.*
+
+*Note that `dbtest` is a package of its own because it starts the database with Testcontainers, which brings along the Docker client. A package whose tests only import `architecturekittest`, for example to test deciders and projections, builds without either.*

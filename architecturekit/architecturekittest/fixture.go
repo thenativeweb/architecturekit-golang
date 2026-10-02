@@ -1,7 +1,9 @@
 // Package architecturekittest provides given-when-then for deciders and projections.
 //
 // Nothing here touches a database: a decider is a pure function of command and
-// state, and a projection is driven with events handed to it directly.
+// state, and a projection is driven with events handed to it directly. A test
+// that needs a real database gets one from the dbtest package, which is kept
+// apart so that this one builds without Docker.
 package architecturekittest
 
 import (
@@ -280,14 +282,15 @@ func (o *Outcome[TCommand, TState]) ThenPreconditions(
 	declared := PreconditionsOf(o.cmd)
 
 	if len(declared) != len(expected) {
-		o.t.Fatalf("expected %d precondition(s), got %d: %v",
-			len(expected), len(declared), declared)
+		o.t.Fatalf("expected %d precondition(s), got %d: %s",
+			len(expected), len(declared), describePreconditions(declared))
 		return o
 	}
 
 	for i, want := range expected {
 		if declared[i] != want {
-			o.t.Fatalf("precondition %d: got %+v, want %+v", i, declared[i], want)
+			o.t.Fatalf("precondition %d: got %s, want %s",
+				i, describePrecondition(declared[i]), describePrecondition(want))
 			return o
 		}
 	}
