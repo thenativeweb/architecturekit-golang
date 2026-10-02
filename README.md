@@ -756,7 +756,7 @@ var libraryUpcasters = architecturekit.NewUpcasters().
   )
 ```
 
-The function has the type `Upcaster`. Upcasters may return more than one event. If a returned event has an upcaster of its own, that one runs as well, so every version needs only a single step to the next one. The translated events are never written back.
+The function has the type `Upcaster`. Upcasters may return more than one event, for example to split an event that recorded two facts into one event per fact. Derive each of them from the stored event, as above, so that they all keep its ID. A projection then applies every one of them to a view, also if several of them change the same item (see [Defining Views](#defining-views)). If a returned event has an upcaster of its own, that one runs as well, so every version needs only a single step to the next one. The translated events are never written back.
 
 To use the upcasters, call the `UpcastWith` function on the state and hand over the set. The upcasters then run before the `Evolve` rules:
 
@@ -964,6 +964,8 @@ So far, subjects have been composed by hand. To define their structure once, cal
 var bookSubject = architecturekit.NewSubjectScheme("/books/{book}")
 ```
 
+Each segment of a subject may only contain the characters that EventSourcingDB allows: the letters `A-Z` and `a-z`, the digits `0-9`, underscores, and hyphens. This applies to the literal segments of the pattern as well as to the values that fill its placeholders.
+
 The function returns a `*SubjectScheme`. To compose a subject, call the `Build` function with one value per placeholder, in the order in which they appear in the pattern. Use it in every command that acts on a book:
 
 ```go
@@ -980,7 +982,7 @@ func (c ReturnBook) Subject() string {
 }
 ```
 
-To take a subject apart, call the `Match` function. It returns the values by placeholder name, and `false` if the subject does not follow the pattern:
+To take a subject apart, call the `Match` function. It returns the values by placeholder name, and `false` if the subject does not follow the pattern or has a value that `Build` would refuse:
 
 ```go
 values, ok := bookSubject.Match("/books/42")
@@ -997,9 +999,9 @@ run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree(b
 
 *Note that other subjects may lie under the same root, such as `/books/42/reviews/7` under `/books`. Use `Match` in the projection to tell them apart.*
 
-*Note that a malformed pattern panics, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains a slash.*
+*Note that a malformed pattern panics, including one with a literal segment that contains a character EventSourcingDB does not allow, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains such a character, for example a slash, a dot, or a space.*
 
-Values that come from outside, such as an ID in a request, may well be empty or contain a slash, and that is not a programming error. To check them before building a subject, call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, instead of panicking:
+Values that come from outside, such as an ID in a request, may well be empty or contain such characters, and that is not a programming error. So always check them before building a subject: call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, such as which characters a value may contain, instead of panicking:
 
 ```go
 if err := bookSubject.Check(bookID); err != nil {
@@ -1039,7 +1041,9 @@ Every item has a revision of its own, which is the ID of the last event that cha
 
 The revision of an item fits such a precondition only if the item stands for exactly one subject, and the projection applies every event type of that subject to the item. The precondition checks the last event of the subject, so as soon as an event lands in the subject that the view does not apply to the item, the two drift apart, and every command with the revision of the item fails with an error of the category `ErrConflict`, until an event changes the item again. Apply an event type that does not change the item, such as one the state ignores, with a change that does nothing (see [Defining Projections](#defining-projections)). For an item that gathers several subjects, such as all books a reader has borrowed, there is no single subject its revision could stand for, so use `OnStateRead` for the commands instead (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
 
-Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing. All functions take a context and return an error, which the view in memory hardly needs, but a view in a database would. So a view in a database can offer the same functions later on, without the projections that write to it having to change.
+Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing. All functions take a context and return an error, as a view in a database would need. So a view in a database can offer the same functions later on, without the projections that write to it having to change.
+
+If an upcaster splits a stored event into several events, they all carry the ID of the stored event (see [Versioning Events](#versioning-events)). A projection created with `NewProjection` hands each of them to its handler with a context that holds its position among them, and the view reads it from the context it gets. For the same ID, the view counts a later event as newer than an earlier one, so every one of them is applied, in order, also if several of them change the same item. Applying the stored event again still changes nothing, and the revision of the item stays the ID of the stored event. That is why a handler always hands the context it gets on to the view, rather than one of its own, such as `context.Background()`.
 
 *Note that the view as a whole has a revision as well, which is the last event it has seen at all, rather than the last one that changed a particular item (see [Reading Your Own Writes](#reading-your-own-writes)).*
 
@@ -1142,6 +1146,8 @@ changed, err := catalog.UpdateWhere(ctx, isByClarke, event.ID, func(item *BookIt
 
 removed, err := catalog.DeleteWhere(ctx, isByClarke, event.ID)
 ```
+
+*Note that the view stays locked while it runs a function you hand over, such as a change, or the function that selects the items for `UpdateWhere` and `DeleteWhere`. Such a function must not use the same view, not even to read an item with `Get` or `All`, since that blocks forever. The same holds for `Upsert`, and for the `Update` function of an index. To copy data from another item of the view into the one you change, read it before, and use it inside the change.*
 
 #### Sharing Items with Readers
 
@@ -1355,7 +1361,9 @@ return run.Err()
 
 *Note that if the database can not be reached at the start, the run keeps trying, and `CaughtUp` stays open. To wait for a limited time only, add a case with `time.After` to the `select` statement.*
 
-If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again. To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
+If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again, or has followed the stream for longer than the delay had grown to, even if no event arrived. That way, a load balancer that ends long-lived connections regularly does not hold back a quiet projection, while a database that fails before the projection has caught up, or right after, is given ever more time.
+
+To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
 
 ```go
 store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
@@ -1374,7 +1382,7 @@ The observer receives a `Reconnect` with these fields:
 - `Subject` is the subject the projection reads.
 - `Err` is the reason, which is `nil` if the database ended the stream.
 - `Delay` is how long the projection waits before the next attempt.
-- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event.
+- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event, or has followed the stream for longer than the delay had grown to.
 
 *Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable. A failure that trying again will not fix, for example a rejected API token, ends the run (see [Handling Errors](#handling-errors)).*
 
@@ -1895,7 +1903,7 @@ func (r borrowBookRequest) ToCommand(user User) (BorrowBook, error) {
 }
 ```
 
-`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`. Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a slash (see [Composing Subjects](#composing-subjects)). And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
+`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`. Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)). And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
 
 Then call the `Route` function with the request type, the API, the mux, a pattern, and the decider:
 

@@ -58,9 +58,17 @@ func (r *reconnects) reports() []architecturekit.Reconnect {
 	return slices.Clone(r.all)
 }
 
+// reconnectingStore waits with these delays. They are well above how long a
+// stream that the database ends right away stays live, since a stream that
+// stays live for longer than the delay starts it over.
+const (
+	testInitialDelay = 20 * time.Millisecond
+	testMaxDelay     = 4 * testInitialDelay
+)
+
 func reconnectingStore(client *eventsourcingdb.Client, observed *reconnects) *architecturekit.Store {
 	return architecturekit.NewStore(client, "https://thenativeweb.io",
-		architecturekit.WithReconnectDelays(time.Millisecond, 4*time.Millisecond),
+		architecturekit.WithReconnectDelays(testInitialDelay, testMaxDelay),
 		architecturekit.WithReconnectObserver(observed.observe),
 	)
 }
@@ -141,7 +149,7 @@ func TestStartProjectionWithReconnects(t *testing.T) {
 		assert.NoError(t, errs[0], "a stream that ended is reported without an error")
 	})
 
-	t.Run("doubles the delay up to the maximum", func(t *testing.T) {
+	t.Run("doubles the delay up to the maximum if the stream ends right after the projection has caught up", func(t *testing.T) {
 		database := &fakeDatabase{
 			endObserving: func(int) bool { return true },
 		}
@@ -153,8 +161,98 @@ func TestStartProjectionWithReconnects(t *testing.T) {
 		require.NoError(t, stop(t))
 
 		_, delays := observed.recorded()
-		want := []time.Duration{time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond, 4 * time.Millisecond}
+		want := []time.Duration{testInitialDelay, 2 * testInitialDelay, testMaxDelay, testMaxDelay}
 		assert.Equal(t, want, delays[:4])
+
+		for i, report := range observed.reports()[:4] {
+			assert.Equal(t, i+1, report.Attempt, "attempt %d", i)
+		}
+	})
+
+	t.Run("doubles the delay if the database fails before the projection has caught up", func(t *testing.T) {
+		observed := &reconnects{}
+		client := refusingDatabase(t, "/api/v1/read-events", http.StatusServiceUnavailable, "starting up")
+
+		stop := runInBackground(t, reconnectingStore(client, observed), &collector{})
+
+		waitFor(t, func() bool { return observed.count() >= 4 })
+		require.NoError(t, stop(t))
+
+		_, delays := observed.recorded()
+		want := []time.Duration{testInitialDelay, 2 * testInitialDelay, testMaxDelay, testMaxDelay}
+		assert.Equal(t, want, delays[:4])
+
+		for i, report := range observed.reports()[:4] {
+			assert.Equal(t, i+1, report.Attempt, "attempt %d", i)
+		}
+	})
+
+	t.Run("doubles the delay if the stream ends right after a catch-up that took longer than the delay", func(t *testing.T) {
+		// What counts is how long the projection followed the stream, not how
+		// long the whole attempt took.
+		database := &fakeDatabase{
+			endObserving: func(int) bool { return true },
+			readDelay:    2 * testMaxDelay,
+		}
+		observed := &reconnects{}
+
+		stop := runInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), &collector{})
+
+		waitFor(t, func() bool { return observed.count() >= 3 })
+		require.NoError(t, stop(t))
+
+		_, delays := observed.recorded()
+		assert.Equal(t, []time.Duration{testInitialDelay, 2 * testInitialDelay, testMaxDelay}, delays[:3])
+	})
+
+	t.Run("starts over with the initial delay after following the stream for longer than the delay, even if no event arrived", func(t *testing.T) {
+		// A load balancer that limits how long a connection may last cuts the
+		// stream of a quiet projection regularly, each time after it has been
+		// live for longer than the delay has grown to by then.
+		database := &fakeDatabase{
+			endObserving: func(int) bool { return false },
+			cutAfter:     3 * testInitialDelay,
+		}
+		observed := &reconnects{}
+		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io",
+			architecturekit.WithReconnectDelays(testInitialDelay, time.Second),
+			architecturekit.WithReconnectObserver(observed.observe),
+		)
+
+		stop := runInBackground(t, store, &collector{})
+
+		waitFor(t, func() bool { return observed.count() >= 4 })
+		require.NoError(t, stop(t))
+
+		for i, report := range observed.reports()[:4] {
+			assert.Equal(t, testInitialDelay, report.Delay, "delay %d", i)
+			assert.Equal(t, 1, report.Attempt, "attempt %d", i)
+		}
+	})
+
+	t.Run("compares how long the projection followed the stream with the delay it has grown to", func(t *testing.T) {
+		// The first streams end right away, so the delay grows to eight times
+		// the initial one. The next stream is cut after it has been live for
+		// longer than the initial delay, and even than the delay the projection
+		// waited last, but not as long as the delay has grown to.
+		database := &fakeDatabase{
+			endObserving: func(connection int) bool { return connection <= 3 },
+			cutAfter:     5 * testInitialDelay,
+		}
+		observed := &reconnects{}
+		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io",
+			architecturekit.WithReconnectDelays(testInitialDelay, time.Second),
+			architecturekit.WithReconnectObserver(observed.observe),
+		)
+
+		stop := runInBackground(t, store, &collector{})
+
+		waitFor(t, func() bool { return observed.count() >= 4 })
+		require.NoError(t, stop(t))
+
+		report := observed.reports()[3]
+		assert.Equal(t, 8*testInitialDelay, report.Delay)
+		assert.Equal(t, 4, report.Attempt)
 	})
 
 	t.Run("starts over with the initial delay after progress", func(t *testing.T) {
@@ -177,12 +275,12 @@ func TestStartProjectionWithReconnects(t *testing.T) {
 		require.NoError(t, stop(t))
 
 		_, delays := observed.recorded()
-		assert.Contains(t, delays[3:], time.Millisecond, "want the initial delay again after progress")
+		assert.Contains(t, delays[3:], testInitialDelay, "want the initial delay again after progress")
 
 		// The attempts start over together with the delay.
 		startsOver := false
 		for _, report := range observed.reports()[3:] {
-			if report.Attempt == 1 && report.Delay == time.Millisecond {
+			if report.Attempt == 1 && report.Delay == testInitialDelay {
 				startsOver = true
 			}
 		}

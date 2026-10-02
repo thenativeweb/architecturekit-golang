@@ -174,6 +174,27 @@ func TestProjectionRun(t *testing.T) {
 		stop(t)
 	})
 
+	t.Run("starts the attempts over whenever the run has caught up, unlike the observer", func(t *testing.T) {
+		// The stream ends right after every catch-up, so every attempt is the
+		// first of a disruption of its own, while the observer counts on.
+		database := &fakeDatabase{
+			endObserving: func(int) bool { return true },
+		}
+		observed := &reconnects{}
+
+		run, stop := startInBackground(t, reconnectingStore(newFakeDatabase(t, database), observed), &collector{})
+
+		mostAttempts := 0
+		waitFor(t, func() bool {
+			mostAttempts = max(mostAttempts, run.Status().Attempts)
+			return observed.count() >= 4
+		})
+		stop(t)
+
+		assert.Equal(t, 4, observed.reports()[3].Attempt)
+		assert.Equal(t, 1, mostAttempts, "want the attempts of the status to start over whenever the run has caught up")
+	})
+
 	t.Run("keeps the beginning of a disruption", func(t *testing.T) {
 		observed := &reconnects{}
 
