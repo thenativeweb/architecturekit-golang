@@ -175,7 +175,7 @@ func TestTheEndOfTheContext(t *testing.T) {
 		ended, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		err := architecturekit.CatchUpProjection(ended, store, subject, false, &collector{})
+		err := architecturekit.CatchUpProjection(ended, store, architecturekit.ExactSubject(subject), &collector{})
 
 		assert.ErrorIs(t, err, context.Canceled, "a read model that is only partly built looked complete")
 	})
@@ -187,7 +187,7 @@ func TestTheEndOfTheContext(t *testing.T) {
 		expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 		defer cancel()
 
-		err := architecturekit.CatchUpProjection(expired, store, subject, false, &collector{})
+		err := architecturekit.CatchUpProjection(expired, store, architecturekit.ExactSubject(subject), &collector{})
 
 		assert.ErrorIs(t, err, context.DeadlineExceeded)
 		assert.NotErrorIs(t, err, architecturekit.ErrTransient, "a deadline that ran out is no failure of the database")
@@ -201,7 +201,7 @@ func TestTheEndOfTheContext(t *testing.T) {
 		defer cancel()
 
 		applied := 0
-		err := architecturekit.CatchUpProjection(ctx, store, subject, false, architecturekit.ProjectionFunc(func(context.Context, eventsourcingdb.Event) error {
+		err := architecturekit.CatchUpProjection(ctx, store, architecturekit.ExactSubject(subject), architecturekit.ProjectionFunc(func(context.Context, eventsourcingdb.Event) error {
 			applied++
 			cancel()
 			return nil

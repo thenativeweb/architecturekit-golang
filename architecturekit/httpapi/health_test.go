@@ -60,12 +60,13 @@ func emptyDatabase(t *testing.T, keepsObserving bool) *architecturekit.Store {
 		architecturekit.WithReconnectDelays(time.Hour, time.Hour))
 }
 
-// startRun starts a projection on the given store, and ends it with the test.
-func startRun(t *testing.T, store *architecturekit.Store) (*architecturekit.ProjectionRun, context.CancelFunc) {
+// startRun starts a projection of the given name on the given store, and ends
+// it with the test.
+func startRun(t *testing.T, store *architecturekit.Store, name string) (*architecturekit.ProjectionRun, context.CancelFunc) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	run := architecturekit.StartProjection(ctx, store, "/", true, ignoring{})
+	run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("/"), ignoring{}, architecturekit.Named(name))
 	t.Cleanup(func() {
 		cancel()
 		<-run.Done()
@@ -100,111 +101,111 @@ func askHealth(t *testing.T, handler http.Handler) (int, healthResponse, http.He
 
 func TestHealth(t *testing.T) {
 	t.Run("is not ready while a projection has never caught up, but alive", func(t *testing.T) {
-		run, _ := startRun(t, deadStore(t))
+		run, _ := startRun(t, deadStore(t), "catalog")
 		waitUntil(t, func() bool { return run.Status().Attempts >= 1 })
-		projections := map[string]*architecturekit.ProjectionRun{"catalog": run}
+		projections := []*architecturekit.ProjectionRun{run}
 
-		code, body, _, _ := askHealth(t, httpapi.Readiness(projections))
+		code, body, _, _ := askHealth(t, httpapi.Readiness(projections...))
 		assert.Equal(t, http.StatusServiceUnavailable, code)
 		assert.False(t, *body.IsReady)
 
-		code, body, _, _ = askHealth(t, httpapi.Liveness(projections))
+		code, body, _, _ = askHealth(t, httpapi.Liveness(projections...))
 		assert.Equal(t, http.StatusOK, code)
 		assert.True(t, *body.IsAlive)
 	})
 
 	t.Run("is ready and alive once every projection is live", func(t *testing.T) {
-		run, _ := startRun(t, emptyDatabase(t, true))
+		run, _ := startRun(t, emptyDatabase(t, true), "catalog")
 		<-run.CaughtUp()
-		projections := map[string]*architecturekit.ProjectionRun{"catalog": run}
+		projections := []*architecturekit.ProjectionRun{run}
 
-		code, body, _, _ := askHealth(t, httpapi.Readiness(projections))
+		code, body, _, _ := askHealth(t, httpapi.Readiness(projections...))
 		assert.Equal(t, http.StatusOK, code)
 		assert.True(t, *body.IsReady)
 		assert.Equal(t, "live", body.Projections["catalog"]["phase"])
 		assert.Equal(t, true, body.Projections["catalog"]["hasCaughtUp"])
 
-		code, body, _, _ = askHealth(t, httpapi.Liveness(projections))
+		code, body, _, _ = askHealth(t, httpapi.Liveness(projections...))
 		assert.Equal(t, http.StatusOK, code)
 		assert.True(t, *body.IsAlive)
 	})
 
 	t.Run("stays ready and alive while a projection reconnects after it has caught up", func(t *testing.T) {
-		run, _ := startRun(t, emptyDatabase(t, false))
+		run, _ := startRun(t, emptyDatabase(t, false), "catalog")
 		waitUntil(t, func() bool {
 			status := run.Status()
 			return status.HasCaughtUp && status.Phase == architecturekit.PhaseReconnecting
 		})
-		projections := map[string]*architecturekit.ProjectionRun{"catalog": run}
+		projections := []*architecturekit.ProjectionRun{run}
 
-		code, body, _, _ := askHealth(t, httpapi.Readiness(projections))
+		code, body, _, _ := askHealth(t, httpapi.Readiness(projections...))
 		assert.Equal(t, http.StatusOK, code)
 		assert.True(t, *body.IsReady)
 		assert.Equal(t, "reconnecting", body.Projections["catalog"]["phase"])
 		assert.InDelta(t, 1, body.Projections["catalog"]["attempts"], 0)
 
-		code, _, _, _ = askHealth(t, httpapi.Liveness(projections))
+		code, _, _, _ = askHealth(t, httpapi.Liveness(projections...))
 		assert.Equal(t, http.StatusOK, code)
 	})
 
 	t.Run("is neither ready nor alive once a projection has stopped", func(t *testing.T) {
-		run, cancel := startRun(t, emptyDatabase(t, true))
+		run, cancel := startRun(t, emptyDatabase(t, true), "catalog")
 		<-run.CaughtUp()
 		cancel()
 		<-run.Done()
-		projections := map[string]*architecturekit.ProjectionRun{"catalog": run}
+		projections := []*architecturekit.ProjectionRun{run}
 
-		code, body, _, _ := askHealth(t, httpapi.Readiness(projections))
+		code, body, _, _ := askHealth(t, httpapi.Readiness(projections...))
 		assert.Equal(t, http.StatusServiceUnavailable, code)
 		assert.False(t, *body.IsReady)
 		assert.Equal(t, "stopped", body.Projections["catalog"]["phase"])
 
-		code, body, _, _ = askHealth(t, httpapi.Liveness(projections))
+		code, body, _, _ = askHealth(t, httpapi.Liveness(projections...))
 		assert.Equal(t, http.StatusServiceUnavailable, code)
 		assert.False(t, *body.IsAlive)
 	})
 
 	t.Run("judges by every projection", func(t *testing.T) {
-		live, _ := startRun(t, emptyDatabase(t, true))
+		live, _ := startRun(t, emptyDatabase(t, true), "catalog")
 		<-live.CaughtUp()
-		stopped, cancel := startRun(t, emptyDatabase(t, true))
+		stopped, cancel := startRun(t, emptyDatabase(t, true), "loans")
 		<-stopped.CaughtUp()
 		cancel()
 		<-stopped.Done()
-		projections := map[string]*architecturekit.ProjectionRun{"catalog": live, "loans": stopped}
+		projections := []*architecturekit.ProjectionRun{live, stopped}
 
-		code, body, _, _ := askHealth(t, httpapi.Readiness(projections))
+		code, body, _, _ := askHealth(t, httpapi.Readiness(projections...))
 		assert.Equal(t, http.StatusServiceUnavailable, code)
 		assert.Equal(t, "live", body.Projections["catalog"]["phase"])
 		assert.Equal(t, "stopped", body.Projections["loans"]["phase"])
 
-		code, _, _, _ = askHealth(t, httpapi.Liveness(projections))
+		code, _, _, _ = askHealth(t, httpapi.Liveness(projections...))
 		assert.Equal(t, http.StatusServiceUnavailable, code)
 	})
 
 	t.Run("is ready and alive without any projection", func(t *testing.T) {
-		code, body, _, _ := askHealth(t, httpapi.Readiness(nil))
+		code, body, _, _ := askHealth(t, httpapi.Readiness())
 		assert.Equal(t, http.StatusOK, code)
 		assert.True(t, *body.IsReady)
 		assert.Empty(t, body.Projections)
 
-		code, _, _, _ = askHealth(t, httpapi.Liveness(nil))
+		code, _, _, _ = askHealth(t, httpapi.Liveness())
 		assert.Equal(t, http.StatusOK, code)
 	})
 
 	t.Run("answers with JSON that must not be cached", func(t *testing.T) {
-		_, _, header, _ := askHealth(t, httpapi.Readiness(nil))
+		_, _, header, _ := askHealth(t, httpapi.Readiness())
 
 		assert.Equal(t, "application/json", header.Get("Content-Type"))
 		assert.Equal(t, "no-store", header.Get("Cache-Control"))
 	})
 
 	t.Run("tells where each projection stands, but not why", func(t *testing.T) {
-		run, _ := startRun(t, deadStore(t))
+		run, _ := startRun(t, deadStore(t), "catalog")
 		waitUntil(t, func() bool { return run.Status().Attempts >= 1 })
 		require.Error(t, run.Status().Err, "the run must have a reason to reconnect")
 
-		_, body, _, raw := askHealth(t, httpapi.Liveness(map[string]*architecturekit.ProjectionRun{"catalog": run}))
+		_, body, _, raw := askHealth(t, httpapi.Liveness(run))
 
 		assert.ElementsMatch(t, []string{"phase", "since", "hasCaughtUp", "attempts", "revision"},
 			keysOf(body.Projections["catalog"]))
@@ -212,22 +213,44 @@ func TestHealth(t *testing.T) {
 	})
 
 	t.Run("keeps watching the projections it was given", func(t *testing.T) {
-		run, cancel := startRun(t, emptyDatabase(t, true))
+		run, cancel := startRun(t, emptyDatabase(t, true), "catalog")
 		<-run.CaughtUp()
-		projections := map[string]*architecturekit.ProjectionRun{"catalog": run}
-		handler := httpapi.Liveness(projections)
+		projections := []*architecturekit.ProjectionRun{run}
+		handler := httpapi.Liveness(projections...)
 
-		delete(projections, "catalog")
+		projections[0] = nil
 		cancel()
 		<-run.Done()
 
 		code, _, _, _ := askHealth(t, handler)
-		assert.Equal(t, http.StatusServiceUnavailable, code, "changing the map later must not change what is watched")
+		assert.Equal(t, http.StatusServiceUnavailable, code, "changing the slice later must not change what is watched")
 	})
 
 	t.Run("panics for a projection without a run", func(t *testing.T) {
-		assert.PanicsWithValue(t, `architecturekit/httpapi: the projection "catalog" has no run`, func() {
-			httpapi.Readiness(map[string]*architecturekit.ProjectionRun{"catalog": nil})
+		assert.PanicsWithValue(t, "architecturekit/httpapi: projection 0 has no run", func() {
+			httpapi.Readiness(nil)
+		})
+	})
+
+	t.Run("panics for a projection without a name", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		run := architecturekit.StartProjection(ctx, deadStore(t), architecturekit.SubjectTree("/"), ignoring{})
+		t.Cleanup(func() {
+			cancel()
+			<-run.Done()
+		})
+
+		assert.PanicsWithValue(t, "architecturekit/httpapi: projection 0 has no name, give it one with architecturekit.Named", func() {
+			httpapi.Liveness(run)
+		})
+	})
+
+	t.Run("panics for two projections of the same name", func(t *testing.T) {
+		first, _ := startRun(t, deadStore(t), "catalog")
+		second, _ := startRun(t, deadStore(t), "catalog")
+
+		assert.PanicsWithValue(t, `architecturekit/httpapi: two projections are named "catalog"`, func() {
+			httpapi.Readiness(first, second)
 		})
 	})
 }

@@ -337,7 +337,7 @@ func TestTracking(t *testing.T) {
 		view := intView()
 		target := &resumingCollector{}
 
-		require.NoError(t, architecturekit.CatchUpProjection(t.Context(), store, subject, false,
+		require.NoError(t, architecturekit.CatchUpProjection(t.Context(), store, architecturekit.ExactSubject(subject),
 			architecturekit.Tracking(target, view)))
 
 		require.NotEmpty(t, target.checkpoint, "a tracked resumable projection has to save its checkpoint")

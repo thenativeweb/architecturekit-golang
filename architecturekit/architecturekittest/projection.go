@@ -82,7 +82,7 @@ func Project(t TestingT, projection architecturekit.Projection, events ...events
 }
 
 // ProjectTransactional hands the events to a transactional projection within
-// one transaction, the way RunTransactionalProjection does for a batch. It
+// one transaction, the way StartTransactionalProjection does for a batch. It
 // commits with the ID of the last event, and rolls back and fails the test on
 // the first refusal. Without events, no transaction is begun.
 func ProjectTransactional(t TestingT, projection architecturekit.Transactional, events ...eventsourcingdb.Event) {

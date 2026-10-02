@@ -24,11 +24,11 @@ type Store struct {
 	// states is nil unless the store was created with WithStateCache.
 	states *stateCache
 
-	// The reconnect settings apply to RunProjection and
-	// RunTransactionalProjection.
+	// The reconnect settings apply to the projections started with
+	// StartProjection and StartTransactionalProjection.
 	reconnectInitialDelay time.Duration
 	reconnectMaxDelay     time.Duration
-	reconnectObserver     func(err error, delay time.Duration)
+	reconnectObserver     func(Reconnect)
 
 	// skipsHashes is set by WithoutHashVerification, and verificationKey by
 	// WithSignatureVerification. Checking a signature includes the hash.
@@ -40,7 +40,7 @@ type Store struct {
 	conflictRetries int
 }
 
-// The default delays of RunProjection before it observes again, for a store
+// The default delays of a projection run before it observes again, for a store
 // without WithReconnectDelays.
 const (
 	defaultReconnectInitialDelay = 1 * time.Second
@@ -93,9 +93,9 @@ func WithConflictRetries(retries int) StoreOption {
 	}
 }
 
-// WithReconnectDelays sets how long RunProjection and
-// RunTransactionalProjection wait before they read again after reading failed
-// or the stream ended. The delay starts at initialDelay, doubles with every
+// WithReconnectDelays sets how long the projections started with
+// StartProjection or StartTransactionalProjection wait before they read again
+// after reading failed or the stream ended. The delay starts at initialDelay, doubles with every
 // attempt in a row, and never exceeds maxDelay. It starts over once a
 // projection has made progress. Without this option, the delays are 1 second
 // and 1 minute.
@@ -106,11 +106,13 @@ func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
 	}
 }
 
-// WithReconnectObserver calls observe every time RunProjection or
-// RunTransactionalProjection is about to wait before reading again, with the
-// reason and the delay. The reason is nil if the database ended the stream.
-// Use it to log, since the kit itself does not.
-func WithReconnectObserver(observe func(err error, delay time.Duration)) StoreOption {
+// WithReconnectObserver calls observe every time a projection started with
+// StartProjection or StartTransactionalProjection is about to wait before
+// reading again. It learns which projection, why, how long it waits, and the
+// how-manyth attempt in a row this is (see Reconnect). Use it to log, since the
+// kit itself does not; give the projections names with Named, so that the log
+// tells them apart.
+func WithReconnectObserver(observe func(Reconnect)) StoreOption {
 	return func(store *Store) {
 		store.reconnectObserver = observe
 	}

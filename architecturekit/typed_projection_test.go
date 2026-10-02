@@ -251,7 +251,7 @@ func TestTypedProjection(t *testing.T) {
 				return nil
 			})
 
-		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, subject, false, projection))
+		require.NoError(t, architecturekit.CatchUpProjection(context.Background(), store, architecturekit.ExactSubject(subject), projection))
 
 		assert.Equal(t, 3, total)
 		for _, got := range subjects {

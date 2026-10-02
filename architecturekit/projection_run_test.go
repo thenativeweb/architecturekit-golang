@@ -22,7 +22,7 @@ func startInBackground(
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	run := architecturekit.StartProjection(ctx, store, "/test", false, projection)
+	run := architecturekit.StartProjection(ctx, store, architecturekit.ExactSubject("/test"), projection)
 
 	return run, func(t *testing.T) {
 		t.Helper()
@@ -95,7 +95,7 @@ func TestStartProjection(t *testing.T) {
 
 	t.Run("refuses a projection that is transactional as well", func(t *testing.T) {
 		assert.Panics(t, func() {
-			architecturekit.StartProjection(context.Background(), nil, "/test", false, &transactionalWithApply{})
+			architecturekit.StartProjection(context.Background(), nil, architecturekit.ExactSubject("/test"), &transactionalWithApply{})
 		})
 	})
 
@@ -108,7 +108,7 @@ func TestStartProjection(t *testing.T) {
 		defer cancel()
 
 		target := &collector{}
-		run := architecturekit.StartProjection(ctx, store, subject, false, target)
+		run := architecturekit.StartProjection(ctx, store, architecturekit.ExactSubject(subject), target)
 
 		waitForClosed(t, run.CaughtUp(), "CaughtUp")
 		assert.Len(t, target.IDs(), 3)
@@ -204,7 +204,7 @@ func TestProjectionRun(t *testing.T) {
 		}
 		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io")
 
-		run := architecturekit.StartProjection(context.Background(), store, "/test", false, failingCollector{})
+		run := architecturekit.StartProjection(context.Background(), store, architecturekit.ExactSubject("/test"), failingCollector{})
 
 		waitForClosed(t, run.Done(), "Done")
 
@@ -228,7 +228,7 @@ func TestStartTransactionalProjection(t *testing.T) {
 		target := &transactionalCollector{}
 
 		ctx, cancel := context.WithCancel(context.Background())
-		run := architecturekit.StartTransactionalProjection(ctx, store, "/test", false, target)
+		run := architecturekit.StartTransactionalProjection(ctx, store, architecturekit.ExactSubject("/test"), target)
 
 		waitForClosed(t, run.CaughtUp(), "CaughtUp")
 
