@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -190,6 +191,10 @@ func TestRouteAnswers(t *testing.T) {
 		{"fields that are no JSON object", "just text", "must encode to a JSON object"},
 		{"fields that are null", (*struct{})(nil), "must encode to a JSON object"},
 		{"fields that can not be encoded", struct{ Callback func() }{func() {}}, "encoding the fields of the answer"},
+		{"fields that hold NaN", struct {
+			Score float64 `json:"score"`
+		}{math.NaN()}, "unsupported value: NaN"},
+		{"fields whose encoding fails with a category", unencodable{}, "encoding the fields of the answer"},
 	} {
 		t.Run("with 500 and a log entry for "+test.name, func(t *testing.T) {
 			var logs bytes.Buffer
@@ -289,6 +294,15 @@ func TestAdding(t *testing.T) {
 			routed(httpapi.NewAPI(deadStore(t), userFrom), httpapi.Adding(fields), httpapi.Adding(fields))
 		})
 	})
+}
+
+// unencodable fails while it is encoded, with an error that has a category of
+// its own, as a MarshalJSON function with a bug might. The answer exists all
+// the same, so that category must not decide the status.
+type unencodable struct{}
+
+func (unencodable) MarshalJSON() ([]byte, error) {
+	return nil, fmt.Errorf("%w: the note is gone", httpapi.ErrNotFound)
 }
 
 // failingNotes answers every query with a failure the caller is not told

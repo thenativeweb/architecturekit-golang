@@ -320,9 +320,10 @@ type routeSettings[TCommand any] struct {
 // API, with the route of the request (see WithLogger).
 //
 // The kit adds the revision itself, so the fields must not contain one. A
-// value that holds a revision, or that does not encode to a JSON object, is a
-// programming error: the route then answers 500, and logs why, although the
-// events have been written.
+// value that holds a revision, that does not encode to a JSON object, or that
+// can not be encoded at all, such as one that holds NaN, is a programming
+// error: the route then answers 500, and logs why, although the events have
+// been written.
 //
 // A nil function, or giving Adding twice, is a programming error, so it
 // panics.
@@ -469,7 +470,8 @@ func Respond[TUser any](
 }
 
 // respond writes the answer to a command, with the given fields next to the
-// revision, and explains an error with explain.
+// revision, and explains an error with explain. It writes the same way as a
+// query result is written (see respondResultAt).
 func respond(
 	w http.ResponseWriter,
 	written []eventsourcingdb.Event,
@@ -477,19 +479,12 @@ func respond(
 	err error,
 	explain func(status int, err error) string,
 ) {
-	var body map[string]any
+	var answer map[string]any
 	if err == nil {
-		body, err = answerOf(written, fields)
+		answer, err = answerOf(written, fields)
 	}
 
-	status := StatusFor(err)
-	if err != nil {
-		body = map[string]any{"message": explain(status, err)}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+	respondResult(w, answer, err, explain)
 }
 
 // answerOf combines the revision with the fields of Adding. The fields are
@@ -499,9 +494,12 @@ func answerOf(written []eventsourcingdb.Event, fields any) (map[string]any, erro
 	answer := map[string]any{}
 
 	if fields != nil {
+		// The error is wrapped with %v rather than %w, since fields that can
+		// not be encoded are a mistake in the code, which has to be answered
+		// with 500, whatever category the error of a MarshalJSON function has.
 		encoded, err := json.Marshal(fields)
 		if err != nil {
-			return nil, fmt.Errorf("httpapi: encoding the fields of the answer: %w", err)
+			return nil, fmt.Errorf("httpapi: encoding the fields of the answer: %v", err)
 		}
 
 		decoder := json.NewDecoder(bytes.NewReader(encoded))

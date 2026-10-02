@@ -1973,7 +1973,7 @@ The route then answers with both:
 
 The function is only called if the command has succeeded. If it returns an error, the events are written all the same, so the route still answers with `200 OK` and the revision, which the caller needs to read its own writes, and must not take for a reason to send the command again. The answer then holds whatever fields the function returned along with the error, or none, and the error is logged through the logger of the API, with the route.
 
-The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
+The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object, so they must not hold `NaN`, for example, which JSON has no number for. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
 
 *Note that the written events are available in `Handled` as well. Add them only deliberately: they are the inner model of the application, every caller that reads them depends on their shape, and they may contain data that is not meant for the caller.*
 
@@ -2098,7 +2098,7 @@ Then call the `Query` function with the API, the mux, a pattern, the function th
 httpapi.Query(api, mux, "GET /api/books", toListBooks, answerBooks(listBooks(catalog)))
 ```
 
-The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
+The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
 
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error.
 

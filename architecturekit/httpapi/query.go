@@ -144,6 +144,8 @@ func Varying(varies Volatile) QueryOption {
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack, as with Route.
+// So is a result that can not be encoded, such as one that holds NaN, which
+// JSON has no number for.
 func Query[TUser any, TQuery any, TResult any](
 	api *API[TUser],
 	mux *http.ServeMux,
@@ -179,7 +181,8 @@ func Query[TUser any, TQuery any, TResult any](
 // does for commands, with the same messages: a fixed one for 401, 409, and
 // 500 and above, while the error is logged through the logger of the API,
 // with the route of the request (see WithLogger), and the error itself
-// otherwise.
+// otherwise. A result that can not be encoded, such as one that holds NaN,
+// is answered with 500 as well.
 func RespondResult[TUser any, TResult any](
 	w http.ResponseWriter,
 	r *http.Request,
@@ -203,9 +206,11 @@ func respondResult[TResult any](
 // respondResultAt writes a query result with the revision it shows, if there
 // is one (see writeRevision), and explains an error with explain.
 //
-// The result is encoded before anything is written, so that a panic while it
-// is encoded, such as one in a MarshalJSON function, is still answered with
-// 500, and without the revision of an answer that never came.
+// The result is encoded before anything is written, so that a result that can
+// not be encoded is still answered with 500, and without the revision of an
+// answer that never came. That holds for an error while it is encoded, such as
+// for NaN, which JSON has no number for, and for a panic, such as one in a
+// MarshalJSON function.
 func respondResultAt[TResult any](
 	w http.ResponseWriter,
 	revision string,
@@ -216,10 +221,17 @@ func respondResultAt[TResult any](
 ) {
 	w.Header().Set("Content-Type", "application/json")
 
+	var body bytes.Buffer
 	if err == nil {
-		var body bytes.Buffer
-		_ = json.NewEncoder(&body).Encode(listOf(result))
+		// The error is wrapped with %v rather than %w, since a result that can not
+		// be encoded is a mistake in the code, which has to be answered with 500,
+		// whatever category the error of a MarshalJSON function has.
+		if failure := json.NewEncoder(&body).Encode(listOf(result)); failure != nil {
+			err = fmt.Errorf("httpapi: encoding the result: %v", failure)
+		}
+	}
 
+	if err == nil {
 		writeRevision(w, revision, tag)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body.Bytes())
