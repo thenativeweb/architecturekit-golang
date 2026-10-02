@@ -97,21 +97,21 @@ func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string
 	return true
 }
 
-// respondResultAt writes a query result with the revision it shows, and logs
-// an internal failure with logFailure.
+// respondResultAt writes a query result with the revision it shows, and
+// explains an error with explain.
 func respondResultAt[TResult any](
 	w http.ResponseWriter,
 	revision string,
 	tag string,
 	result TResult,
 	err error,
-	logFailure func(status int, err error),
+	explain func(status int, err error) string,
 ) {
 	if err == nil {
 		writeRevision(w, revision, tag)
 	}
 
-	respondResult(w, result, err, logFailure)
+	respondResult(w, result, err, explain)
 }
 
 // answerRevisioned answers a query that can be asked for a revision (see
@@ -123,22 +123,22 @@ func answerRevisioned[TUser any, TQuery any, TResult any](
 	settings querySettings,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logFailure := api.logFailure(r)
+		explain := api.explain(r)
 
 		user, err := UserOf(r, api)
 		if err != nil {
-			respondResult(w, struct{}{}, err, logFailure)
+			respondResult(w, struct{}{}, err, explain)
 			return
 		}
 
 		query, err := toQuery(r, user)
 		if err != nil {
-			respondResult(w, struct{}{}, categorise(err), logFailure)
+			respondResult(w, struct{}{}, categorise(err), explain)
 			return
 		}
 
 		if err := Await(r, settings.view, settings.wait); err != nil {
-			respondResult(w, struct{}{}, err, logFailure)
+			respondResult(w, struct{}{}, err, explain)
 			return
 		}
 
@@ -152,7 +152,7 @@ func answerRevisioned[TUser any, TQuery any, TResult any](
 		}
 
 		result, err := answer(r.Context(), query)
-		respondResultAt(w, revision, tag, result, err, logFailure)
+		respondResultAt(w, revision, tag, result, err, explain)
 	})
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -71,6 +72,32 @@ func writingStore(t *testing.T) *architecturekit.Store {
 		}
 
 		_ = json.NewEncoder(w).Encode(written)
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	client, err := eventsourcingdb.NewClient(serverURL, "secret")
+	require.NoError(t, err)
+
+	return architecturekit.NewStore(client, "https://thenativeweb.io")
+}
+
+// conflictingStore is a store on a database without any events that refuses
+// every write, because a precondition did not hold, and says so the way the
+// database does.
+func conflictingStore(t *testing.T) *architecturekit.Store {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", "EventSourcingDB/test")
+
+		if r.URL.Path != "/api/v1/write-events" {
+			return
+		}
+
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, "state conflict: precondition failed")
 	}))
 	t.Cleanup(server.Close)
 
@@ -210,6 +237,31 @@ func TestRouteAnswers(t *testing.T) {
 		assert.Equal(t, http.StatusOK, response.Code)
 		assert.JSONEq(t, `{"revision": "0"}`, response.Body.String())
 		assert.Contains(t, logs.String(), "nothing to add")
+	})
+
+	t.Run("with a fixed text for 401, and the details in the log", func(t *testing.T) {
+		var logs bytes.Buffer
+		mux := routed(httpapi.NewAPI(writingStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))))
+
+		response := send(t, mux, request{contentType: "application/json", body: `{"id":"1","text":"hello"}`})
+
+		assert.Equal(t, http.StatusUnauthorized, response.Code)
+		assert.JSONEq(t, `{"message": "unauthorized"}`, response.Body.String())
+		assertRefusalLogged(t, logs.String(), "POST", "POST /note", http.StatusUnauthorized, "no user given")
+	})
+
+	t.Run("with a fixed text for 409, and the details in the log", func(t *testing.T) {
+		var logs bytes.Buffer
+		mux := routed(httpapi.NewAPI(conflictingStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))))
+
+		response := postNote(t, mux, `{"id":"1","text":"hello"}`)
+
+		// The error names the subject and what the database answered, which is
+		// nothing the caller needs to know.
+		assert.Equal(t, http.StatusConflict, response.Code)
+		assert.JSONEq(t, `{"message": "conflict: the data has changed since it was read"}`, response.Body.String())
+		assertRefusalLogged(t, logs.String(), "POST", "POST /note", http.StatusConflict, `writing \"/note/1\"`)
+		assert.Contains(t, logs.String(), "state conflict: precondition failed")
 	})
 
 	t.Run("explains a failure the caller can fix, as before", func(t *testing.T) {
@@ -397,4 +449,118 @@ func TestAnsweringWhenTheContextEnded(t *testing.T) {
 		assert.Contains(t, logs.String(), "httpapi: internal failure")
 		assert.Contains(t, logs.String(), "context deadline exceeded")
 	})
+}
+
+// assertRefusalLogged asserts that the logs hold exactly one entry, at level
+// Info, for a refusal whose details the caller was not told.
+func assertRefusalLogged(t *testing.T, logs, method, route string, status int, detail string) {
+	t.Helper()
+
+	assert.Equal(t, 1, strings.Count(logs, "\n"), "want exactly one entry")
+	assert.Contains(t, logs, `level=INFO msg="httpapi: request refused"`)
+	assert.Contains(t, logs, "method="+method)
+	assert.Contains(t, logs, fmt.Sprintf("route=%q", route))
+	assert.Contains(t, logs, fmt.Sprintf("status=%d", status))
+	assert.Contains(t, logs, detail, "the details have to reach the log")
+	assert.NotContains(t, logs, "internal failure", "a refusal is no failure of the server")
+}
+
+// answerers answer in a handler of your own, with no result and the given
+// error, once for a command and once for a query.
+var answerers = map[string]func(w http.ResponseWriter, r *http.Request, api *httpapi.API[user], err error){
+	"Respond": func(w http.ResponseWriter, r *http.Request, api *httpapi.API[user], err error) {
+		httpapi.Respond(w, r, api, nil, err)
+	},
+	"RespondResult": func(w http.ResponseWriter, r *http.Request, api *httpapi.API[user], err error) {
+		httpapi.RespondResult(w, r, api, []noteResponse(nil), err)
+	},
+}
+
+func TestAnsweringRefusals(t *testing.T) {
+	// The errors are those of real answers, which name a key and a subject.
+	refusals := []struct {
+		label   string
+		err     error
+		status  int
+		message string
+		detail  string
+	}{
+		{
+			label:   "401",
+			err:     fmt.Errorf("%w: token signed with key kid=prod-2026-09 failed verification: crypto/ed25519: verification error", httpapi.ErrUnauthorized),
+			status:  http.StatusUnauthorized,
+			message: `{"message": "unauthorized"}`,
+			detail:  "kid=prod-2026-09",
+		},
+		{
+			label:   "409",
+			err:     fmt.Errorf("%w: writing %q: failed to write events, got HTTP status code '409', expected '200': state conflict: precondition failed", architecturekit.ErrConflict, "/tenants/acme-bank/books/42"),
+			status:  http.StatusConflict,
+			message: `{"message": "conflict: the data has changed since it was read"}`,
+			detail:  "/tenants/acme-bank/books/42",
+		},
+	}
+
+	// Each of these errors is written for the caller, so it is the message.
+	explained := []struct {
+		label  string
+		err    error
+		status int
+	}{
+		{"400", fmt.Errorf("%w: id must not be empty", httpapi.ErrMalformed), http.StatusBadRequest},
+		{"403", fmt.Errorf("%w: only librarians acquire books", httpapi.ErrForbidden), http.StatusForbidden},
+		{"404", fmt.Errorf("%w: book 42 is unknown", httpapi.ErrNotFound), http.StatusNotFound},
+		{"413", fmt.Errorf("%w: at most 1 byte is read", httpapi.ErrTooLarge), http.StatusRequestEntityTooLarge},
+		{"415", fmt.Errorf("%w: text/plain is not application/json", httpapi.ErrUnsupportedMediaType), http.StatusUnsupportedMediaType},
+		{"422", architecturekit.NewDomainError("book 42 is already borrowed"), http.StatusUnprocessableEntity},
+	}
+
+	for name, answer := range answerers {
+		for _, refusal := range refusals {
+			t.Run(name+" answers "+refusal.label+" with a fixed text, and logs the details as information", func(t *testing.T) {
+				var logs bytes.Buffer
+				request, api := inAHandler(&logs)
+				recorder := httptest.NewRecorder()
+
+				defaults := logsOf(func() {
+					answer(recorder, request, api, refusal.err)
+				})
+
+				assert.Equal(t, refusal.status, recorder.Code)
+				assert.JSONEq(t, refusal.message, recorder.Body.String())
+				assertRefusalLogged(t, logs.String(), "GET", "GET /notes", refusal.status, refusal.detail)
+				assert.Empty(t, defaults, "nothing must go to the default logger as well")
+			})
+		}
+
+		for _, failure := range explained {
+			t.Run(name+" answers "+failure.label+" with the error itself, without logging it", func(t *testing.T) {
+				var logs bytes.Buffer
+				request, api := inAHandler(&logs)
+				recorder := httptest.NewRecorder()
+
+				answer(recorder, request, api, failure.err)
+
+				assert.Equal(t, failure.status, recorder.Code)
+
+				expected, err := json.Marshal(map[string]string{"message": failure.err.Error()})
+				require.NoError(t, err)
+				assert.JSONEq(t, string(expected), recorder.Body.String())
+				assert.Empty(t, logs.String(), "a failure the caller can fix must not be logged")
+			})
+		}
+
+		t.Run(name+" answers 500 with a fixed text, and logs the failure as an error", func(t *testing.T) {
+			var logs bytes.Buffer
+			request, api := inAHandler(&logs)
+			recorder := httptest.NewRecorder()
+
+			answer(recorder, request, api, fmt.Errorf("%w: the password is hunter2", architecturekit.ErrPermanent))
+
+			assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+			assert.JSONEq(t, `{"message": "internal server error"}`, recorder.Body.String())
+			assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: internal failure"`)
+			assert.Contains(t, logs.String(), "hunter2")
+		})
+	}
 }

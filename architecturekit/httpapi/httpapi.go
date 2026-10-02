@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -69,12 +71,14 @@ type apiSettings struct {
 	logger *slog.Logger
 }
 
-// WithLogger has everything that answers through the API log every failure it
-// does not explain to the caller through the given logger, once, with the
-// method and the route of the request: the routes the API wires up, and
-// Respond and RespondResult in a handler of your own. The same goes for an
-// answer that Adding could not complete. Without it, they log through the
-// default logger of log/slog.
+// WithLogger has everything that answers through the API log every error it
+// does not explain to the caller in full through the given logger, once, with
+// the method and the route of the request: the routes the API wires up, and
+// Respond and RespondResult in a handler of your own. A failure of the server
+// is logged as an error, and a refusal with 401 or 409, whose details the
+// caller is not told (see Respond), as information. The same goes for an
+// answer that Adding could not complete, which is logged as an error. Without
+// it, they log through the default logger of log/slog.
 //
 // A nil logger is a programming error, so WithLogger panics.
 func WithLogger(logger *slog.Logger) APIOption {
@@ -86,8 +90,9 @@ func WithLogger(logger *slog.Logger) APIOption {
 }
 
 // NewAPI creates an API that determines the user with userFrom. A request
-// whose user cannot be determined is answered with 401 and never reaches a
-// command or a query.
+// for which userFrom fails never reaches a command or a query. It is answered
+// with 401, unless the error has a status of its own, which it keeps (see
+// UserOf).
 //
 // Queries do not need the store, so an API without one, with nil, answers
 // them, for example in a test of the queries alone. A command on such an API
@@ -105,20 +110,53 @@ func NewAPI[TUser any](
 	return &API[TUser]{store: store, userFrom: userFrom, logger: settings.logger}
 }
 
-// logFailure logs a failure the caller is not told about, through the logger
-// of the API, and names the request it happened on.
+// explain returns the function that turns an error into the message the
+// caller is told, and logs what the message leaves out through the logger of
+// the API, naming the request it happened on.
 //
 // Answering without an API is a programming error, so it panics, and does so
 // on every answer rather than only on a failure, so that a test finds it.
-func (api *API[TUser]) logFailure(r *http.Request) func(status int, err error) {
+func (api *API[TUser]) explain(r *http.Request) func(status int, err error) string {
 	if api == nil {
 		panic("architecturekit/httpapi: answering needs the API, not nil")
 	}
 
-	return func(status int, err error) {
-		api.loggerOrDefault().Error("httpapi: internal failure",
-			"method", r.Method, "route", r.Pattern, "status", status, "error", err)
+	return func(status int, err error) string {
+		switch {
+		// Internal failures are not explained to the caller, but logged.
+		case status >= http.StatusInternalServerError:
+			api.loggerOrDefault().Error("httpapi: internal failure",
+				"method", r.Method, "route", r.Pattern, "status", status, "error", err)
+
+			return "internal server error"
+
+		// A refusal with 401 or 409 tells the caller what to do, sign in or read
+		// again, but its error may name internals, such as the key a token failed
+		// to verify with, or the subject a precondition guarded. So it gets a
+		// fixed text, and since the server did not fail, the error is logged as
+		// information.
+		case status == http.StatusUnauthorized:
+			api.logRefusal(r, status, err)
+
+			return "unauthorized"
+
+		case status == http.StatusConflict:
+			api.logRefusal(r, status, err)
+
+			return "conflict: the data has changed since it was read"
+
+		// Every other error is written for the caller, such as the business rule
+		// a command broke, or what is wrong with a request.
+		default:
+			return err.Error()
+		}
 	}
+}
+
+// logRefusal logs the error of a refusal whose details the caller is not told.
+func (api *API[TUser]) logRefusal(r *http.Request, status int, err error) {
+	api.loggerOrDefault().Info("httpapi: request refused",
+		"method", r.Method, "route", r.Pattern, "status", status, "error", err)
 }
 
 // logIncomplete logs that a command has succeeded, but that the fields its
@@ -145,10 +183,24 @@ func (api *API[TUser]) loggerOrDefault() *slog.Logger {
 // Use it when you write a handler of your own -- a stream, a download, a page
 // -- so that it treats callers exactly like the routes the kit wires up. An
 // unknown caller comes back as ErrUnauthorized, which StatusFor maps to 401.
+//
+// An error of userFrom that StatusFor maps to a status of its own comes back
+// as it is, and so does one of the category architecturekit.ErrPermanent, so
+// that it keeps its status. If the session store is down, for example,
+// userFrom says so with architecturekit.ErrTransient, which is answered with
+// 503 and logged, rather than sending the caller off to sign in again. Only an
+// error without such a status comes back as ErrUnauthorized. To have an error
+// with a status of its own answered with 401 all the same, userFrom wraps it
+// with ErrUnauthorized itself.
 func UserOf[TUser any](r *http.Request, api *API[TUser]) (TUser, error) {
 	user, err := api.userFrom(r)
 	if err != nil {
 		var none TUser
+
+		if StatusFor(err) != http.StatusInternalServerError || errors.Is(err, architecturekit.ErrPermanent) {
+			return none, err
+		}
+
 		return none, fmt.Errorf("%w: %v", ErrUnauthorized, err)
 	}
 
@@ -290,7 +342,7 @@ func Route[
 			}
 		}
 
-		respond(w, handled.Events, fields, err, api.logFailure(r))
+		respond(w, handled.Events, fields, err, api.explain(r))
 	}))
 }
 
@@ -307,6 +359,11 @@ const statusClientClosedRequest = 499
 // was canceled, which happens when the caller goes away, it maps to 499, which
 // is not logged, since nothing failed. If its deadline ran out, the server
 // took too long, which maps to 503 and is logged.
+//
+// The status says nothing about what to tell the caller. Respond and
+// RespondResult explain only an error that is written for the caller, and an
+// answer in a format of your own should do the same: the error of a 401, a
+// 409, or a status of 500 and above may name internals.
 func StatusFor(err error) int {
 	switch {
 	case err == nil:
@@ -348,9 +405,18 @@ func StatusFor(err error) int {
 //	{"revision": "42"}
 //
 // The revision is empty if the command wrote nothing. On failure, it is a
-// message, which explains a failure the caller can fix, and only says
-// "internal server error" otherwise, while the failure is logged through the
-// logger of the API, with the route of the request (see WithLogger).
+// message, which explains a failure the caller can fix, such as a broken
+// business rule or a malformed request. Other errors may name internals, so
+// their message is fixed:
+//
+//   - 401 says "unauthorized", and 409 says "conflict: the data has changed
+//     since it was read", while the error is logged at level Info, since the
+//     server did not fail.
+//   - 500 and above say "internal server error", while the failure is logged
+//     at level Error.
+//
+// Both are logged through the logger of the API, with the route of the
+// request (see WithLogger).
 //
 // Replace it with your own writer if you need a different shape; StatusFor
 // stays usable either way.
@@ -361,17 +427,17 @@ func Respond[TUser any](
 	written []eventsourcingdb.Event,
 	err error,
 ) {
-	respond(w, written, nil, err, api.logFailure(r))
+	respond(w, written, nil, err, api.explain(r))
 }
 
 // respond writes the answer to a command, with the given fields next to the
-// revision, and logs an internal failure with logFailure.
+// revision, and explains an error with explain.
 func respond(
 	w http.ResponseWriter,
 	written []eventsourcingdb.Event,
 	fields any,
 	err error,
-	logFailure func(status int, err error),
+	explain func(status int, err error) string,
 ) {
 	var body map[string]any
 	if err == nil {
@@ -379,14 +445,8 @@ func respond(
 	}
 
 	status := StatusFor(err)
-	switch {
-	case err == nil:
-	case status < http.StatusInternalServerError:
-		body = map[string]any{"message": err.Error()}
-	default:
-		// Internal failures are not explained to the caller, but logged.
-		body = map[string]any{"message": "internal server error"}
-		logFailure(status, err)
+	if err != nil {
+		body = map[string]any{"message": explain(status, err)}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -451,6 +511,11 @@ func categorise(err error) error {
 // ErrUnsupportedMediaType. The body may hold at most MaxRequestBody bytes, or
 // it is ErrTooLarge. JSON that does not fit TBody, including a field that TBody
 // does not have, is ErrMalformed.
+//
+// So is anything but whitespace after the JSON value, such as a second value,
+// and an object in which a name occurs twice. Names match fields regardless of
+// case, as with encoding/json, so two names that match the same field count
+// as the same name, even if they differ in case.
 func BodyOf[TBody any](r *http.Request) (TBody, error) {
 	var value TBody
 
@@ -463,17 +528,54 @@ func BodyOf[TBody any](r *http.Request) (TBody, error) {
 		return value, err
 	}
 
-	// Unknown fields are rejected rather than dropped, so that a misspelled
-	// field cannot silently turn into a zero value.
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-
-	if err := decoder.Decode(&value); err != nil {
-		var zero TBody
-		return zero, fmt.Errorf("%w: %v", ErrMalformed, err)
+	value, err = decodeStrictly[TBody](body)
+	if err != nil {
+		return value, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
 
 	return value, nil
+}
+
+// strictJSON are the rules of encoding/json, which match names regardless of
+// case, except that unknown fields and names that occur twice are rejected
+// (see decodeStrictly).
+var strictJSON = jsonv2.JoinOptions(
+	json.DefaultOptionsV1(),
+	jsonv2.RejectUnknownMembers(true),
+	jsontext.AllowDuplicateNames(false),
+)
+
+// decodeStrictly decodes a body that holds exactly one JSON value, with
+// nothing but whitespace after it, and hands back the zero value if it fails,
+// so that nothing half-decoded gets out.
+//
+// Unknown fields are rejected rather than dropped, so that a misspelled field
+// cannot silently turn into a zero value. A name that occurs twice, and
+// anything but whitespace after the value, are rejected as well, since
+// parsers disagree on what they mean: one takes the first value, another the
+// last, and one stops after the value, while another reads on. A filter or a
+// proxy in front of the application might then check another value than the
+// one the application uses.
+func decodeStrictly[TBody any](body []byte) (TBody, error) {
+	var value TBody
+
+	err := jsonv2.Unmarshal(body, &value, strictJSON)
+	if err == nil {
+		return value, nil
+	}
+
+	// encoding/json reports a name that occurs twice without saying which, so
+	// in that case the body is decoded once more, reporting errors the way
+	// encoding/json/v2 does, which names it and the object it occurs in. Its
+	// other errors are kept, since they name an unknown field more plainly.
+	detailed := jsonv2.Unmarshal(body, new(TBody), strictJSON, json.ReportErrorsWithLegacySemantics(false))
+	if errors.Is(detailed, jsontext.ErrDuplicateName) {
+		err = detailed
+	}
+
+	var zero TBody
+
+	return zero, err
 }
 
 // requireJSON insists on application/json. That is not pedantry: a browser

@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -156,6 +158,47 @@ func TestQuery(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnprocessableEntity, response.Code)
 	})
+}
+
+func TestQueryRefusals(t *testing.T) {
+	// The answer fails with a conflict, which a query rarely does, but which
+	// names a subject all the same.
+	conflicting := func(context.Context, listNotes) ([]noteResponse, error) {
+		return nil, fmt.Errorf("%w: writing %q", architecturekit.ErrConflict, "/tenants/acme-bank/books/42")
+	}
+
+	for name, options := range map[string][]httpapi.QueryOption{
+		"a query":            nil,
+		"a revisioned query": {httpapi.Revisioned(noteView(), time.Second)},
+	} {
+		wire := func(logs *bytes.Buffer, answer httpapi.Answer[listNotes, []noteResponse]) *http.ServeMux {
+			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(logs)))
+			mux := http.NewServeMux()
+			httpapi.Query(api, mux, "GET /notes", toListNotes, answer, options...)
+
+			return mux
+		}
+
+		t.Run(name+" answers 401 with a fixed text, and logs the details", func(t *testing.T) {
+			var logs bytes.Buffer
+
+			response := ask(t, wire(&logs, answerListNotes), "/notes", "")
+
+			assert.Equal(t, http.StatusUnauthorized, response.Code)
+			assert.JSONEq(t, `{"message": "unauthorized"}`, response.Body.String())
+			assertRefusalLogged(t, logs.String(), "GET", "GET /notes", http.StatusUnauthorized, "no user given")
+		})
+
+		t.Run(name+" answers 409 with a fixed text, and logs the details", func(t *testing.T) {
+			var logs bytes.Buffer
+
+			response := ask(t, wire(&logs, conflicting), "/notes", "golo")
+
+			assert.Equal(t, http.StatusConflict, response.Code)
+			assert.JSONEq(t, `{"message": "conflict: the data has changed since it was read"}`, response.Body.String())
+			assertRefusalLogged(t, logs.String(), "GET", "GET /notes", http.StatusConflict, "/tenants/acme-bank/books/42")
+		})
+	}
 }
 
 func TestAsk(t *testing.T) {

@@ -1756,7 +1756,9 @@ api := httpapi.NewAPI(store, userFrom)
 mux := http.NewServeMux()
 ```
 
-If the function returns an error, the request is answered with `401 Unauthorized`, and neither a command nor a query is run.
+If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so does an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
+
+*Note that to answer an error that has a status code of its own with `401 Unauthorized` all the same, the function wraps it with `httpapi.ErrUnauthorized` itself, for example with `fmt.Errorf("%w: %v", httpapi.ErrUnauthorized, err)`.*
 
 For an application without authentication, call the `NewPublicAPI` function instead. Commands and queries then receive `httpapi.NoUser` as user:
 
@@ -1764,7 +1766,7 @@ For an application without authentication, call the `NewPublicAPI` function inst
 api := httpapi.NewPublicAPI(store)
 ```
 
-Everything that answers through an API logs every failure it does not explain to the caller, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
+Everything that answers through an API logs every error it does not explain to the caller in full, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. A failure of the server is logged at level `Error`, and a refusal with `401` or `409`, whose details the caller is not told, at level `Info` (see [Handling Commands over HTTP](#handling-commands-over-http)). By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
 
 ```go
 api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
@@ -1772,7 +1774,7 @@ api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
 
 #### Determining the User
 
-To determine the user in a handler of your own, call the `UserOf` function. If the user cannot be determined, it returns an error that wraps `httpapi.ErrUnauthorized`:
+To determine the user in a handler of your own, call the `UserOf` function. If the user cannot be determined, it returns an error that wraps `httpapi.ErrUnauthorized`, unless the error of the function has a status code of its own, which it then returns as it is (see [Setting Up an HTTP API](#setting-up-an-http-api)):
 
 ```go
 mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
@@ -1837,7 +1839,21 @@ If this succeeds, it answers with `200 OK` and the revision it has written, whic
 
 The revision is empty if the command did not write anything. A caller hands it to a query to read its own writes (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)).
 
-Otherwise, it answers with the status code that matches the error (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)) and the error message. For status codes of `500` and above, the message is `internal server error`, and the actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)).
+Otherwise, it answers with the status code that matches the error (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)) and a message:
+
+```json
+{ "message": "book 42 is already borrowed" }
+```
+
+The message is the error message if the error is written for the caller, such as a broken business rule or what is wrong with the request. Other errors may name internals, such as the key a token failed to verify with, or the subject a precondition guarded, so their message is fixed:
+
+| Status code | Message |
+|---|---|
+| `401 Unauthorized` | `unauthorized` |
+| `409 Conflict` | `conflict: the data has changed since it was read` |
+| `500` and above | `internal server error` |
+
+The actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)): at level `Info` for `401` and `409`, since the server did not fail, and at level `Error` for `500` and above.
 
 To answer this way in a handler of your own, call the `Respond` function with the response writer, the request, the API, the written events, and the error. Like the route, it logs through the logger of the API, with the route of the request.
 
@@ -1930,7 +1946,9 @@ Before a request reaches `ToCommand`, it is validated:
 
 - The `Content-Type` header must be `application/json`, otherwise the request is answered with `415 Unsupported Media Type`, and the error is `httpapi.ErrUnsupportedMediaType`.
 - The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`.
-- The body must be valid JSON without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`.
+- The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case.
+
+*Note that parsers disagree on what a name that occurs twice means, and on data after the value: one takes the first value, another the last, and one stops after the value, while another reads on. A filter or a proxy in front of the application might then check another value than the one the application uses, which is why both are refused.*
 
 To read a body by the same rules elsewhere, call the `BodyOf` function (see [Reading Queries from the Body](#reading-queries-from-the-body)).
 
@@ -2036,6 +2054,8 @@ It checks the categories in this order:
 | any other error | `500 Internal Server Error` |
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged.*
+
+*Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, and `500` and above, as `Respond` and `RespondResult` do, since it may name internals (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
 ### Reading Your Own Writes over HTTP
 
