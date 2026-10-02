@@ -96,14 +96,21 @@ type account struct {
 type open struct {
 	Owner string
 
-	// preconditions is what this command declares; nil means none, which
-	// Execute would reject, but which the fixture still has to describe.
+	// preconditions is what this command declares; nil means OnStateRead, so
+	// that the tests that are not about preconditions need not say so. An
+	// empty slice means none, which Execute and When refuse, but which
+	// PreconditionsOf still has to describe.
 	preconditions []architecturekit.Precondition
 }
 
 func (open) Subject() string { return "/account/1" }
 
-func (c open) Preconditions() []architecturekit.Precondition { return c.preconditions }
+func (c open) Preconditions() []architecturekit.Precondition {
+	if c.preconditions == nil {
+		return []architecturekit.Precondition{architecturekit.OnStateRead()}
+	}
+	return c.preconditions
+}
 
 func accountState() *architecturekit.State[account] {
 	state := architecturekit.NewState(account{})
@@ -501,7 +508,7 @@ func TestPreconditionsOf(t *testing.T) {
 func TestCommandWithoutPreconditions(t *testing.T) {
 	t.Run("declares none", func(t *testing.T) {
 		// Execute rejects such a command, but the fixture reports what it sees.
-		assert.Empty(t, architecturekittest.PreconditionsOf(open{}))
+		assert.Empty(t, architecturekittest.PreconditionsOf(open{preconditions: []architecturekit.Precondition{}}))
 	})
 }
 
@@ -626,12 +633,122 @@ func TestEventWithoutRule(t *testing.T) {
 
 }
 
+func TestWhenChecksPreconditions(t *testing.T) {
+	invalid := []struct {
+		name          string
+		preconditions []architecturekit.Precondition
+		cause         string
+	}{
+		{
+			name:          "none",
+			preconditions: []architecturekit.Precondition{},
+			cause:         "declares no preconditions",
+		},
+		{
+			name: "Unconditionally combined with another one",
+			preconditions: []architecturekit.Precondition{
+				architecturekit.Unconditionally(),
+				architecturekit.OnStateRead(),
+			},
+			cause: "combines Unconditionally with other preconditions",
+		},
+		{
+			name:          "a zero value",
+			preconditions: []architecturekit.Precondition{{}},
+			cause:         "not made with Require, OnStateRead, or Unconditionally",
+		},
+		{
+			name:          "a requirement of nothing",
+			preconditions: []architecturekit.Precondition{architecturekit.Require(nil)},
+			cause:         "requires a precondition that is nil",
+		},
+	}
+
+	for _, test := range invalid {
+		t.Run("refuses "+test.name+" with the error of Execute", func(t *testing.T) {
+			cmd := open{Owner: "golo", preconditions: test.preconditions}
+
+			architecturekittest.Given(t, decider()).
+				When(cmd).
+				ThenFailed(architecturekit.ErrPermanent).
+				ThenRejected(architecturekit.CheckPreconditions(cmd).Error())
+		})
+
+		t.Run("fails ThenEvents for "+test.name+", naming the cause", func(t *testing.T) {
+			recorder := &spy{}
+
+			architecturekittest.Given(recorder, decider()).
+				When(open{Owner: "golo", preconditions: test.preconditions}).
+				ThenEvents(opened{Owner: "golo"})
+
+			recorder.expectFailure(t, "expected events, got error")
+			recorder.expectFailure(t, test.cause)
+		})
+	}
+
+	t.Run("fails every assertion that expects events or nothing", func(t *testing.T) {
+		always := func(architecturekit.Event) bool { return true }
+		combined := open{Owner: "golo", preconditions: []architecturekit.Precondition{
+			architecturekit.Unconditionally(),
+			architecturekit.OnStateRead(),
+		}}
+
+		for label, check := range map[string]func(o *architecturekittest.Outcome[open, account]){
+			"ThenNothing":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNothing() },
+			"ThenSomeEvent":  func(o *architecturekittest.Outcome[open, account]) { o.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(o *architecturekittest.Outcome[open, account]) { o.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNoEvent(always) },
+		} {
+			t.Run(label, func(t *testing.T) {
+				recorder := &spy{}
+				check(architecturekittest.Given(recorder, decider()).When(combined))
+				recorder.expectFailure(t, "combines Unconditionally with other preconditions")
+			})
+		}
+	})
+
+	t.Run("does not let the decider decide on a command it refuses", func(t *testing.T) {
+		decided := false
+
+		spying := decider()
+		decide := spying.Decide
+		spying.Decide = func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
+			decided = true
+			return decide(ctx, cmd, current)
+		}
+
+		architecturekittest.Given(t, spying).
+			When(open{Owner: "golo", preconditions: []architecturekit.Precondition{}}).
+			ThenFailed(architecturekit.ErrPermanent)
+
+		assert.False(t, decided, "the decider decided on a command that Execute refuses before reading")
+	})
+
+	t.Run("lets the decider decide on every valid declaration", func(t *testing.T) {
+		for label, preconditions := range map[string][]architecturekit.Precondition{
+			"OnStateRead":     {architecturekit.OnStateRead()},
+			"Unconditionally": {architecturekit.Unconditionally()},
+			"Require":         {architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1"))},
+			"Require and OnStateRead": {
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1")),
+				architecturekit.OnStateRead(),
+			},
+		} {
+			t.Run(label, func(t *testing.T) {
+				architecturekittest.Given(t, decider()).
+					When(open{Owner: "golo", preconditions: preconditions}).
+					ThenEvents(opened{Owner: "golo"})
+			})
+		}
+	})
+}
+
 func TestThenPreconditions(t *testing.T) {
 	t.Run("fails on wrong count", func(t *testing.T) {
 		recorder := &spy{}
 
 		architecturekittest.Given(recorder, decider()).
-			When(open{Owner: "golo"}).
+			When(open{Owner: "golo", preconditions: []architecturekit.Precondition{}}).
 			ThenPreconditions(architecturekittest.OnPristineSubject("/account/1"))
 
 		recorder.expectFailure(t, "expected 1 precondition(s), got 0: []")

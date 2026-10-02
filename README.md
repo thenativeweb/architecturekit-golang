@@ -231,6 +231,8 @@ The event type is taken from the event's `EventType` function, so it does not ha
 
 *Note that calling `Evolve` twice for the same event type panics.*
 
+Every read starts from a copy of the initial value, so an `Evolve` function may change the state it gets without changing what the next read starts from. A copy shares nothing with a value like `Book{}`, and neither with an initial value whose maps, slices and pointers are `nil`, so leave them `nil`, and let the `Evolve` functions create them when they need them. If the initial value holds a map, a slice with room for elements, or a pointer that is not `nil`, every copy shares it, and the state needs a `Clone` function that copies it (see [Caching States](#caching-states)). Without one, reading the state fails with an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)), rather than let an `Evolve` function change the initial value of every later read.
+
 Reading an event without a rule fails, since it usually points to a missing rule or a wrong subject. If a subject holds events that matter for no decision, such as `BookInspected`, which only records that somebody looked at a book, call the `Ignore` function for their type. The state then takes them without changing, and says so, rather than an `Evolve` function that returns the state unchanged and needs a comment to explain why:
 
 ```go
@@ -367,7 +369,7 @@ Every command declares at least one precondition, so that writing without any ch
 - `Require` turns a precondition of the client SDK into one of the command, for example to check a revision the caller hands over.
 - `Unconditionally` writes without any check.
 
-Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything.
+Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`.
 
 #### Guarding Against Concurrent Changes
 
@@ -839,7 +841,9 @@ var shelfState = architecturekit.NewState(Shelf{}).
   })
 ```
 
-Without a `Clone` function, such a state is read as without a cache. The same function lets `Step` and `StepStored` leave a state unchanged (see [Stepping Through States](#stepping-through-states)).
+Without a `Clone` function, such a state is read as without a cache. The same function lets `Step` and `StepStored` leave a state unchanged (see [Stepping Through States](#stepping-through-states)), and copies the initial value at the start of every read, which an initial value with a map, a slice with room for elements, or a pointer that is not `nil` requires (see [Defining State](#defining-state)).
+
+*Note that as an initial value, `Shelf{}`, whose `BookIDs` are `nil`, does not require a `Clone` function, and neither does `Shelf{BookIDs: []string{}}`, since appending to a slice without room for elements allocates a new array. `Shelf{BookIDs: make([]string, 0, 10)}` does, since appending to it writes into the array that every copy shares.*
 
 *Note that a `time.Time` counts as a value, since its location never changes.*
 
@@ -2377,7 +2381,7 @@ func TestBorrowBook(t *testing.T) {
 
 `Given` returns a `*Fixture`, and `When` returns an `*Outcome`. The functions that check the outcome return the outcome again, so they can be chained.
 
-Like `Execute`, `When` refuses an event that the state of the decider has no rule for (see [Executing Commands](#executing-commands)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the event type, and `ThenFailed(architecturekit.ErrPermanent)` matches.
+Like `Execute`, `When` refuses an event that the state of the decider has no rule for (see [Executing Commands](#executing-commands)), and it checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
 
 *Note that `Given` accepts any value that provides the `Helper` and `Fatalf` functions, as described by the `TestingT` interface.*
 

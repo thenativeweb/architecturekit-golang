@@ -65,6 +65,17 @@ func (p Precondition) IsUnconditional() bool {
 	return p.kind == unconditionallyKind
 }
 
+// CheckPreconditions fails with an error of the category ErrPermanent if a
+// command declares its preconditions in a way Execute can not honor: none at
+// all, a requirement of nil, Unconditionally together with others, or one not
+// made with Require, OnStateRead, or Unconditionally. Execute checks this
+// before it reads anything, and the test fixture of architecturekittest uses
+// CheckPreconditions to refuse such a command the same way.
+func CheckPreconditions(cmd Command) error {
+	_, err := checkPreconditions(cmd)
+	return err
+}
+
 // checkPreconditions makes sure that a command declares its preconditions in
 // a way Execute can honor, before anything is read.
 func checkPreconditions(cmd Command) ([]Precondition, error) {
