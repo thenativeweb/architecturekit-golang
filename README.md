@@ -1824,7 +1824,7 @@ To answer this way in a handler of your own, call the `Respond` function with th
 
 #### Adding to the Answer
 
-To answer with more than the revision, for example with the ID of a new book that `ToCommand` has generated, hand over the `Adding` option. It takes a function that receives a `Handled` value with the command and the written events, and returns the fields to add, usually as a struct with JSON annotations:
+To answer with more than the revision, for example with the ID of a new book that `ToCommand` has generated, hand over the `Adding` option. It takes a function that receives a `Handled` value with the command and the written events, and returns the fields to add, usually as a struct with JSON annotations, and an error:
 
 ```go
 type acquireBookRequest struct {
@@ -1843,10 +1843,10 @@ func (r acquireBookRequest) ToCommand(user User) (AcquireBook, error) {
 }
 
 httpapi.Route[acquireBookRequest](api, mux, "POST /api/acquire-book", acquireBook,
-  httpapi.Adding(func(handled httpapi.Handled[AcquireBook]) any {
+  httpapi.Adding(func(handled httpapi.Handled[AcquireBook]) (any, error) {
     return struct {
       ID string `json:"id"`
-    }{handled.Command.BookID}
+    }{handled.Command.BookID}, nil
   }))
 ```
 
@@ -1856,7 +1856,9 @@ The route then answers with both:
 { "id": "…", "revision": "1" }
 ```
 
-The function is only called if the command has succeeded. The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written.
+The function is only called if the command has succeeded. If it returns an error, the events are written all the same, so the route still answers with `200 OK` and the revision, which the caller needs to read its own writes, and must not take for a reason to send the command again. The answer then holds whatever fields the function returned along with the error, or none, and the error is logged through the logger of the API, with the route.
+
+The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
 
 *Note that the written events are available in `Handled` as well. Add them only deliberately: they are the inner model of the application, every caller that reads them depends on their shape, and they may contain data that is not meant for the caller.*
 
@@ -2018,17 +2020,11 @@ It checks the categories in this order:
 
 ### Reading Your Own Writes over HTTP
 
-To let a caller read its own writes over HTTP, call the `QueryRevisioned` function instead of `Query`. Additionally, hand over a view that implements `Revisioned`, whose projection is tracked (see [Tracking Revisions](#tracking-revisions)), and how long to wait at most:
+To let a caller read its own writes over HTTP, hand over the `Revisioned` option to `Query`, with a view that implements `Revisioned`, whose projection is tracked (see [Tracking Revisions](#tracking-revisions)), and how long to wait at most:
 
 ```go
-httpapi.QueryRevisioned(
-  api,
-  mux,
-  "GET /api/books",
-  catalog,
-  toListBooks,
-  listBooks(catalog),
-  httpapi.DefaultWait,
+httpapi.Query(api, mux, "GET /api/books", toListBooks, listBooks(catalog),
+  httpapi.Revisioned(catalog, httpapi.DefaultWait),
 )
 ```
 
@@ -2039,9 +2035,9 @@ curl http://localhost:8080/api/books \
   -H "Wait-For-Revision: 1"
 ```
 
-The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. If the header does not contain a revision, the request is answered with `400 Bad Request`.
+The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. Without the header, it does not wait at all. If the header holds something that is not a revision, the request is answered with `400 Bad Request`.
 
-Once the view has seen at least one event, the response contains the revision it shows in the `X-Revision` header, as well as an `ETag` header and `Cache-Control: private, no-cache`. If the caller sends the `ETag` in the `If-None-Match` header, asks the same, and the view has not changed since, the request is answered with `304 Not Modified`. `private` keeps shared caches, such as proxies, from keeping the answer.
+Once the view has seen at least one event, the response contains the revision it shows in the `Revision` header, as well as an `ETag` header and `Cache-Control: private, no-cache`. If the caller sends the `ETag` in the `If-None-Match` header, asks the same, and the view has not changed since, the request is answered with `304 Not Modified`. `private` keeps shared caches, such as proxies, from keeping the answer.
 
 The `ETag` holds the query that was asked, with every field. So two callers get the same `ETag` only if their queries are equal: a query that holds the user, or anything else that tells callers apart, gets an `ETag` of its own for each of them. That matters as soon as callers share a browser one after the other, since the browser asks with the `ETag` it kept for the one before. The query is built before the route waits or answers `304 Not Modified`, so a caller who may not ask is refused first.
 
@@ -2057,7 +2053,7 @@ A query that holds a function or a channel can not be written into an `ETag`, an
 
 #### Depending on More Than the Read Model
 
-If an answer depends on more than the view, for example on the current date, the simplest way is to put that value into the query, as `Today` below. Since the query is part of the `ETag`, the `ETag` changes with it, and `QueryRevisioned` is all it takes:
+If an answer depends on more than the view, for example on the current date, the simplest way is to put that value into the query, as `Today` below. Since the query is part of the `ETag`, the `ETag` changes with it, and `Revisioned` is all it takes:
 
 ```go
 type ListOverdueBooks struct {
@@ -2077,72 +2073,49 @@ func listOverdueBooks(catalog architecturekit.View[BookItem]) func(context.Conte
   }
 }
 
-httpapi.QueryRevisioned(
-  api,
-  mux,
-  "GET /api/overdue-books",
-  catalog,
+httpapi.Query(api, mux, "GET /api/overdue-books",
   func(r *http.Request, user User) (ListOverdueBooks, error) {
     return ListOverdueBooks{Today: time.Now().Format(time.DateOnly)}, nil
   },
   listOverdueBooks(catalog),
-  httpapi.DefaultWait,
+  httpapi.Revisioned(catalog, httpapi.DefaultWait),
 )
 ```
 
-If the answer takes such a value from elsewhere instead, for example because it reads the clock itself, call the `QueryVarying` function, and additionally hand over a function of the type `httpapi.Volatile`. It receives the request and returns a value that changes whenever the answer would, and that becomes part of the `ETag` as well:
+If the answer takes such a value from elsewhere instead, for example because it reads the clock itself, hand over the `Varying` option as well, with a function of the type `httpapi.Volatile`. It receives the request and returns a value that changes whenever the answer would, and that becomes part of the `ETag` as well:
 
 ```go
 func today(*http.Request) string {
   return time.Now().Format(time.DateOnly)
 }
 
-httpapi.QueryVarying(
-  api,
-  mux,
-  "GET /api/books-due-today",
-  catalog,
-  toListBooksDueToday,
-  listBooksDueToday(catalog),
-  httpapi.DefaultWait,
-  today,
+httpapi.Query(api, mux, "GET /api/books-due-today", toListBooksDueToday, listBooksDueToday(catalog),
+  httpapi.Revisioned(catalog, httpapi.DefaultWait),
+  httpapi.Varying(today),
 )
 ```
 
-#### Building Your Own Revisioned Handler
+#### Waiting for a Revision in a Handler of Your Own
 
-To build a handler of your own that works like `QueryRevisioned`, use these three functions:
-
-- `Await` waits for the revision the request asks for. Running out of time is not an error. It returns an error if the header does not contain a revision, or if waiting fails for another reason.
-- `ServeUnchanged` answers with `304 Not Modified` if the caller already holds the given revision, and reports whether it did.
-- `RespondResultAt` answers like `RespondResult`, and adds the headers for the given revision.
-
-The last argument of `ServeUnchanged` and `RespondResultAt` is a `Volatile` function, or `nil`:
+To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error. It returns an error if the header holds something that is not a revision, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
 
 ```go
-mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
+mux.HandleFunc("GET /api/books.csv", func(w http.ResponseWriter, r *http.Request) {
   if _, err := httpapi.UserOf(r, api); err != nil {
     httpapi.RespondResult(w, r, api, struct{}{}, err)
     return
   }
 
-  if err := httpapi.Await(r.Context(), r, catalog, httpapi.DefaultWait); err != nil {
+  if err := httpapi.Await(r, catalog, httpapi.DefaultWait); err != nil {
     httpapi.RespondResult(w, r, api, struct{}{}, err)
     return
   }
 
-  revision := catalog.Revision()
-
-  if httpapi.ServeUnchanged(w, r, revision, nil) {
-    return
-  }
-
-  books, err := httpapi.Ask(r, api, toListBooks, listBooks(catalog))
-  httpapi.RespondResultAt(w, r, api, revision, books, err, nil)
+  // ...
 })
 ```
 
-*Note that these functions never see the query, so unlike `QueryRevisioned` their `ETag` does not hold it. Use them only for an answer that is the same for every caller, or let the `Volatile` function return whatever tells callers apart, otherwise one caller can be told that nothing has changed and keep the answer of another.*
+*Note that such a handler answers with neither an `ETag` nor `304 Not Modified`. Those come with the `Revisioned` option of `Query`, which ties the `ETag` to the query, so that callers never share one by accident.*
 
 ### Checking Health over HTTP
 
