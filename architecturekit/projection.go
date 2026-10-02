@@ -179,7 +179,7 @@ func run(
 	for {
 		checkpointBefore, _ := writer.checkpoint(ctx)
 
-		err := follow(ctx, store, subjects, writer, catchUpSize, progress)
+		liveFor, err := follow(ctx, store, subjects, writer, catchUpSize, progress)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -189,9 +189,13 @@ func run(
 
 		progress.disrupted(err)
 
-		// A session that got somewhere was healthy until it ended, so the next
-		// failure is retried quickly again.
-		if checkpointAfter, _ := writer.checkpoint(ctx); checkpointAfter != checkpointBefore {
+		// A session that got somewhere was healthy until it ended, and so was
+		// one that followed the stream for longer than the projection would
+		// wait now, even if no event arrived, as when a load balancer ends
+		// long-lived connections regularly. The next failure is then retried
+		// quickly again. A database that fails before the projection has caught
+		// up, or right after, is still given ever more time.
+		if checkpointAfter, _ := writer.checkpoint(ctx); checkpointAfter != checkpointBefore || liveFor > delay {
 			delay = store.reconnectInitialDelay
 			attempt = 0
 		}
@@ -221,8 +225,9 @@ func run(
 }
 
 // follow catches up from the checkpoint and then follows the stream live,
-// until reading fails or the stream ends. It returns nil if the database
-// ended the stream.
+// until reading fails or the stream ends. It returns how long it followed the
+// stream live, which is zero if it did not catch up, and a nil error if the
+// database ended the stream.
 //
 // Live, every event is committed on its own, since a batch would only be
 // committed once the next events arrive, which may take a long time.
@@ -233,12 +238,13 @@ func follow(
 	writer projectionWriter,
 	catchUpSize int,
 	progress *ProjectionRun,
-) error {
+) (time.Duration, error) {
 	lastEventID, err := catchUp(ctx, store, subjects, writer, catchUpSize, progress)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
+	caughtUpAt := time.Now()
 	progress.caughtUpNow()
 
 	_, err = drive(ctx, writer,
@@ -247,7 +253,7 @@ func follow(
 			LowerBound: boundAfter(lastEventID),
 		}), store.verify, progress, 1)
 
-	return err
+	return time.Since(caughtUpAt), err
 }
 
 // catchUp runs the finite phase and reports where it stopped.

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
@@ -203,23 +204,23 @@ func TestExecuteOnStateRead(t *testing.T) {
 }
 
 func TestExecuteWithInvalidPreconditions(t *testing.T) {
+	tests := []struct {
+		name          string
+		preconditions []architecturekit.Precondition
+	}{
+		{name: "none", preconditions: nil},
+		{name: "unconditionally combined with another one", preconditions: []architecturekit.Precondition{
+			architecturekit.Unconditionally(),
+			architecturekit.OnStateRead(),
+		}},
+		{name: "a zero value", preconditions: []architecturekit.Precondition{{}}},
+		{name: "a requirement of nothing", preconditions: []architecturekit.Precondition{architecturekit.Require(nil)}},
+	}
+
 	t.Run("rejects them before reading", func(t *testing.T) {
 		// The store can not reach a database, so a transient error would show
 		// that Execute has tried to read.
 		store := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
-
-		tests := []struct {
-			name          string
-			preconditions []architecturekit.Precondition
-		}{
-			{name: "none", preconditions: nil},
-			{name: "unconditionally combined with another one", preconditions: []architecturekit.Precondition{
-				architecturekit.Unconditionally(),
-				architecturekit.OnStateRead(),
-			}},
-			{name: "a zero value", preconditions: []architecturekit.Precondition{{}}},
-			{name: "a requirement of nothing", preconditions: []architecturekit.Precondition{architecturekit.Require(nil)}},
-		}
 
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
@@ -229,6 +230,38 @@ func TestExecuteWithInvalidPreconditions(t *testing.T) {
 				assert.ErrorIs(t, err, architecturekit.ErrPermanent)
 				assert.NotErrorIs(t, err, architecturekit.ErrTransient, "nothing may have been read")
 			})
+		}
+	})
+
+	t.Run("rejects them with the same error as CheckPreconditions and the test fixture", func(t *testing.T) {
+		store := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				cmd := increment{subject: "/test/invalid", By: 1}.declaring(test.preconditions...)
+
+				_, err := architecturekit.Execute(context.Background(), store, counterDecider(), cmd)
+				require.ErrorIs(t, err, architecturekit.ErrPermanent, "Execute has to refuse the command")
+
+				assert.Equal(t, err, architecturekit.CheckPreconditions(cmd))
+				architecturekittest.Given(t, counterDecider()).When(cmd).ThenRejected(err.Error())
+			})
+		}
+	})
+}
+
+func TestCheckPreconditions(t *testing.T) {
+	t.Run("accepts what Execute accepts", func(t *testing.T) {
+		for _, cmd := range []increment{
+			{subject: "/test/valid"},
+			increment{subject: "/test/valid"}.onStateRead(),
+			increment{subject: "/test/valid"}.pristine(),
+			increment{subject: "/test/valid"}.declaring(
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/test/valid")),
+				architecturekit.OnStateRead(),
+			),
+		} {
+			assert.NoError(t, architecturekit.CheckPreconditions(cmd))
 		}
 	})
 }

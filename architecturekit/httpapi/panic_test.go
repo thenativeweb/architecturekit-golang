@@ -285,7 +285,7 @@ func TestPanicsInHandleAndAsk(t *testing.T) {
 
 		require.Error(t, err)
 		assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(err))
-		assert.ErrorContains(t, err, `must not contain a slash`, "the error has to name the value of the panic")
+		assert.ErrorContains(t, err, `may only contain A-Z, a-z, 0-9, underscores, and hyphens`, "the error has to name the value of the panic")
 		assert.Equal(t, "a/b", handled.Command.ID, "the command is handed back, as for any other failure")
 	})
 

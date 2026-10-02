@@ -67,16 +67,23 @@ func GivenStored[TCommand architecturekit.Command, TState any](
 
 // When runs the command against that state.
 //
-// Like Execute, it refuses an event that the state of the decider has no rule
-// for, since the state could not read the subject any more. The outcome is
-// then the error of the category architecturekit.ErrPermanent that Execute
-// returns, so that ThenEvents and the other assertions that expect events
-// fail, naming the event type, and ThenFailed(architecturekit.ErrPermanent)
-// matches it.
+// Like Execute, it first checks the preconditions the command declares (see
+// architecturekit.CheckPreconditions), and the decider does not decide on a
+// command they refuse. It also refuses an event that the state of the
+// decider has no rule for, since the state could not read the subject any
+// more. Either way, the outcome is then the error of the category
+// architecturekit.ErrPermanent that Execute returns, so that ThenEvents and
+// the other assertions that expect events fail, naming the cause, and
+// ThenFailed(architecturekit.ErrPermanent) matches it.
 func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState] {
 	f.t.Helper()
 
-	events, err := f.decider.Decide(context.Background(), cmd, f.state)
+	err := architecturekit.CheckPreconditions(cmd)
+
+	var events []architecturekit.Event
+	if err == nil {
+		events, err = f.decider.Decide(context.Background(), cmd, f.state)
+	}
 	if err == nil {
 		err = checkRules(f.decider.State, cmd.Subject(), events)
 	}

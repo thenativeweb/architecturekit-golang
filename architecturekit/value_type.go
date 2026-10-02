@@ -43,3 +43,50 @@ func isValueType(valueType reflect.Type) bool {
 		return false
 	}
 }
+
+// sharesData reports whether a copy of the value shares data with it that
+// either of them can change, so that writing through one changes the other:
+// a map, a pointer or a channel that is not nil, or a slice with room for
+// elements, at any depth. Unlike isValueType, it looks at the value rather
+// than at its type, so that a value whose maps, slices and pointers are all
+// nil shares nothing.
+//
+// A slice without room for elements, that is with a capacity of zero, shares
+// nothing either, even if it is not nil: it has no element to change, and
+// appending to it allocates a new array. A function shares nothing that a
+// copy could change, and a time counts as a value, as in isValueType.
+func sharesData(value reflect.Value) bool {
+	switch value.Kind() {
+	case reflect.Map, reflect.Pointer, reflect.UnsafePointer, reflect.Chan:
+		return !value.IsNil()
+
+	case reflect.Slice:
+		return value.Cap() > 0
+
+	case reflect.Interface:
+		// The value of a nil interface is invalid, and so shares nothing.
+		return sharesData(value.Elem())
+
+	case reflect.Array:
+		for i := range value.Len() {
+			if sharesData(value.Index(i)) {
+				return true
+			}
+		}
+		return false
+
+	case reflect.Struct:
+		if value.Type() == timeType {
+			return false
+		}
+		for _, field := range value.Fields() {
+			if sharesData(field) {
+				return true
+			}
+		}
+		return false
+
+	default:
+		return false
+	}
+}

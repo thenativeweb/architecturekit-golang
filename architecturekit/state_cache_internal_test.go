@@ -2,8 +2,10 @@ package architecturekit
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -205,6 +207,113 @@ func TestIsValueType(t *testing.T) {
 			assert.Equal(t, testCase.isValue, isValueType(valueType))
 		})
 	}
+}
+
+func TestSharesData(t *testing.T) {
+	type withMap struct {
+		Index map[string]int
+	}
+
+	type withHiddenSlice struct {
+		Count int
+		items []string
+	}
+
+	type withNestedPointer struct {
+		Nested struct{ Next *int }
+	}
+
+	type withTime struct {
+		At time.Time
+	}
+
+	for _, testCase := range []struct {
+		name   string
+		value  any
+		shares bool
+	}{
+		{name: "an int", value: 0, shares: false},
+		{name: "a string", value: "text", shares: false},
+		{name: "a struct of values", value: struct{ Count int }{Count: 1}, shares: false},
+		{name: "a nil map", value: withMap{}, shares: false},
+		{name: "an empty map", value: withMap{Index: map[string]int{}}, shares: true},
+		{name: "a nil slice", value: []int(nil), shares: false},
+		{name: "an empty slice without room for elements", value: []int{}, shares: false},
+		{name: "an empty slice with room for elements", value: make([]int, 0, 1), shares: true},
+		{name: "a slice with elements", value: []int{1}, shares: true},
+		{name: "a nil pointer", value: (*int)(nil), shares: false},
+		{name: "a pointer", value: new(int), shares: true},
+		{name: "a nil unsafe pointer", value: unsafe.Pointer(nil), shares: false},
+		{name: "an unsafe pointer", value: unsafe.Pointer(new(int)), shares: true},
+		{name: "a nil channel", value: (chan int)(nil), shares: false},
+		{name: "a channel", value: make(chan int), shares: true},
+		{name: "a function", value: func() {}, shares: false},
+		{name: "a nil interface", value: struct{ Any any }{}, shares: false},
+		{name: "an interface that holds a value", value: struct{ Any any }{Any: 1}, shares: false},
+		{name: "an interface that holds a nil map", value: struct{ Any any }{Any: map[string]int(nil)}, shares: false},
+		{name: "an interface that holds a map", value: struct{ Any any }{Any: map[string]int{}}, shares: true},
+		{name: "an array of nil maps", value: [2]map[string]int{}, shares: false},
+		{name: "an array with a map in its last element", value: [2]map[string]int{1: {}}, shares: true},
+		{name: "an empty array", value: [0]map[string]int{}, shares: false},
+		{name: "an unexported slice with elements", value: withHiddenSlice{items: []string{"a"}}, shares: true},
+		{name: "an unexported nil slice", value: withHiddenSlice{Count: 1}, shares: false},
+		{name: "a nested pointer", value: withNestedPointer{Nested: struct{ Next *int }{Next: new(int)}}, shares: true},
+		{name: "a nested nil pointer", value: withNestedPointer{}, shares: false},
+		{name: "a time with a location", value: withTime{At: time.Date(2026, 10, 2, 0, 0, 0, 0, time.FixedZone("CEST", 7200))}, shares: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			assert.Equal(t, testCase.shares, sharesData(reflect.ValueOf(testCase.value)))
+		})
+	}
+
+	t.Run("looks at a state of an interface type through the interface", func(t *testing.T) {
+		var shared any = map[string]int{}
+		var empty any
+
+		assert.True(t, sharesData(reflect.ValueOf(&shared).Elem()))
+		assert.False(t, sharesData(reflect.ValueOf(&empty).Elem()))
+	})
+}
+
+func TestShapeOf(t *testing.T) {
+	type shelf struct{ BookIDs []string }
+
+	t.Run("holds a copy of the initial value", func(t *testing.T) {
+		state := NewState(shelf{BookIDs: []string{"42"}}).
+			Clone(func(current shelf) shelf { return shelf{BookIDs: slices.Clone(current.BookIDs)} })
+
+		shape := shapeOf(state)
+		shape.initial.(shelf).BookIDs[0] = "23"
+
+		assert.Equal(t, []string{"42"}, state.initial.BookIDs, "changing the shape changed the initial value")
+	})
+}
+
+func TestCopyOfInitial(t *testing.T) {
+	t.Run("returns a copy that shares no data with the initial value", func(t *testing.T) {
+		type shelf struct{ BookIDs []string }
+
+		state := NewState(shelf{BookIDs: []string{"42"}}).
+			Clone(func(current shelf) shelf { return shelf{BookIDs: slices.Clone(current.BookIDs)} })
+
+		initial, err := state.copyOfInitial()
+		require.NoError(t, err)
+		initial.BookIDs[0] = "23"
+
+		assert.Equal(t, []string{"42"}, state.initial.BookIDs, "changing the copy changed the initial value")
+	})
+
+	t.Run("refuses an initial value that shares data, without a Clone function", func(t *testing.T) {
+		state := NewState(map[string]int{})
+
+		initial, err := state.copyOfInitial()
+
+		require.ErrorIs(t, err, ErrPermanent)
+		assert.EqualError(t, err, "architecturekit: permanent failure: map[string]int holds slices, maps or "+
+			"pointers in its initial value, so it needs a Clone function to start every read from a copy of the "+
+			"initial value")
+		assert.Nil(t, initial, "the initial value must not be handed out")
+	})
 }
 
 func TestClone(t *testing.T) {

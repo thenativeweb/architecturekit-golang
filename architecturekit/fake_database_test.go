@@ -29,6 +29,15 @@ type fakeDatabase struct {
 	endObserving func(connection int) bool
 	connections  int
 
+	// cutAfter, if set, ends every observed stream that endObserving keeps
+	// open once it has been open that long, as a load balancer does that
+	// limits how long a connection may last.
+	cutAfter time.Duration
+
+	// readDelay holds back the answer to every read, as a database under load
+	// does.
+	readDelay time.Duration
+
 	// tampered hands out events whose hash does not match their content, as if
 	// they had been changed after they were written.
 	tampered bool
@@ -80,6 +89,10 @@ func newFakeDatabase(t *testing.T, database *fakeDatabase) *eventsourcingdb.Clie
 		}
 		database.mutex.Unlock()
 
+		if !isObserving {
+			time.Sleep(database.readDelay)
+		}
+
 		for _, id := range ids {
 			writeEvent(writer, id, database.tampered)
 			after = id
@@ -95,9 +108,17 @@ func newFakeDatabase(t *testing.T, database *fakeDatabase) *eventsourcingdb.Clie
 		ticker := time.NewTicker(10 * time.Millisecond)
 		defer ticker.Stop()
 
+		// Without cutAfter, the channel stays nil, and the stream is never cut.
+		var cut <-chan time.Time
+		if database.cutAfter > 0 {
+			cut = time.After(database.cutAfter)
+		}
+
 		for {
 			select {
 			case <-request.Context().Done():
+				return
+			case <-cut:
 				return
 			case <-ticker.C:
 			}

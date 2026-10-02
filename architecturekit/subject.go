@@ -12,14 +12,20 @@ import (
 // A scheme works in both directions. Build composes a subject from values, and
 // Match takes one apart again, which a projection needs to recover the
 // aggregate ID that the events themselves do not carry.
+//
+// EventSourcingDB allows only ASCII letters and digits, underscores, and
+// hyphens in a segment of a subject, so this is what the literal segments of
+// a pattern and the values of its placeholders may contain.
 type SubjectScheme struct {
 	pattern      string
 	segments     []string
 	placeholders []string
 }
 
-// NewSubjectScheme parses a pattern. A malformed pattern is a programming
-// error and panics while the scheme is being built.
+// NewSubjectScheme parses a pattern. A malformed pattern, including one with a
+// literal segment that contains a character EventSourcingDB does not allow in
+// a subject, is a programming error and panics while the scheme is being
+// built.
 func NewSubjectScheme(pattern string) *SubjectScheme {
 	if !strings.HasPrefix(pattern, "/") {
 		panic(fmt.Sprintf("architecturekit: subject pattern %q must start with a slash", pattern))
@@ -38,6 +44,10 @@ func NewSubjectScheme(pattern string) *SubjectScheme {
 		if !strings.HasPrefix(segment, "{") {
 			if strings.ContainsAny(segment, "{}") {
 				panic(fmt.Sprintf("architecturekit: segment %q in %q is malformed", segment, pattern))
+			}
+			if !hasOnlySubjectCharacters(segment) {
+				panic(fmt.Sprintf("architecturekit: segment %q in %q may only contain %s",
+					segment, pattern, subjectCharacters))
 			}
 			continue
 		}
@@ -92,10 +102,10 @@ func (s *SubjectScheme) Placeholders() []string {
 }
 
 // Build composes a subject. The values fill the placeholders in the order they
-// appear in the pattern. A wrong number of values, or one that is empty or
-// contains a slash, is a programming error and panics. Values that come from
-// outside, such as an ID in a request, may well be like that, so check them
-// with Check first.
+// appear in the pattern. A wrong number of values, or one that Check refuses,
+// such as an empty one or one with a slash or a dot, is a programming error
+// and panics. Values that come from outside, such as an ID in a request, may
+// well be like that, so check them with Check first.
 func (s *SubjectScheme) Build(values ...string) string {
 	if err := s.Check(values...); err != nil {
 		panic(err.Error())
@@ -120,8 +130,10 @@ func (s *SubjectScheme) Build(values ...string) string {
 }
 
 // Check tells whether the values can compose a subject: one per placeholder,
-// none of them empty, and none containing a slash. It is what Build insists
-// on, as an error rather than a panic, for values that come from outside.
+// none of them empty, and each made only of the characters EventSourcingDB
+// allows in a segment of a subject, which are A-Z, a-z, 0-9, underscores, and
+// hyphens. It is what Build insists on, as an error rather than a panic, for
+// values that come from outside.
 func (s *SubjectScheme) Check(values ...string) error {
 	if len(values) != len(s.placeholders) {
 		return fmt.Errorf("architecturekit: pattern %q needs %d value(s), got %d",
@@ -133,9 +145,9 @@ func (s *SubjectScheme) Check(values ...string) error {
 			return fmt.Errorf("architecturekit: value for %q in %q must not be empty",
 				s.placeholders[i], s.pattern)
 		}
-		if strings.Contains(value, "/") {
-			return fmt.Errorf("architecturekit: value %q for %q in %q must not contain a slash",
-				value, s.placeholders[i], s.pattern)
+		if !hasOnlySubjectCharacters(value) {
+			return fmt.Errorf("architecturekit: value %q for %q in %q may only contain %s",
+				value, s.placeholders[i], s.pattern, subjectCharacters)
 		}
 	}
 
@@ -144,7 +156,8 @@ func (s *SubjectScheme) Check(values ...string) error {
 
 // Match takes a subject apart. It reports false if the subject does not follow
 // the pattern, which is an ordinary case for a projection reading recursively
-// across several schemes.
+// across several schemes. A subject with a value that Check refuses does not
+// follow it either, so that Match takes apart only what Build composes.
 func (s *SubjectScheme) Match(subject string) (map[string]string, bool) {
 	if !strings.HasPrefix(subject, "/") {
 		return nil, false
@@ -166,7 +179,7 @@ func (s *SubjectScheme) Match(subject string) (map[string]string, bool) {
 			continue
 		}
 
-		if parts[i] == "" {
+		if parts[i] == "" || !hasOnlySubjectCharacters(parts[i]) {
 			return nil, false
 		}
 
@@ -175,4 +188,26 @@ func (s *SubjectScheme) Match(subject string) (map[string]string, bool) {
 	}
 
 	return values, true
+}
+
+// subjectCharacters names the characters that EventSourcingDB allows in a
+// segment of a subject, for the messages of errors and panics.
+const subjectCharacters = "A-Z, a-z, 0-9, underscores, and hyphens"
+
+// hasOnlySubjectCharacters tells whether a segment of a subject contains only
+// characters that EventSourcingDB allows there. It is true for an empty
+// segment, which the callers refuse on their own.
+func hasOnlySubjectCharacters(segment string) bool {
+	for _, character := range segment {
+		allowed := 'A' <= character && character <= 'Z' ||
+			'a' <= character && character <= 'z' ||
+			'0' <= character && character <= '9' ||
+			character == '_' || character == '-'
+
+		if !allowed {
+			return false
+		}
+	}
+
+	return true
 }
