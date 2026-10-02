@@ -12,8 +12,9 @@ import (
 // Readiness answers whether the application can serve requests, judged by its
 // projections, so that an orchestrator such as Kubernetes only sends requests
 // once the views are built. It answers 200 once every projection has caught
-// up, and 503 while one of them is still catching up for the first time, or
-// has stopped.
+// up, and 503 while one of them has not caught up for the first time yet, also
+// if it reconnects because the database can not be reached at the start, or
+// once one of them has stopped.
 //
 // A projection that reconnects after it has caught up keeps the application
 // ready: its view is behind, but consistent, and every instance shares the

@@ -5,6 +5,11 @@
 // and the Docker client, and Go compiles a package with everything it imports.
 // Keeping them out of architecturekittest means that a test that only checks a
 // decider or a projection builds without either.
+//
+// The container runs the image thenativeweb/eventsourcingdb:latest, as the
+// client SDK starts it, which Docker pulls only if it is missing. The database
+// runs without a signing key, so its events carry no signature, and signature
+// verification can not be tested with it.
 package dbtest
 
 import (

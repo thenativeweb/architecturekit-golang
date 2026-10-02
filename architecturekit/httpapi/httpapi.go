@@ -474,6 +474,11 @@ func StatusFor(err error) int {
 // Both are logged through the logger of the API, with the route of the
 // request (see WithLogger).
 //
+// Unlike Route and Handle, Respond does not know where an error comes from, so
+// an error without a status of its own is answered with 500, also one that a
+// handler of your own has found in the request. Wrap such an error with
+// ErrMalformed to answer it with 400.
+//
 // Replace it with your own writer if you need a different shape; StatusFor
 // stays usable either way.
 func Respond[TUser any](

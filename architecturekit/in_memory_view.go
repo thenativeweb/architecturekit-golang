@@ -15,7 +15,11 @@ import (
 //
 // Every item carries the revision of its own, which is the ID of the last event
 // that changed it. An event that is not newer than the item it is about is
-// skipped, so that applying the same event twice changes nothing. Apart from
+// skipped, so that applying the same event twice changes nothing, as long as
+// the item is still there. The view forgets the revision of an item it removes,
+// so an event that adds the item, applied again after a later event has
+// removed it, adds it again. A projection that is rebuilt applies every event
+// once, in order, so that does not happen to a view in memory. Apart from
 // that, the view has a revision as a whole, which is the last event it has
 // seen at all (see Tracking).
 //
@@ -46,8 +50,10 @@ import (
 // All operations take a context and return an error, as a view in a database
 // would need to. The view in memory reads nothing but the part of an event
 // from the context, and mostly returns no error, but so a view in a database
-// can offer the same functions later on, without the projections that write to
-// it having to change.
+// can offer functions of the same shape, which the handlers of a projection
+// call the same way. There is no interface for the functions that change a
+// view, though, so a projection takes its view by its type, and moving it to a
+// view in a database changes that type.
 //
 // Note that this is the stored shape, not the answer to a query. Use the query
 // package to filter, order and project it into whatever an answer needs.
@@ -401,6 +407,9 @@ func (v *InMemoryView[TKey, TItem]) Update(
 // Delete removes the item with the given key, and reports what it did, like
 // Update: Applied if it removed the item, Missing if there is no such item, and
 // AlreadyApplied if the event is not newer than the item.
+//
+// The revision of the item goes with it, so an older event that adds the item
+// again, such as one that is applied a second time, adds it again.
 func (v *InMemoryView[TKey, TItem]) Delete(ctx context.Context, key TKey, eventID string) (Outcome, error) {
 	if err := requireEventID(eventID); err != nil {
 		return 0, err
