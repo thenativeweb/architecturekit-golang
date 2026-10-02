@@ -75,7 +75,7 @@ func Await(
 // as a string that changes when the answer would.
 //
 // A revision describes the read model and nothing else. That is enough while
-// the answer follows from the stored events alone -- and it stops being
+// the answer follows from the stored events alone, and it stops being
 // enough the moment anything outside them takes part. "Everything due today"
 // is the plain case: the same events mean something different after
 // midnight, without a single event being written. A tag built from the
@@ -180,7 +180,7 @@ func writeRevision(w http.ResponseWriter, revision, tag string) {
 
 // etagOf ties the revision to the resource it describes and to the query that
 // was asked. Every query over the same view shares a revision, so a tag that
-// held nothing else would match across resources and across callers -- and a
+// held nothing else would match across resources and across callers, and a
 // caller that sent a tag it got elsewhere would be told, wrongly, that nothing
 // had changed.
 //

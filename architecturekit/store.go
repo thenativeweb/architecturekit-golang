@@ -150,8 +150,9 @@ func WithoutHashVerification() StoreOption {
 }
 
 // WithSignatureVerification checks the signature of every event the store
-// reads, besides its hash, against the verification key of the database. An event without a signature, or with one that does not match
-// the key, makes reading fail with ErrUnverified.
+// reads, besides its hash, against the verification key of the database. An
+// event without a signature, or with one that does not match the key, makes
+// reading fail with ErrUnverified.
 //
 // The database signs events only if it runs with a signing key, and it signs
 // them when handing them out, with the key it has at that moment. After the key

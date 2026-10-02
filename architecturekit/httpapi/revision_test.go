@@ -531,7 +531,7 @@ func (refusingView) WaitFor(context.Context, string) error {
 
 // TestVarying covers the case the revision alone cannot describe. An answer
 // such as "everything due today" changes at midnight although no event is
-// written, so the revision stays put -- and a tag built from it alone would
+// written, so the revision stays put, and a tag built from it alone would
 // tell the caller, wrongly, that nothing had changed. That is exactly how an
 // application can end up showing yesterday's list until something unrelated
 // happens.
