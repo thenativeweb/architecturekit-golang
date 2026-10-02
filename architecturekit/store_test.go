@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
@@ -206,6 +207,19 @@ func TestExecute(t *testing.T) {
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
 		assert.ErrorContains(t, err, `"io.thenativeweb.test.annotated"`, "error should name the event type")
 		assert.Empty(t, eventTypesIn(t, subject), "not even the event with a rule may have been written")
+	})
+
+	t.Run("refuses with the same error as the test fixture", func(t *testing.T) {
+		store := requireStore(t)
+		decider := emittingDecider(counterState(), annotated{Note: "no rule"})
+		cmd := increment{subject: subjectFor(t)}
+
+		_, err := architecturekit.Execute(context.Background(), store, decider, cmd)
+		require.ErrorIs(t, err, architecturekit.ErrPermanent, "Execute has to refuse the event")
+
+		// The fixture of architecturekittest repeats the check of Execute, since
+		// it lives in another package, so both have to word the refusal alike.
+		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
 	})
 
 	t.Run("writes an event its state ignores", func(t *testing.T) {

@@ -2,7 +2,6 @@ package architecturekittest_test
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"testing"
 
@@ -625,17 +624,6 @@ func TestEventWithoutRule(t *testing.T) {
 			ThenEvents(unheardOf{})
 	})
 
-	t.Run("is reported with the error of Execute", func(t *testing.T) {
-		store := architecturekittest.Store(t, "https://architecturekit.test", nil)
-		cmd := emit{events: withoutRule.events, subject: "/accounts/" + rand.Text()}
-
-		_, err := architecturekit.Execute(context.Background(), store, emitDecider(), cmd)
-		require.ErrorIs(t, err, architecturekit.ErrPermanent, "Execute has to refuse the event")
-
-		architecturekittest.Given(t, emitDecider()).
-			When(cmd).
-			ThenRejected(err.Error())
-	})
 }
 
 func TestThenPreconditions(t *testing.T) {
