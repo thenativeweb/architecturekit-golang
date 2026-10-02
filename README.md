@@ -695,7 +695,7 @@ If the context ends, reading and writing stop, and the error is the one of the c
 The database only checks events against a schema once it is registered. The `Evolve` function collects the schemas of all events of a state, derived or their own (see [Describing Events with Schemas](#describing-events-with-schemas)). To get them as a slice of `EventSchema`, each with the fields `EventType` and `Schema`, call the `Schemas` function on the state. Then hand them over to the `RegisterSchemas` function, together with a context and the store:
 
 ```go
-err := architecturekit.RegisterSchemas(ctx, store, bookState.Schemas())
+err := architecturekit.RegisterSchemas(context.TODO(), store, bookState.Schemas())
 if err != nil {
   // ...
 }
@@ -1246,6 +1246,9 @@ To run a projection, call the `StartProjection` function with a context, the sto
 The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that:
 
 ```go
+ctx, cancel := context.WithCancel(context.TODO())
+defer cancel()
+
 run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("/books"), catalogProjection,
   architecturekit.Named("catalog"),
 )
