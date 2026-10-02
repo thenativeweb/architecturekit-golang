@@ -1009,12 +1009,12 @@ A view holds the data that queries read. Define the shape of an item as a struct
 
 ```go
 type BookItem struct {
-  ID            string `json:"id"`
-  Title         string `json:"title"`
-  Author        string `json:"author"`
-  IsBorrowed    bool   `json:"isBorrowed"`
-  BorrowedUntil string `json:"borrowedUntil"`
-  EventID       string `json:"eventId"`
+  ID            string
+  Title         string
+  Author        string
+  IsBorrowed    bool
+  BorrowedUntil string
+  EventID       string
 }
 
 func newCatalog() *architecturekit.InMemoryView[string, BookItem] {
@@ -1026,6 +1026,8 @@ func newCatalog() *architecturekit.InMemoryView[string, BookItem] {
 
 catalog := newCatalog()
 ```
+
+An item carries no JSON annotations, since what a caller sees is decided by a query and its answer, not by the view (see [Handling Queries over HTTP](#handling-queries-over-http)).
 
 Every item has a revision of its own, which is the ID of the last event that changed it. The `RevisionIn` option makes the view keep it in a field of the item, so that a caller can hand it over to a command that uses the `NewIsSubjectOnEventIDPrecondition` function (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). The view sets the field whenever it changes an item, so you never set it yourself. Without the option, the view keeps the revisions to itself.
 
@@ -1143,9 +1145,9 @@ removed, err := catalog.DeleteWhere(ctx, isByClarke, event.ID)
 
 ```go
 type ReaderItem struct {
-  ID       string            `json:"id"`
-  BookIDs  []string          `json:"bookIds"`
-  DueDates map[string]string `json:"dueDates"`
+  ID       string
+  BookIDs  []string
+  DueDates map[string]string
 }
 
 outcome, err := readers.Update(ctx, event.Data.BorrowedBy, event.ID, func(item *ReaderItem) {
@@ -2038,10 +2040,54 @@ toListBooks := func(r *http.Request, user User) (ListBooks, error) {
 }
 ```
 
-Then call the `Query` function with the API, the mux, a pattern, this function, and the function that answers the query:
+Items carry no JSON annotations (see [Defining Views](#defining-views)). So to answer with JSON, define a response type with JSON annotations, as the counterpart of the request types that commands use (see [Handling Commands over HTTP](#handling-commands-over-http)), and map the items to it. Here, the revision of a book goes along as `eventId`, so that a caller can send it back as `expectedEventId`:
 
 ```go
-httpapi.Query(api, mux, "GET /api/books", toListBooks, listBooks(catalog))
+type bookBody struct {
+  ID            string `json:"id"`
+  Title         string `json:"title"`
+  Author        string `json:"author"`
+  IsBorrowed    bool   `json:"isBorrowed"`
+  BorrowedUntil string `json:"borrowedUntil"`
+  EventID       string `json:"eventId"`
+}
+
+func bookBodyOf(book BookItem) bookBody {
+  return bookBody{
+    ID:            book.ID,
+    Title:         book.Title,
+    Author:        book.Author,
+    IsBorrowed:    book.IsBorrowed,
+    BorrowedUntil: book.BorrowedUntil,
+    EventID:       book.EventID,
+  }
+}
+```
+
+To answer with such bodies, wrap the function that answers the query with items, such as `listBooks` (see [Defining Queries](#defining-queries)), and map what it returns. Since every query that lists books returns items, one wrapper serves all of them:
+
+```go
+func answerBooks[TQuery any](ask httpapi.Answer[TQuery, []BookItem]) httpapi.Answer[TQuery, []bookBody] {
+  return func(ctx context.Context, q TQuery) ([]bookBody, error) {
+    books, err := ask(ctx, q)
+    if err != nil {
+      return nil, err
+    }
+
+    bodies := make([]bookBody, 0, len(books))
+    for _, book := range books {
+      bodies = append(bodies, bookBodyOf(book))
+    }
+
+    return bodies, nil
+  }
+}
+```
+
+Then call the `Query` function with the API, the mux, a pattern, the function that returns the query, and the function that answers it:
+
+```go
+httpapi.Query(api, mux, "GET /api/books", toListBooks, answerBooks(listBooks(catalog)))
 ```
 
 The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. Errors are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
@@ -2085,9 +2131,20 @@ The function reads the body by the same rules as for a command (see [Validating 
 
 #### Reporting Missing Items
 
-If the answering function returns `query.ErrNoItems`, as `query.Single` does if no item matches, the request is answered with `404 Not Found`:
+If the answering function returns `query.ErrNoItems`, as `query.Single` does if no item matches, the request is answered with `404 Not Found`. So a wrapper that maps a single item hands on the error as it is:
 
 ```go
+func answerBook[TQuery any](ask httpapi.Answer[TQuery, BookItem]) httpapi.Answer[TQuery, bookBody] {
+  return func(ctx context.Context, q TQuery) (bookBody, error) {
+    book, err := ask(ctx, q)
+    if err != nil {
+      return bookBody{}, err
+    }
+
+    return bookBodyOf(book), nil
+  }
+}
+
 httpapi.Query(
   api,
   mux,
@@ -2095,7 +2152,7 @@ httpapi.Query(
   func(r *http.Request, user User) (GetBook, error) {
     return GetBook{BookID: r.PathValue("id")}, nil
   },
-  getBook(catalog),
+  answerBook(getBook(catalog)),
 )
 ```
 
@@ -2136,7 +2193,7 @@ It checks the categories in this order:
 To let a caller read its own writes over HTTP, hand over the `Revisioned` option to `Query`, with a view that implements `Revisioned`, whose projection is tracked (see [Tracking Revisions](#tracking-revisions)), and how long to wait at most:
 
 ```go
-httpapi.Query(api, mux, "GET /api/books", toListBooks, listBooks(catalog),
+httpapi.Query(api, mux, "GET /api/books", toListBooks, answerBooks(listBooks(catalog)),
   httpapi.Revisioned(catalog, httpapi.DefaultWait),
 )
 ```
@@ -2190,7 +2247,7 @@ httpapi.Query(api, mux, "GET /api/overdue-books",
   func(r *http.Request, user User) (ListOverdueBooks, error) {
     return ListOverdueBooks{Today: time.Now().Format(time.DateOnly)}, nil
   },
-  listOverdueBooks(catalog),
+  answerBooks(listOverdueBooks(catalog)),
   httpapi.Revisioned(catalog, httpapi.DefaultWait),
 )
 ```
@@ -2202,7 +2259,7 @@ func today(*http.Request) string {
   return time.Now().Format(time.DateOnly)
 }
 
-httpapi.Query(api, mux, "GET /api/books-due-today", toListBooksDueToday, listBooksDueToday(catalog),
+httpapi.Query(api, mux, "GET /api/books-due-today", toListBooksDueToday, answerBooks(listBooksDueToday(catalog)),
   httpapi.Revisioned(catalog, httpapi.DefaultWait),
   httpapi.Varying(today),
 )
