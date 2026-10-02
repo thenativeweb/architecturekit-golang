@@ -692,16 +692,16 @@ If the context ends, reading and writing stop, and the error is the one of the c
 
 ### Registering Event Schemas
 
-The database only checks events against a schema once it is registered. The `Evolve` function collects the schemas of all events of a state, derived or their own (see [Describing Events with Schemas](#describing-events-with-schemas)). To get them as a slice of `EventSchema`, each with the fields `EventType` and `Schema`, call the `Schemas` function on the state. Then hand them over to the `RegisterSchemas` function of the store:
+The database only checks events against a schema once it is registered. The `Evolve` function collects the schemas of all events of a state, derived or their own (see [Describing Events with Schemas](#describing-events-with-schemas)). To get them as a slice of `EventSchema`, each with the fields `EventType` and `Schema`, call the `Schemas` function on the state. Then hand them over to the `RegisterSchemas` function, together with a context and the store:
 
 ```go
-err := store.RegisterSchemas(bookState.Schemas())
+err := architecturekit.RegisterSchemas(ctx, store, bookState.Schemas())
 if err != nil {
   // ...
 }
 ```
 
-`RegisterSchemas` accepts the schemas of several states at once. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code.
+`RegisterSchemas` accepts the schemas of several states at once. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code. If the context ends first, it returns the error of the context. Since the client registers a schema without a context, a registration that has begun is finished, but none begins once the context has ended.
 
 A registered schema can not change. If it differs from the one from the code, `RegisterSchemas` returns an error of the category `ErrPermanent`, and so it does if the database refuses a schema, for example because stored events of the type do not match it. To change the shape of an event, introduce a new event type instead (see [Versioning Events](#versioning-events)).
 
@@ -2397,7 +2397,7 @@ api := httpapi.NewAPI(nil, userFrom)
 
 ### Testing with a Database
 
-Some tests need a real database, for example to run commands from end to end. To get one, call the `Store` function with a `*testing.T`, the source, and the schemas to register. It returns a store on a database that all tests of the package share, which the first test that asks for it starts in a container:
+Some tests need a real database, for example to run commands from end to end. To get one, call the `Store` function with a `*testing.T`, the source, and the schemas to register. It returns a store on a database that all tests of the package share, which the first test that asks for it starts in a container. Options for the store, such as `WithStateCache`, follow the schemas, so that a test runs with the same store as the application:
 
 ```go
 func TestAcquireBook(t *testing.T) {
@@ -2437,7 +2437,9 @@ func TestMain(m *testing.M) {
 }
 ```
 
-The tests share the events as well, so a test writes to subjects of its own, for example with a random ID in them, and reads only from those. A test that reads more than that, such as a projection from `/`, needs a database of its own. Call the `IsolatedStore` function to start one for the test alone, which is stopped once the test is over. It takes a few seconds, so use it only where the shared one would not do.
+*Note that the schemas come as a single slice, so that the options can follow. To hand over the schemas of several states, join them with `slices.Concat`, for example `slices.Concat(bookState.Schemas(), readerState.Schemas())`.*
+
+The tests share the events as well, so a test writes to subjects of its own, for example with a random ID in them, and reads only from those. A test that reads more than that, such as a projection from `/`, needs a database of its own. Call the `IsolatedStore` function to start one for the test alone, which is stopped once the test is over. It takes the same arguments as `Store`, and a few seconds to start, so use it only where the shared one would not do.
 
 For a test that connects by itself, such as one that starts a whole server, call the `SharedDatabase` or the `IsolatedDatabase` function. Each returns a `*Database`, whose `URL` and `APIToken` fields are what a client needs. Its `Client` function returns a client, for example to write an event that no command would, and its `Store` function returns a store, as above:
 

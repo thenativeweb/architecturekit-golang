@@ -34,13 +34,21 @@ func (d *Database) Client() *eventsourcingdb.Client {
 }
 
 // Store returns a store on the database that writes events with the given
-// source, and registers the given schemas first. A schema that the database
-// refuses fails the test.
-func (d *Database) Store(t testing.TB, source string, schemas ...[]architecturekit.EventSchema) *architecturekit.Store {
+// source and has the given options, and registers the given schemas first. A
+// schema that the database refuses fails the test.
+//
+// The schemas come as a single list, so that the options can follow. To hand
+// over the schemas of several states, join them with slices.Concat.
+func (d *Database) Store(
+	t testing.TB,
+	source string,
+	schemas []architecturekit.EventSchema,
+	options ...architecturekit.StoreOption,
+) *architecturekit.Store {
 	t.Helper()
 
-	store := architecturekit.NewStore(d.client, source)
-	if err := store.RegisterSchemas(schemas...); err != nil {
+	store := architecturekit.NewStore(d.client, source, options...)
+	if err := architecturekit.RegisterSchemas(t.Context(), store, schemas); err != nil {
 		t.Fatalf("registering the schemas: %v", err)
 	}
 
@@ -123,18 +131,28 @@ func IsolatedDatabase(t testing.TB) *Database {
 
 // Store returns a store on the shared database. It is SharedDatabase followed
 // by its Store function.
-func Store(t testing.TB, source string, schemas ...[]architecturekit.EventSchema) *architecturekit.Store {
+func Store(
+	t testing.TB,
+	source string,
+	schemas []architecturekit.EventSchema,
+	options ...architecturekit.StoreOption,
+) *architecturekit.Store {
 	t.Helper()
 
-	return SharedDatabase(t).Store(t, source, schemas...)
+	return SharedDatabase(t).Store(t, source, schemas, options...)
 }
 
 // IsolatedStore returns a store on a database of the test's own. It is
 // IsolatedDatabase followed by its Store function.
-func IsolatedStore(t testing.TB, source string, schemas ...[]architecturekit.EventSchema) *architecturekit.Store {
+func IsolatedStore(
+	t testing.TB,
+	source string,
+	schemas []architecturekit.EventSchema,
+	options ...architecturekit.StoreOption,
+) *architecturekit.Store {
 	t.Helper()
 
-	return IsolatedDatabase(t).Store(t, source, schemas...)
+	return IsolatedDatabase(t).Store(t, source, schemas, options...)
 }
 
 // Main runs the tests of a package, and stops the shared database afterwards,
