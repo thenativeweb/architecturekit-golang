@@ -32,7 +32,8 @@ func TestCompareRevisions(t *testing.T) {
 			{"9 vs 10", "9", "10", -1},
 			{"10 vs 9", "10", "9", 1},
 			{"100 vs 99", "100", "99", 1},
-			{"the largest vs the one below", "18446744073709551615", "18446744073709551614", 1},
+			{"the largest vs the one below", "9223372036854775807", "9223372036854775806", 1},
+			{"leading zeros", "002", "2", 0},
 		}
 
 		for _, test := range tests {
@@ -55,6 +56,9 @@ func TestCompareRevisions(t *testing.T) {
 			{"a negative number", "-1"},
 			{"a leading space", " 1"},
 			{"a hexadecimal number", "0x10"},
+			{"a plus sign", "+1"},
+			{"one beyond the largest event ID", "9223372036854775808"},
+			{"the largest 64-bit number", "18446744073709551615"},
 			{"a number beyond 64 bits", "99999999999999999999"},
 		}
 
