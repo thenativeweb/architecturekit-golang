@@ -2,29 +2,36 @@ package architecturekit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
-	"strconv"
 	"strings"
+
+	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// statusCodePattern finds the status code the database answered with. The
-// client exports no typed error, which leaves nothing but its error text.
-var statusCodePattern = regexp.MustCompile(`HTTP status code '(\d{3})'`)
+// answerOf returns the answer of the database that the client reports as a
+// DBAPIError, with its status code and the reason the database gave, or nil
+// if the failure came without an answer, e.g. because the database is
+// unreachable or the connection broke.
+func answerOf(err error) *eventsourcingdb.DBAPIError {
+	var answer *eventsourcingdb.DBAPIError
+	if !errors.As(err, &answer) {
+		return nil
+	}
+
+	return answer
+}
 
 // statusCodeOf returns the status code the database answered with, or 0 if
-// the failure came without an answer, e.g. because the database is
-// unreachable or the connection broke.
+// the failure came without an answer.
 func statusCodeOf(err error) int {
-	match := statusCodePattern.FindStringSubmatch(err.Error())
-	if match == nil {
+	answer := answerOf(err)
+	if answer == nil {
 		return 0
 	}
 
-	status, _ := strconv.Atoi(match[1])
-
-	return status
+	return answer.StatusCode
 }
 
 // contextEnded reports that reading or writing stopped because the context
@@ -54,7 +61,7 @@ func contextEnded(ctx context.Context, doing string) error {
 //     answer for now, e.g. because it is shutting down. Both are transient.
 //   - 409 means that a precondition did not hold, which is a conflict, or that
 //     an event does not match its schema, which is permanent. Only the reason
-//     inside the error text tells them apart.
+//     the database gives tells them apart.
 //   - Every other status, such as 400, 401 or 413, means that the request
 //     itself is wrong, which is permanent. A rejected API token is named, as it
 //     is the one to expect in production, e.g. after the token was rotated.
@@ -63,7 +70,7 @@ func databaseFailure(err error, doing string) error {
 
 	switch {
 	case status == 0:
-		if strings.Contains(err.Error(), "server must be EventSourcingDB") {
+		if errors.Is(err, eventsourcingdb.ErrInvalidServerHeader) {
 			return fmt.Errorf("%w: %s: the answer does not come from an EventSourcingDB: %v", ErrTransient, doing, err)
 		}
 		return fmt.Errorf("%w: %s: %v", ErrTransient, doing, err)
@@ -72,7 +79,7 @@ func databaseFailure(err error, doing string) error {
 		return fmt.Errorf("%w: %s: %v", ErrTransient, doing, err)
 
 	case status == http.StatusConflict:
-		if strings.Contains(err.Error(), "schema conflict") {
+		if strings.HasPrefix(answerOf(err).Reason, "schema conflict") {
 			return fmt.Errorf("%w: %s: %v", ErrPermanent, doing, err)
 		}
 		return fmt.Errorf("%w: %s: %v", ErrConflict, doing, err)
