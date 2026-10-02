@@ -962,6 +962,8 @@ So far, subjects have been composed by hand. To define their structure once, cal
 var bookSubject = architecturekit.NewSubjectScheme("/books/{book}")
 ```
 
+Each segment of a subject may only contain the characters that EventSourcingDB allows: the letters `A-Z` and `a-z`, the digits `0-9`, underscores, and hyphens. This applies to the literal segments of the pattern as well as to the values that fill its placeholders.
+
 The function returns a `*SubjectScheme`. To compose a subject, call the `Build` function with one value per placeholder, in the order in which they appear in the pattern. Use it in every command that acts on a book:
 
 ```go
@@ -978,7 +980,7 @@ func (c ReturnBook) Subject() string {
 }
 ```
 
-To take a subject apart, call the `Match` function. It returns the values by placeholder name, and `false` if the subject does not follow the pattern:
+To take a subject apart, call the `Match` function. It returns the values by placeholder name, and `false` if the subject does not follow the pattern or has a value that `Build` would refuse:
 
 ```go
 values, ok := bookSubject.Match("/books/42")
@@ -995,9 +997,9 @@ run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree(b
 
 *Note that other subjects may lie under the same root, such as `/books/42/reviews/7` under `/books`. Use `Match` in the projection to tell them apart.*
 
-*Note that a malformed pattern panics, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains a slash.*
+*Note that a malformed pattern panics, including one with a literal segment that contains a character EventSourcingDB does not allow, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains such a character, for example a slash, a dot, or a space.*
 
-Values that come from outside, such as an ID in a request, may well be empty or contain a slash, and that is not a programming error. To check them before building a subject, call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, instead of panicking:
+Values that come from outside, such as an ID in a request, may well be empty or contain such characters, and that is not a programming error. So always check them before building a subject: call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, such as which characters a value may contain, instead of panicking:
 
 ```go
 if err := bookSubject.Check(bookID); err != nil {
@@ -1353,7 +1355,9 @@ return run.Err()
 
 *Note that if the database can not be reached at the start, the run keeps trying, and `CaughtUp` stays open. To wait for a limited time only, add a case with `time.After` to the `select` statement.*
 
-If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again. To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
+If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again, or has followed the stream for longer than the delay had grown to, even if no event arrived. That way, a load balancer that ends long-lived connections regularly does not hold back a quiet projection, while a database that fails before the projection has caught up, or right after, is given ever more time.
+
+To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
 
 ```go
 store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
@@ -1372,7 +1376,7 @@ The observer receives a `Reconnect` with these fields:
 - `Subject` is the subject the projection reads.
 - `Err` is the reason, which is `nil` if the database ended the stream.
 - `Delay` is how long the projection waits before the next attempt.
-- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event.
+- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event, or has followed the stream for longer than the delay had grown to.
 
 *Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable. A failure that trying again will not fix, for example a rejected API token, ends the run (see [Handling Errors](#handling-errors)).*
 
@@ -1893,7 +1897,7 @@ func (r borrowBookRequest) ToCommand(user User) (BorrowBook, error) {
 }
 ```
 
-`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`. Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a slash (see [Composing Subjects](#composing-subjects)). And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
+`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`. Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)). And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
 
 Then call the `Route` function with the request type, the API, the mux, a pattern, and the decider:
 
