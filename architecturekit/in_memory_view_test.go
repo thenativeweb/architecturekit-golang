@@ -769,6 +769,21 @@ func TestRevisionIn(t *testing.T) {
 	decider := counterDecider()
 	decider.State = resetIgnoringState()
 
+	t.Run("panics on a nil function", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: RevisionIn needs a function, not nil", func() {
+			architecturekit.RevisionIn[counterItem](nil)
+		})
+	})
+
+	t.Run("panics when it is given twice", func(t *testing.T) {
+		revisionOf := func(item *counterItem) *string { return &item.Revision }
+
+		assert.PanicsWithValue(t, "architecturekit: RevisionIn is given twice", func() {
+			architecturekit.NewInMemoryView(func(item counterItem) string { return item.Subject },
+				architecturekit.RevisionIn(revisionOf), architecturekit.RevisionIn(revisionOf))
+		})
+	})
+
 	t.Run("fits a precondition on the subject if the item follows every event of it", func(t *testing.T) {
 		item, written := projectIncrementAndReset(t, true)
 
