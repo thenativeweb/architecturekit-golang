@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
 func TestReplay(t *testing.T) {
@@ -93,6 +94,31 @@ func TestSchemas(t *testing.T) {
 			assert.Equal(t, want.EventType(), schemas[i].EventType)
 			assert.NotNil(t, schemas[i].Schema, "schema %d must not be nil", i)
 		}
+	})
+}
+
+func TestHasRule(t *testing.T) {
+	t.Run("is true for an event type with an Evolve rule", func(t *testing.T) {
+		assert.True(t, resetIgnoringState().HasRule((incremented{}).EventType()))
+	})
+
+	t.Run("is true for an event type the state ignores", func(t *testing.T) {
+		assert.True(t, resetIgnoringState().HasRule((reset{}).EventType()))
+	})
+
+	t.Run("is false for an unknown event type", func(t *testing.T) {
+		assert.False(t, resetIgnoringState().HasRule((annotated{}).EventType()))
+	})
+
+	t.Run("is false for an older type that only an upcaster knows", func(t *testing.T) {
+		state := counterState().UpcastWith(architecturekit.NewUpcasters().
+			Upcast("io.thenativeweb.test.outdated",
+				func(event eventsourcingdb.Event) ([]eventsourcingdb.Event, error) {
+					event.Type = (incremented{}).EventType()
+					return []eventsourcingdb.Event{event}, nil
+				}))
+
+		assert.False(t, state.HasRule("io.thenativeweb.test.outdated"))
 	})
 }
 

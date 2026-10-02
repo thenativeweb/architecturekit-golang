@@ -188,7 +188,8 @@ func (labelled) Schema() map[string]any {
 	return schema
 }
 
-// note is a state whose rule expects annotated.
+// note is a state whose rule expects annotated. It ignores labelled, so that
+// Execute writes one, and the database is the one to check it.
 type note struct {
 	Text string
 }
@@ -200,6 +201,7 @@ func noteState() *architecturekit.State[note] {
 		current.Text = event.Note
 		return current
 	})
+	state.Ignore[labelled]()
 
 	return state
 }

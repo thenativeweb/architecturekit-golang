@@ -251,6 +251,36 @@ func (s *State[TState]) Schemas() []EventSchema {
 	return s.schemas
 }
 
+// HasRule reports whether the state has a rule for an event type, an Evolve
+// rule or Ignore, so that it can read events of that type. Execute refuses to
+// write an event the state of the decider has no rule for, since the state
+// could not read the subject any more, and the test fixture of
+// architecturekittest uses HasRule to report such an event the same way.
+//
+// Upcasters play no part, since a decider returns events of current types: an
+// older type that only an upcaster knows has no rule.
+func (s *State[TState]) HasRule(eventType string) bool {
+	_, isKnown := s.evolve[eventType]
+	return isKnown
+}
+
+// checkRules fails permanently if the state has no rule for one of the events
+// a decider returned for a subject. They are written to the subject that the
+// same state reads for the next command, and the database keeps every event,
+// so a single one without a rule would leave a subject the state can not read
+// any more, until the code has a rule for it.
+func (s *State[TState]) checkRules(subject string, events []Event) error {
+	for _, event := range events {
+		if !s.HasRule(event.EventType()) {
+			return fmt.Errorf("%w: refusing to write an event of type %q to %q, since the state of the "+
+				"decider has no rule for it and could not read the subject any more",
+				ErrPermanent, event.EventType(), subject)
+		}
+	}
+
+	return nil
+}
+
 // Decider connects a state with the decision made on it.
 type Decider[TCommand Command, TState any] struct {
 	State  *State[TState]
