@@ -103,8 +103,11 @@ func WithConflictRetries(retries int) StoreOption {
 // StartProjection or StartTransactionalProjection wait before they read again
 // after reading failed or the stream ended. The delay starts at initialDelay,
 // doubles with every attempt in a row, and never exceeds maxDelay. It starts
-// over once a projection has made progress. Without this option, the delays
-// are 1 second and 1 minute.
+// over once a projection has made progress, or has followed the stream for
+// longer than the delay had grown to, even if no event arrived, as when a load
+// balancer ends long-lived connections regularly. A database that fails before
+// a projection has caught up, or right after, is given ever more time. Without
+// this option, the delays are 1 second and 1 minute.
 //
 // An initialDelay of zero or less is a programming error, since the
 // projections would then read again without any pause, and so is a maxDelay
