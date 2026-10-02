@@ -3,6 +3,7 @@ package httpapi_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -423,9 +424,12 @@ func TestRoute(t *testing.T) {
 	})
 }
 
+// errBrokenBody is what failingReader fails with.
+var errBrokenBody = errors.New("broken body")
+
 type failingReader struct{}
 
-func (failingReader) Read([]byte) (int, error) { return 0, errors.New("broken body") }
+func (failingReader) Read([]byte) (int, error) { return 0, errBrokenBody }
 
 // --- what the handler generated on the way ---
 
@@ -500,11 +504,34 @@ func TestUserOf(t *testing.T) {
 				assert.Equal(t, failure.err, err, "the error has to come back as it is")
 			} else {
 				assert.ErrorIs(t, err, httpapi.ErrUnauthorized)
+				assert.ErrorIs(t, err, failure.err, "the error of userFrom has to stay inspectable")
 				assert.ErrorContains(t, err, failure.err.Error(), "the error has to say why")
 			}
 		})
 	}
+
+	t.Run("keeps an error of userFrom inspectable behind ErrUnauthorized", func(t *testing.T) {
+		expired := &expiredToken{at: "2026-10-01T12:00:00Z"}
+		api := httpapi.NewAPI(deadStore(t), userFromFailing(expired))
+
+		_, err := httpapi.UserOf(httptest.NewRequest(http.MethodGet, "/", nil), api)
+
+		require.ErrorIs(t, err, httpapi.ErrUnauthorized)
+
+		found, isFound := errors.AsType[*expiredToken](err)
+		require.True(t, isFound, "errors.As has to find the error of userFrom")
+		assert.Same(t, expired, found)
+
+		assert.Equal(t, "httpapi: unauthorized: the token expired at 2026-10-01T12:00:00Z", err.Error())
+	})
 }
+
+// expiredToken is an error of userFrom that carries more than its text.
+type expiredToken struct {
+	at string
+}
+
+func (e *expiredToken) Error() string { return "the token expired at " + e.at }
 
 // userFromFailing returns a function that fails to determine the user, with
 // the given error.
@@ -525,6 +552,7 @@ var userFromFailures = []struct {
 	{"that is wrapped as unauthorized", fmt.Errorf("%w: the token has expired", httpapi.ErrUnauthorized), http.StatusUnauthorized, true},
 	{"that is transient", fmt.Errorf("%w: the session store is down", architecturekit.ErrTransient), http.StatusServiceUnavailable, true},
 	{"that is transient, but wrapped as unauthorized", fmt.Errorf("%w: %v", httpapi.ErrUnauthorized, fmt.Errorf("%w: the session store is down", architecturekit.ErrTransient)), http.StatusUnauthorized, true},
+	{"that is transient, but wrapped as unauthorized, inspectably", fmt.Errorf("%w: %w", httpapi.ErrUnauthorized, fmt.Errorf("%w: the session store is down", architecturekit.ErrTransient)), http.StatusUnauthorized, true},
 	{"that is forbidden", fmt.Errorf("%w: the account is locked", httpapi.ErrForbidden), http.StatusForbidden, true},
 	{"that is permanent", fmt.Errorf("%w: the session key is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, true},
 	{"that is unverified", fmt.Errorf("%w: the session is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, true},
@@ -577,5 +605,150 @@ func TestFailingUserFrom(t *testing.T) {
 			assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
 			assert.Contains(t, logs.String(), "the session store is down")
 		})
+	}
+}
+
+// buildFailures are errors of ToCommand and ToQuery, and the statuses and
+// messages they are answered with. An error that has a status of its own
+// keeps it, and so does a permanent one, while every other error means that
+// the request is malformed.
+var buildFailures = []struct {
+	label   string
+	err     error
+	status  int
+	message string
+	isKept  bool
+}{
+	{"without a category", errors.New("id must not be empty"), http.StatusBadRequest, "httpapi: malformed request: id must not be empty", false},
+	{"that is malformed", fmt.Errorf("%w: id must not be empty", httpapi.ErrMalformed), http.StatusBadRequest, "httpapi: malformed request: id must not be empty", true},
+	{"that is unauthorized", fmt.Errorf("%w: the token has expired", httpapi.ErrUnauthorized), http.StatusUnauthorized, "unauthorized", true},
+	{"that is forbidden", fmt.Errorf("%w: only librarians acquire books", httpapi.ErrForbidden), http.StatusForbidden, "httpapi: forbidden: only librarians acquire books", true},
+	{"that is not found", fmt.Errorf("%w: book 42 is unknown", httpapi.ErrNotFound), http.StatusNotFound, "httpapi: not found: book 42 is unknown", true},
+	{"that is too large", fmt.Errorf("%w: at most 10 books at once", httpapi.ErrTooLarge), http.StatusRequestEntityTooLarge, "httpapi: request body too large: at most 10 books at once", true},
+	{"that is no JSON", fmt.Errorf("%w: text/plain is not application/json", httpapi.ErrUnsupportedMediaType), http.StatusUnsupportedMediaType, "httpapi: unsupported media type: text/plain is not application/json", true},
+	{"of the domain", architecturekit.NewDomainError("the reader is suspended"), http.StatusUnprocessableEntity, "the reader is suspended", true},
+	{"that is a conflict", fmt.Errorf("%w: reading %q", architecturekit.ErrConflict, "/readers/23"), http.StatusConflict, "conflict: the data has changed since it was read", true},
+	{"that is transient", fmt.Errorf("%w: session store at redis://10.0.3.9 is down", architecturekit.ErrTransient), http.StatusServiceUnavailable, "internal server error", true},
+	{"that is permanent", fmt.Errorf("%w: the catalog at /etc/catalog.yaml is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, "internal server error", true},
+	{"that is unverified", fmt.Errorf("%w: the reader is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, "internal server error", true},
+	{"because the caller went away", fmt.Errorf("looking up the reader: %w", context.Canceled), 499, "looking up the reader: context canceled", true},
+	{"because the deadline ran out", fmt.Errorf("looking up the reader: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, "internal server error", true},
+}
+
+// failingRequest can not be turned into a command, and fails with the error of
+// buildFailures that its body names.
+type failingRequest struct {
+	Failure string `json:"failure"`
+}
+
+func (r failingRequest) ToCommand(user) (note, error) {
+	for _, failure := range buildFailures {
+		if failure.label == r.Failure {
+			return note{}, failure.err
+		}
+	}
+
+	return note{}, fmt.Errorf("no failure is labeled %q", r.Failure)
+}
+
+// failingToQuery returns a function that fails to build a query, with the
+// given error.
+func failingToQuery(err error) httpapi.ToQuery[user, listNotes] {
+	return func(*http.Request, user) (listNotes, error) { return listNotes{}, err }
+}
+
+func TestFailingToCommandAndToQuery(t *testing.T) {
+	// Every entry point builds its command or query and categorises its error
+	// the same way, so each of them has to answer with the status of the
+	// error.
+	entryPoints := map[string]func(t *testing.T, api *httpapi.API[user], label string, err error) *httptest.ResponseRecorder{
+		"a command": func(t *testing.T, api *httpapi.API[user], label string, _ error) *httptest.ResponseRecorder {
+			mux := http.NewServeMux()
+			httpapi.Route[failingRequest](api, mux, "POST /note", noteDecider())
+
+			return postNote(t, mux, `{"failure":"`+label+`"}`)
+		},
+		"a query": func(t *testing.T, api *httpapi.API[user], _ string, err error) *httptest.ResponseRecorder {
+			mux := http.NewServeMux()
+			httpapi.Query(api, mux, "GET /notes", failingToQuery(err), answerListNotes)
+
+			return ask(t, mux, "/notes", "golo")
+		},
+		"a revisioned query": func(t *testing.T, api *httpapi.API[user], _ string, err error) *httptest.ResponseRecorder {
+			mux := http.NewServeMux()
+			httpapi.Query(api, mux, "GET /notes", failingToQuery(err), answerListNotes, httpapi.Revisioned(noteView(), time.Second))
+
+			return ask(t, mux, "/notes", "golo")
+		},
+	}
+
+	for name, enter := range entryPoints {
+		for _, failure := range buildFailures {
+			t.Run(name+" answers an error "+failure.label+" with "+strconv.Itoa(failure.status), func(t *testing.T) {
+				var logs bytes.Buffer
+				api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
+
+				response := enter(t, api, failure.label, failure.err)
+
+				assert.Equal(t, failure.status, response.Code)
+
+				expected, err := json.Marshal(map[string]string{"message": failure.message})
+				require.NoError(t, err)
+				assert.JSONEq(t, string(expected), response.Body.String())
+			})
+		}
+
+		t.Run(name+" logs a transient error as an internal failure, without telling the caller", func(t *testing.T) {
+			var logs bytes.Buffer
+			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
+			transient := fmt.Errorf("%w: session store at redis://10.0.3.9 is down", architecturekit.ErrTransient)
+
+			response := enter(t, api, "that is transient", transient)
+
+			require.Equal(t, http.StatusServiceUnavailable, response.Code)
+			assert.NotContains(t, response.Body.String(), "redis://", "the caller must not learn about the internals")
+			assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
+			assert.Contains(t, logs.String(), "redis://10.0.3.9 is down")
+		})
+	}
+
+	// Handle and Ask return the error, so it has to be the same that the routes
+	// answer with, and stay inspectable when it is marked as malformed.
+	returners := map[string]func(t *testing.T, api *httpapi.API[user], label string, err error) error{
+		"Handle": func(t *testing.T, api *httpapi.API[user], label string, _ error) error {
+			request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"failure":"`+label+`"}`))
+			request.Header.Set("X-User", "golo")
+			request.Header.Set("Content-Type", "application/json")
+
+			_, err := httpapi.Handle[failingRequest](request, api, noteDecider())
+
+			return err
+		},
+		"Ask": func(t *testing.T, api *httpapi.API[user], _ string, err error) error {
+			request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+			request.Header.Set("X-User", "golo")
+
+			_, err = httpapi.Ask(request, api, failingToQuery(err), answerListNotes)
+
+			return err
+		},
+	}
+
+	for name, returnError := range returners {
+		for _, failure := range buildFailures {
+			t.Run(name+" returns an error "+failure.label+" with the status "+strconv.Itoa(failure.status), func(t *testing.T) {
+				api := httpapi.NewAPI(deadStore(t), userFrom)
+
+				err := returnError(t, api, failure.label, failure.err)
+
+				assert.Equal(t, failure.status, httpapi.StatusFor(err))
+				if failure.isKept {
+					assert.Equal(t, failure.err, err, "the error has to come back as it is")
+				} else {
+					assert.ErrorIs(t, err, httpapi.ErrMalformed)
+					assert.ErrorIs(t, err, failure.err, "the error has to stay inspectable")
+				}
+			})
+		}
 	}
 }

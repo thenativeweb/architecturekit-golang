@@ -6,6 +6,7 @@ import (
 	"hash/fnv"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
@@ -44,7 +45,8 @@ const DefaultWait = 5 * time.Second
 // for none. Running out of time is not an error either: the caller answers
 // with what the view has. Only a revision that cannot be read as one is
 // refused, because that is a mistake in the request rather than a slow
-// projection.
+// projection. The error is ErrMalformed, and wraps
+// architecturekit.ErrNotARevision.
 func Await(
 	r *http.Request,
 	view architecturekit.Revisioned,
@@ -58,7 +60,7 @@ func Await(
 	// A revision that is not one would otherwise wait for the full timeout and
 	// then answer as if nothing were wrong.
 	if _, err := architecturekit.CompareRevisions(wanted, "0"); err != nil {
-		return fmt.Errorf("%w: %v", ErrMalformed, err)
+		return fmt.Errorf("%w: %w", ErrMalformed, err)
 	}
 
 	waiting, cancel := context.WithTimeout(r.Context(), wait)
@@ -88,7 +90,7 @@ type Volatile func(*http.Request) string
 // serveUnchanged answers 304 when the caller already holds the answer with
 // the given tag, and reports whether it did.
 func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string) bool {
-	if tag == "" || r.Header.Get("If-None-Match") != tag {
+	if tag == "" || !holdsTag(r, tag) {
 		return false
 	}
 
@@ -98,21 +100,35 @@ func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string
 	return true
 }
 
-// respondResultAt writes a query result with the revision it shows, and
-// explains an error with explain.
-func respondResultAt[TResult any](
-	w http.ResponseWriter,
-	revision string,
-	tag string,
-	result TResult,
-	err error,
-	explain func(status int, err error) string,
-) {
-	if err == nil {
-		writeRevision(w, revision, tag)
-	}
+// holdsTag reports whether the If-None-Match header of a request names the
+// tag, compared the way HTTP has it for this header (RFC 9110, 13.1.2).
+//
+// The header holds a list of tags, separated by commas, which may be spread
+// over several lines, or *, which names every tag. The comparison is weak, so
+// W/"a" names "a" as well: a proxy that compresses an answer marks its tag as
+// weak, since the bytes are no longer the same, and the caller then sends it
+// back that way. A tag can contain a comma, but no quote, so the list is read
+// from quote to quote rather than split at the commas.
+func holdsTag(r *http.Request, tag string) bool {
+	list := strings.Join(r.Header.Values("If-None-Match"), ",")
 
-	respondResult(w, result, err, explain)
+	for {
+		list = strings.TrimLeft(list, " \t,")
+		if strings.HasPrefix(list, "*") {
+			return true
+		}
+
+		quoted, isQuoted := strings.CutPrefix(strings.TrimPrefix(list, "W/"), `"`)
+		opaque, rest, isClosed := strings.Cut(quoted, `"`)
+		if !isQuoted || !isClosed {
+			return false
+		}
+		if `"`+opaque+`"` == tag {
+			return true
+		}
+
+		list = rest
+	}
 }
 
 // answerRevisioned answers a query that can be asked for a revision (see
@@ -124,6 +140,8 @@ func answerRevisioned[TUser any, TQuery any, TResult any](
 	settings querySettings,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer api.answerPanic(w, r)
+
 		explain := api.explain(r)
 
 		user, err := UserOf(r, api)

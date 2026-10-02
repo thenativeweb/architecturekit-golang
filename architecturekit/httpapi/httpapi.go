@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"runtime/debug"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
@@ -52,6 +53,14 @@ var (
 // ToCommand is implemented by the request DTO. It is the single place where
 // transport data and the user turn into a command, which keeps the command
 // itself free of JSON tags and of HTTP.
+//
+// An error that StatusFor maps to a status of its own keeps it, such as
+// ErrForbidden, an error of the category architecturekit.ErrDomain, or one of
+// architecturekit.ErrTransient, if a service that ToCommand asks is down. So
+// does an error of the category architecturekit.ErrPermanent, which is
+// answered with 500. Any other error means that the request can not be turned
+// into a command, and comes back wrapped with ErrMalformed, which is answered
+// with 400 and the error as the message.
 type ToCommand[TUser any, TCommand any] interface {
 	ToCommand(user TUser) (TCommand, error)
 }
@@ -77,10 +86,11 @@ type apiSettings struct {
 // does not explain to the caller in full through the given logger, once, with
 // the method and the route of the request: the routes the API wires up, and
 // Respond and RespondResult in a handler of your own. A failure of the server
-// is logged as an error, and a refusal with 401 or 409, whose details the
-// caller is not told (see Respond), as information. The same goes for an
-// answer that Adding could not complete, which is logged as an error. Without
-// it, they log through the default logger of log/slog.
+// is logged as an error, which for a panic includes its value and its stack,
+// and a refusal with 401 or 409, whose details the caller is not told (see
+// Respond), as information. The same goes for an answer that Adding could not
+// complete, which is logged as an error. Without it, they log through the
+// default logger of log/slog.
 //
 // A nil logger is a programming error, so WithLogger panics.
 func WithLogger(logger *slog.Logger) APIOption {
@@ -127,8 +137,7 @@ func (api *API[TUser]) explain(r *http.Request) func(status int, err error) stri
 		switch {
 		// Internal failures are not explained to the caller, but logged.
 		case status >= http.StatusInternalServerError:
-			api.loggerOrDefault().Error("httpapi: internal failure",
-				"method", r.Method, "route", r.Pattern, "status", status, "error", err)
+			api.logFailure(r, status, err)
 
 			return "internal server error"
 
@@ -153,6 +162,18 @@ func (api *API[TUser]) explain(r *http.Request) func(status int, err error) stri
 			return err.Error()
 		}
 	}
+}
+
+// logFailure logs an internal failure. For a panic, that includes its value
+// and the stack it happened on, which the error alone does not show.
+func (api *API[TUser]) logFailure(r *http.Request, status int, err error) {
+	attributes := []any{"method", r.Method, "route", r.Pattern, "status", status, "error", err}
+
+	if failure, isPanic := errors.AsType[*panicError](err); isPanic {
+		attributes = append(attributes, "panic", failure.value, "stack", string(failure.stack))
+	}
+
+	api.loggerOrDefault().Error("httpapi: internal failure", attributes...)
 }
 
 // logRefusal logs the error of a refusal whose details the caller is not told.
@@ -192,19 +213,20 @@ func (api *API[TUser]) loggerOrDefault() *slog.Logger {
 // that it keeps its status. If the session store is down, for example,
 // userFrom says so with architecturekit.ErrTransient, which is answered with
 // 503 and logged, rather than sending the caller off to sign in again. Only an
-// error without such a status comes back as ErrUnauthorized. To have an error
-// with a status of its own answered with 401 all the same, userFrom wraps it
-// with ErrUnauthorized itself.
+// error without such a status comes back as ErrUnauthorized, which wraps it,
+// so that errors.Is and errors.As still find it. To have an error with a
+// status of its own answered with 401 all the same, userFrom wraps it with
+// ErrUnauthorized itself.
 func UserOf[TUser any](r *http.Request, api *API[TUser]) (TUser, error) {
 	user, err := api.userFrom(r)
 	if err != nil {
 		var none TUser
 
-		if StatusFor(err) != http.StatusInternalServerError || errors.Is(err, architecturekit.ErrPermanent) {
+		if hasCategory(err) {
 			return none, err
 		}
 
-		return none, fmt.Errorf("%w: %v", ErrUnauthorized, err)
+		return none, fmt.Errorf("%w: %w", ErrUnauthorized, err)
 	}
 
 	return user, nil
@@ -232,6 +254,12 @@ type Handled[TCommand any] struct {
 
 // Handle turns a request into a command and executes it, without writing
 // anything to the response. Use it to answer in a format of your own.
+//
+// A panic on the way, such as one of SubjectScheme.Build in the Subject
+// function of the command, comes back as an error that StatusFor maps to 500,
+// and that Respond logs with the value and the stack of the panic. Only
+// http.ErrAbortHandler panics on, since net/http expects it to abort the
+// response.
 func Handle[
 	TRequest ToCommand[TUser, TCommand],
 	TUser any,
@@ -241,8 +269,8 @@ func Handle[
 	r *http.Request,
 	api *API[TUser],
 	decider architecturekit.Decider[TCommand, TState],
-) (Handled[TCommand], error) {
-	var handled Handled[TCommand]
+) (handled Handled[TCommand], err error) {
+	defer recoverInto(&err)
 
 	user, err := UserOf(r, api)
 	if err != nil {
@@ -316,6 +344,11 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 // the kit's default format, which is the revision the command wrote (see
 // Respond), plus the fields of Adding, if given. Only TRequest has to be
 // given: TUser comes from the API, TCommand and TState come from the decider.
+//
+// A panic while it handles a request is answered with 500, like any other
+// internal failure, and logged with its value and its stack. Left to
+// net/http, it would close the connection, and the caller would get no answer
+// at all.
 func Route[
 	TRequest ToCommand[TUser, TCommand],
 	TUser any,
@@ -334,6 +367,8 @@ func Route[
 	}
 
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer api.answerPanic(w, r)
+
 		handled, err := Handle[TRequest](r, api, decider)
 
 		var fields any
@@ -485,27 +520,73 @@ func answerOf(written []eventsourcingdb.Event, fields any) (map[string]any, erro
 	return answer, nil
 }
 
-// categorise leaves an error that already says what kind it is alone, and
-// marks everything else as a malformed request.
+// categorise leaves an error of ToCommand or ToQuery that already says what
+// kind it is alone (see hasCategory), and marks everything else as a
+// malformed request, which it wraps, so that errors.Is and errors.As still
+// find it.
 //
 // Without this, an application that returns ErrForbidden from ToCommand would
-// see its 403 turned into a 400.
+// see its 403 turned into a 400, and one whose session store is down would
+// tell the caller that the request is to blame.
 func categorise(err error) error {
-	for _, known := range []error{
-		ErrUnauthorized,
-		ErrForbidden,
-		ErrNotFound,
-		ErrTooLarge,
-		ErrUnsupportedMediaType,
-		ErrMalformed,
-		architecturekit.ErrDomain,
-	} {
-		if errors.Is(err, known) {
-			return err
-		}
+	if hasCategory(err) {
+		return err
 	}
 
-	return fmt.Errorf("%w: %v", ErrMalformed, err)
+	return fmt.Errorf("%w: %w", ErrMalformed, err)
+}
+
+// hasCategory reports whether an error says what kind it is: whether
+// StatusFor maps it to a status of its own, or it is of the category
+// architecturekit.ErrPermanent, which maps to 500 like an error without any
+// category, but on purpose.
+func hasCategory(err error) bool {
+	return StatusFor(err) != http.StatusInternalServerError || errors.Is(err, architecturekit.ErrPermanent)
+}
+
+// panicError is a panic while a request was handled, which is answered like
+// any other internal failure, and logged with its value and its stack (see
+// logFailure).
+//
+// It does not unwrap to the value, even if that is an error, since a panic is
+// a mistake in the code, whatever it panicked with, and so always maps to 500.
+type panicError struct {
+	value any
+	stack []byte
+}
+
+func (failure *panicError) Error() string {
+	return fmt.Sprintf("httpapi: panic while handling the request: %v", failure.value)
+}
+
+// panicked turns what recover returned into an error, which is nil if nothing
+// panicked. A panic with http.ErrAbortHandler goes on, since net/http expects
+// it to abort the response, and does not log it.
+func panicked(value any) error {
+	if value == nil {
+		return nil
+	}
+	if value == http.ErrAbortHandler {
+		panic(value)
+	}
+
+	return &panicError{value: value, stack: debug.Stack()}
+}
+
+// recoverInto turns a panic into the error that err points to (see
+// panicked). It has to be deferred, so that recover sees the panic.
+func recoverInto(err *error) {
+	if failure := panicked(recover()); failure != nil {
+		*err = failure
+	}
+}
+
+// answerPanic answers a panic with 500, like any other internal failure (see
+// panicked). It has to be deferred, so that recover sees the panic.
+func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
+	if failure := panicked(recover()); failure != nil {
+		respondResult(w, struct{}{}, failure, api.explain(r))
+	}
 }
 
 // BodyOf decodes the JSON body of a request by the rules that Route applies to
@@ -513,7 +594,8 @@ func categorise(err error) error {
 // into the query string. The Content-Type has to be application/json, or it is
 // ErrUnsupportedMediaType. The body may hold at most MaxRequestBody bytes, or
 // it is ErrTooLarge. JSON that does not fit TBody, including a field that TBody
-// does not have, is ErrMalformed.
+// does not have, is ErrMalformed, which wraps the error of decoding, so that
+// errors.As finds it, such as a *json.UnmarshalTypeError that names the field.
 //
 // So is anything but whitespace after the JSON value, such as a second value,
 // and an object in which a name occurs twice. Names match fields regardless of
@@ -533,7 +615,7 @@ func BodyOf[TBody any](r *http.Request) (TBody, error) {
 
 	value, err = decodeStrictly[TBody](body)
 	if err != nil {
-		return value, fmt.Errorf("%w: %v", ErrMalformed, err)
+		return value, fmt.Errorf("%w: %w", ErrMalformed, err)
 	}
 
 	return value, nil
@@ -610,7 +692,7 @@ func requireJSON(r *http.Request) error {
 func readBody(r *http.Request) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBody+1))
 	if err != nil {
-		return nil, fmt.Errorf("%w: reading the body: %v", ErrMalformed, err)
+		return nil, fmt.Errorf("%w: reading the body: %w", ErrMalformed, err)
 	}
 
 	if len(body) > MaxRequestBody {

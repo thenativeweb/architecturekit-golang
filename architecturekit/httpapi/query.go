@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,11 @@ var ErrNotFound = errors.New("httpapi: not found")
 // ToQuery turns request data and the user into a query. It is the read
 // side's counterpart to ToCommand, and it is a function rather than a method,
 // because a query reads from the URL instead of from a body.
+//
+// Its errors are treated as those of ToCommand: one that StatusFor maps to a
+// status of its own keeps it, and so does one of the category
+// architecturekit.ErrPermanent, while any other error comes back wrapped with
+// ErrMalformed, and is answered with 400.
 type ToQuery[TUser any, TQuery any] func(r *http.Request, user TUser) (TQuery, error)
 
 // Answer answers a query. It sees neither the request nor HTTP, which is the
@@ -26,22 +32,27 @@ type Answer[TQuery any, TResult any] func(ctx context.Context, query TQuery) (TR
 
 // Ask determines the caller, builds the query and answers it, without writing
 // anything to the response. Use it to answer in a format of your own.
+//
+// A panic on the way comes back as an error that StatusFor maps to 500, and
+// that RespondResult logs with the value and the stack of the panic. Only
+// http.ErrAbortHandler panics on, since net/http expects it to abort the
+// response.
 func Ask[TUser any, TQuery any, TResult any](
 	r *http.Request,
 	api *API[TUser],
 	toQuery ToQuery[TUser, TQuery],
 	answer Answer[TQuery, TResult],
-) (TResult, error) {
-	var empty TResult
+) (result TResult, err error) {
+	defer recoverInto(&err)
 
 	user, err := UserOf(r, api)
 	if err != nil {
-		return empty, err
+		return result, err
 	}
 
 	query, err := toQuery(r, user)
 	if err != nil {
-		return empty, categorise(err)
+		return result, categorise(err)
 	}
 
 	return answer(r.Context(), query)
@@ -60,6 +71,10 @@ type querySettings struct {
 // the given time (DefaultWait, unless there is a reason for another), answer
 // 304 when nothing has changed, and tag the answer with the revision of the
 // view it served.
+//
+// Whether nothing has changed, it tells from If-None-Match, which it reads
+// the way HTTP has it: as a list of tags, or *, compared weakly, so that a tag
+// that a proxy marked as weak while compressing the answer still matches.
 //
 // The tag holds the query, so two callers get the same tag only if they ask
 // the same: a query that holds the user, or anything else that tells callers
@@ -126,6 +141,9 @@ func Varying(varies Volatile) QueryOption {
 // which is the result itself. With Revisioned, it reads its own writes and
 // answers 304 when nothing has changed; with Varying in addition, its tag
 // changes with what the answer takes from elsewhere.
+//
+// A panic while it handles a request is answered with 500, like any other
+// internal failure, and logged with its value and its stack, as with Route.
 func Query[TUser any, TQuery any, TResult any](
 	api *API[TUser],
 	mux *http.ServeMux,
@@ -145,6 +163,8 @@ func Query[TUser any, TQuery any, TResult any](
 		}
 
 		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer api.answerPanic(w, r)
+
 			result, err := Ask(r, api, toQuery, answer)
 			respondResult(w, result, err, api.explain(r))
 		}))
@@ -177,11 +197,32 @@ func respondResult[TResult any](
 	err error,
 	explain func(status int, err error) string,
 ) {
+	respondResultAt(w, "", "", result, err, explain)
+}
+
+// respondResultAt writes a query result with the revision it shows, if there
+// is one (see writeRevision), and explains an error with explain.
+//
+// The result is encoded before anything is written, so that a panic while it
+// is encoded, such as one in a MarshalJSON function, is still answered with
+// 500, and without the revision of an answer that never came.
+func respondResultAt[TResult any](
+	w http.ResponseWriter,
+	revision string,
+	tag string,
+	result TResult,
+	err error,
+	explain func(status int, err error) string,
+) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if err == nil {
+		var body bytes.Buffer
+		_ = json.NewEncoder(&body).Encode(listOf(result))
+
+		writeRevision(w, revision, tag)
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(listOf(result))
+		_, _ = w.Write(body.Bytes())
 		return
 	}
 
