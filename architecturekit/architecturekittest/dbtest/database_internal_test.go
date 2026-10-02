@@ -1,4 +1,4 @@
-package architecturekittest
+package dbtest
 
 import (
 	"bytes"
@@ -181,7 +181,7 @@ func TestFinish(t *testing.T) {
 
 		var log bytes.Buffer
 		assert.Equal(t, 1, finish(0, &log), "a container left behind has to fail the run")
-		assert.Contains(t, log.String(), "stopping the shared database: container is stuck")
+		assert.Equal(t, "architecturekittest/dbtest: stopping the shared database: container is stuck\n", log.String())
 	})
 }
 
