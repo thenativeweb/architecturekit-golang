@@ -1288,6 +1288,8 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
 )
 ```
 
+*Note that an initial delay of zero or less panics, since the projections would then read again without any pause, and so does a maximum delay below the initial one.*
+
 The observer receives a `Reconnect` with these fields:
 
 - `Projection` is the name the projection was given with `Named`, or empty if it has none.
