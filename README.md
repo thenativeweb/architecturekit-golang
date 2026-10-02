@@ -1355,7 +1355,9 @@ return run.Err()
 
 *Note that if the database can not be reached at the start, the run keeps trying, and `CaughtUp` stays open. To wait for a limited time only, add a case with `time.After` to the `select` statement.*
 
-If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again. To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
+If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again, or has followed the stream for longer than the delay had grown to, even if no event arrived. That way, a load balancer that ends long-lived connections regularly does not hold back a quiet projection, while a database that fails before the projection has caught up, or right after, is given ever more time.
+
+To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
 
 ```go
 store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
@@ -1374,7 +1376,7 @@ The observer receives a `Reconnect` with these fields:
 - `Subject` is the subject the projection reads.
 - `Err` is the reason, which is `nil` if the database ended the stream.
 - `Delay` is how long the projection waits before the next attempt.
-- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event.
+- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event, or has followed the stream for longer than the delay had grown to.
 
 *Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable. A failure that trying again will not fix, for example a rejected API token, ends the run (see [Handling Errors](#handling-errors)).*
 
