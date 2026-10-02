@@ -90,11 +90,11 @@ type noteRequest struct {
 	Text string `json:"text"`
 }
 
-func (r noteRequest) ToCommand(u user) (note, error) {
-	if r.ID == "" {
+func toNote(_ *http.Request, request noteRequest, _ user) (note, error) {
+	if request.ID == "" {
 		return note{}, errors.New("id must not be empty")
 	}
-	return note(r), nil
+	return note(request), nil
 }
 
 // --- helpers ---
@@ -117,7 +117,7 @@ func muxFor(t *testing.T, store *architecturekit.Store) *http.ServeMux {
 
 	api := httpapi.NewAPI(store, userFrom)
 	mux := http.NewServeMux()
-	httpapi.Route[noteRequest](api, mux, "POST /note", noteDecider())
+	httpapi.Route(api, mux, "POST /note", toNote, noteDecider())
 
 	return mux
 }
@@ -140,6 +140,16 @@ func send(t *testing.T, mux *http.ServeMux, r request) *httptest.ResponseRecorde
 	mux.ServeHTTP(recorder, httpRequest)
 
 	return recorder
+}
+
+// postingTo returns a request of a known user that posts the body to the
+// path.
+func postingTo(path, body string) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	request.Header.Set("X-User", "golo")
+	request.Header.Set("Content-Type", "application/json")
+
+	return request
 }
 
 // --- StatusFor, without any infrastructure ---
@@ -422,6 +432,14 @@ func TestRoute(t *testing.T) {
 		// to try again later.
 		assert.Equal(t, http.StatusServiceUnavailable, response.Code)
 	})
+
+	t.Run("panics for a nil function", func(t *testing.T) {
+		var toNothing httpapi.ToCommand[user, noteRequest, note]
+
+		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a function that turns the request into a command, not nil", func() {
+			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNothing, noteDecider())
+		})
+	})
 }
 
 // errBrokenBody is what failingReader fails with.
@@ -433,14 +451,14 @@ func (failingReader) Read([]byte) (int, error) { return 0, errBrokenBody }
 
 // --- what the handler generated on the way ---
 
-type generatedRequest struct {
+type textRequest struct {
 	Text string `json:"text"`
 }
 
-// ToCommand makes up the ID, the way an application does when the server, not
-// the client, decides what a new aggregate is called.
-func (r generatedRequest) ToCommand(u user) (note, error) {
-	return note{ID: "generated-" + u.UserID, Text: r.Text}, nil
+// toGeneratedNote makes up the ID, the way an application does when the
+// server, not the client, decides what a new aggregate is called.
+func toGeneratedNote(_ *http.Request, request textRequest, u user) (note, error) {
+	return note{ID: "generated-" + u.UserID, Text: request.Text}, nil
 }
 
 func TestHandle(t *testing.T) {
@@ -451,7 +469,7 @@ func TestHandle(t *testing.T) {
 		request.Header.Set("X-User", "golo")
 		request.Header.Set("Content-Type", "application/json")
 
-		handled, err := httpapi.Handle[generatedRequest](request, api, noteDecider())
+		handled, err := httpapi.Handle(request, api, toGeneratedNote, noteDecider())
 
 		// The store is unreachable, so this fails, and the command still comes
 		// back: a handler may want to say what it tried to do.
@@ -468,10 +486,109 @@ func TestHandle(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"text":"x"}`))
 		request.Header.Set("Content-Type", "application/json")
 
-		handled, err := httpapi.Handle[generatedRequest](request, api, noteDecider())
+		handled, err := httpapi.Handle(request, api, toGeneratedNote, noteDecider())
 
 		assert.ErrorIs(t, err, httpapi.ErrUnauthorized)
 		assert.Empty(t, handled.Command.ID, "no command was built, so it has to be empty")
+	})
+}
+
+// --- what the function that turns a request into a command gets ---
+
+// routedShowing wires toCommand at the pattern, on a store that accepts every
+// write, and answers with the command next to the revision, so that a test
+// sees what the command was built from.
+func routedShowing[TRequest any](t *testing.T, pattern string, toCommand httpapi.ToCommand[user, TRequest, note]) *http.ServeMux {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	httpapi.Route(httpapi.NewAPI(writingStore(t), userFrom), mux, pattern, toCommand, noteDecider(),
+		httpapi.Adding(func(handled httpapi.Handled[note]) (any, error) {
+			return struct {
+				ID   string `json:"id"`
+				Text string `json:"text"`
+			}{handled.Command.ID, handled.Command.Text}, nil
+		}))
+
+	return mux
+}
+
+func TestToCommand(t *testing.T) {
+	t.Run("gets a value of the path", func(t *testing.T) {
+		mux := routedShowing(t, "POST /notes/{id}/text", func(r *http.Request, request textRequest, _ user) (note, error) {
+			return note{ID: r.PathValue("id"), Text: request.Text}, nil
+		})
+
+		response := serve(t, mux, postingTo("/notes/42/text", `{"text":"hello"}`))
+
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.JSONEq(t, `{"revision": "0", "id": "42", "text": "hello"}`, response.Body.String())
+	})
+
+	t.Run("gets a header", func(t *testing.T) {
+		mux := routedShowing(t, "POST /notes", func(r *http.Request, request textRequest, _ user) (note, error) {
+			return note{ID: r.Header.Get("Idempotency-Key"), Text: request.Text}, nil
+		})
+
+		request := postingTo("/notes", `{"text":"hello"}`)
+		request.Header.Set("Idempotency-Key", "7")
+		response := serve(t, mux, request)
+
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.JSONEq(t, `{"revision": "0", "id": "7", "text": "hello"}`, response.Body.String())
+	})
+
+	t.Run("gets the context of the request", func(t *testing.T) {
+		type tenantKey struct{}
+
+		mux := routedShowing(t, "POST /notes", func(r *http.Request, request textRequest, _ user) (note, error) {
+			tenant, _ := r.Context().Value(tenantKey{}).(string)
+			return note{ID: tenant + "-1", Text: request.Text}, nil
+		})
+
+		// A middleware puts the tenant into the context, as an application does.
+		withTenant := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), tenantKey{}, "acme")))
+		})
+
+		response := httptest.NewRecorder()
+		withTenant.ServeHTTP(response, postingTo("/notes", `{"text":"hello"}`))
+
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.JSONEq(t, `{"revision": "0", "id": "acme-1", "text": "hello"}`, response.Body.String())
+	})
+
+	t.Run("gets a body of a type from another package", func(t *testing.T) {
+		// A method can only be declared in the package of its type, so a body of
+		// another package could not be turned into a command by a method.
+		mux := routedShowing(t, "POST /notes/{id}/due", func(r *http.Request, due time.Time, _ user) (note, error) {
+			return note{ID: r.PathValue("id"), Text: "due on " + due.Format(time.DateOnly)}, nil
+		})
+
+		response := serve(t, mux, postingTo("/notes/42/due", `"2026-10-24T09:00:00Z"`))
+
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.JSONEq(t, `{"revision": "0", "id": "42", "text": "due on 2026-10-24"}`, response.Body.String())
+	})
+
+	t.Run("gets the request itself, the body, and the user", func(t *testing.T) {
+		api := httpapi.NewAPI(deadStore(t), userFrom)
+		request := postingTo("/note", `{"text":"hello"}`)
+
+		var (
+			gotRequest *http.Request
+			gotBody    textRequest
+			gotUser    user
+		)
+		_, err := httpapi.Handle(request, api, func(r *http.Request, body textRequest, u user) (note, error) {
+			gotRequest, gotBody, gotUser = r, body, u
+			return note{ID: "1"}, nil
+		}, noteDecider())
+
+		require.Error(t, err, "expected the store to be unreachable")
+		assert.Same(t, request, gotRequest, "the function has to get the request itself, with its context")
+		assert.Equal(t, textRequest{Text: "hello"}, gotBody)
+		assert.Equal(t, user{UserID: "golo"}, gotUser)
 	})
 }
 
@@ -635,20 +752,10 @@ var buildFailures = []struct {
 	{"because the deadline ran out", fmt.Errorf("looking up the reader: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, "internal server error", true},
 }
 
-// failingRequest can not be turned into a command, and fails with the error of
-// buildFailures that its body names.
-type failingRequest struct {
-	Failure string `json:"failure"`
-}
-
-func (r failingRequest) ToCommand(user) (note, error) {
-	for _, failure := range buildFailures {
-		if failure.label == r.Failure {
-			return note{}, failure.err
-		}
-	}
-
-	return note{}, fmt.Errorf("no failure is labeled %q", r.Failure)
+// failingToCommand returns a function that fails to build a command, with the
+// given error.
+func failingToCommand(err error) httpapi.ToCommand[user, noteRequest, note] {
+	return func(*http.Request, noteRequest, user) (note, error) { return note{}, err }
 }
 
 // failingToQuery returns a function that fails to build a query, with the
@@ -661,20 +768,20 @@ func TestFailingToCommandAndToQuery(t *testing.T) {
 	// Every entry point builds its command or query and categorises its error
 	// the same way, so each of them has to answer with the status of the
 	// error.
-	entryPoints := map[string]func(t *testing.T, api *httpapi.API[user], label string, err error) *httptest.ResponseRecorder{
-		"a command": func(t *testing.T, api *httpapi.API[user], label string, _ error) *httptest.ResponseRecorder {
+	entryPoints := map[string]func(t *testing.T, api *httpapi.API[user], err error) *httptest.ResponseRecorder{
+		"a command": func(t *testing.T, api *httpapi.API[user], err error) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
-			httpapi.Route[failingRequest](api, mux, "POST /note", noteDecider())
+			httpapi.Route(api, mux, "POST /note", failingToCommand(err), noteDecider())
 
-			return postNote(t, mux, `{"failure":"`+label+`"}`)
+			return postNote(t, mux, `{"id":"1","text":"hello"}`)
 		},
-		"a query": func(t *testing.T, api *httpapi.API[user], _ string, err error) *httptest.ResponseRecorder {
+		"a query": func(t *testing.T, api *httpapi.API[user], err error) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
 			httpapi.Query(api, mux, "GET /notes", failingToQuery(err), answerListNotes)
 
 			return ask(t, mux, "/notes", "golo")
 		},
-		"a revisioned query": func(t *testing.T, api *httpapi.API[user], _ string, err error) *httptest.ResponseRecorder {
+		"a revisioned query": func(t *testing.T, api *httpapi.API[user], err error) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
 			httpapi.Query(api, mux, "GET /notes", failingToQuery(err), answerListNotes, httpapi.Revisioned(noteView(), time.Second))
 
@@ -688,7 +795,7 @@ func TestFailingToCommandAndToQuery(t *testing.T) {
 				var logs bytes.Buffer
 				api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 
-				response := enter(t, api, failure.label, failure.err)
+				response := enter(t, api, failure.err)
 
 				assert.Equal(t, failure.status, response.Code)
 
@@ -703,7 +810,7 @@ func TestFailingToCommandAndToQuery(t *testing.T) {
 			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 			transient := fmt.Errorf("%w: session store at redis://10.0.3.9 is down", architecturekit.ErrTransient)
 
-			response := enter(t, api, "that is transient", transient)
+			response := enter(t, api, transient)
 
 			require.Equal(t, http.StatusServiceUnavailable, response.Code)
 			assert.NotContains(t, response.Body.String(), "redis://", "the caller must not learn about the internals")
@@ -714,17 +821,17 @@ func TestFailingToCommandAndToQuery(t *testing.T) {
 
 	// Handle and Ask return the error, so it has to be the same that the routes
 	// answer with, and stay inspectable when it is marked as malformed.
-	returners := map[string]func(t *testing.T, api *httpapi.API[user], label string, err error) error{
-		"Handle": func(t *testing.T, api *httpapi.API[user], label string, _ error) error {
-			request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"failure":"`+label+`"}`))
+	returners := map[string]func(t *testing.T, api *httpapi.API[user], err error) error{
+		"Handle": func(t *testing.T, api *httpapi.API[user], err error) error {
+			request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"id":"1","text":"hello"}`))
 			request.Header.Set("X-User", "golo")
 			request.Header.Set("Content-Type", "application/json")
 
-			_, err := httpapi.Handle[failingRequest](request, api, noteDecider())
+			_, err = httpapi.Handle(request, api, failingToCommand(err), noteDecider())
 
 			return err
 		},
-		"Ask": func(t *testing.T, api *httpapi.API[user], _ string, err error) error {
+		"Ask": func(t *testing.T, api *httpapi.API[user], err error) error {
 			request := httptest.NewRequest(http.MethodGet, "/notes", nil)
 			request.Header.Set("X-User", "golo")
 
@@ -739,7 +846,7 @@ func TestFailingToCommandAndToQuery(t *testing.T) {
 			t.Run(name+" returns an error "+failure.label+" with the status "+strconv.Itoa(failure.status), func(t *testing.T) {
 				api := httpapi.NewAPI(deadStore(t), userFrom)
 
-				err := returnError(t, api, failure.label, failure.err)
+				err := returnError(t, api, failure.err)
 
 				assert.Equal(t, failure.status, httpapi.StatusFor(err))
 				if failure.isKept {

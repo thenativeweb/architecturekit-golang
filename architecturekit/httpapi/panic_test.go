@@ -38,8 +38,8 @@ type uncheckedNoteRequest struct {
 	ID string `json:"id"`
 }
 
-func (r uncheckedNoteRequest) ToCommand(user) (uncheckedNote, error) {
-	return uncheckedNote(r), nil
+func toUncheckedNote(_ *http.Request, request uncheckedNoteRequest, _ user) (uncheckedNote, error) {
+	return uncheckedNote(request), nil
 }
 
 func uncheckedNoteDecider() architecturekit.Decider[uncheckedNote, notes] {
@@ -51,19 +51,15 @@ func uncheckedNoteDecider() architecturekit.Decider[uncheckedNote, notes] {
 	}
 }
 
-// panickingRequest panics while it turns into a command, with an error that
-// claims to be transient.
-type panickingRequest struct{}
-
-func (panickingRequest) ToCommand(user) (note, error) {
+// toNotePanicking panics while it turns a request into a command, with an
+// error that claims to be transient.
+func toNotePanicking(*http.Request, noteRequest, user) (note, error) {
 	panic(fmt.Errorf("%w: the session store is down", architecturekit.ErrTransient))
 }
 
-// abortingRequest aborts the response while it turns into a command, the way
-// net/http expects a handler to.
-type abortingRequest struct{}
-
-func (abortingRequest) ToCommand(user) (note, error) {
+// toNoteAborting aborts the response while it turns a request into a command,
+// the way net/http expects a handler to.
+func toNoteAborting(*http.Request, noteRequest, user) (note, error) {
 	panic(http.ErrAbortHandler)
 }
 
@@ -129,7 +125,7 @@ func TestPanicsInRoutes(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Route[uncheckedNoteRequest](api, mux, "POST /note", uncheckedNoteDecider())
+		httpapi.Route(api, mux, "POST /note", toUncheckedNote, uncheckedNoteDecider())
 
 		response := postUncheckedNote(t, mux, "")
 
@@ -141,7 +137,7 @@ func TestPanicsInRoutes(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Route[uncheckedNoteRequest](api, mux, "POST /note", uncheckedNoteDecider())
+		httpapi.Route(api, mux, "POST /note", toUncheckedNote, uncheckedNoteDecider())
 
 		server := httptest.NewServer(mux)
 		defer server.Close()
@@ -280,7 +276,7 @@ func TestPanicsInHandleAndAsk(t *testing.T) {
 		var handled httpapi.Handled[uncheckedNote]
 		var err error
 		require.NotPanics(t, func() {
-			handled, err = httpapi.Handle[uncheckedNoteRequest](request, api, uncheckedNoteDecider())
+			handled, err = httpapi.Handle(request, api, toUncheckedNote, uncheckedNoteDecider())
 		})
 
 		require.Error(t, err)
@@ -298,7 +294,7 @@ func TestPanicsInHandleAndAsk(t *testing.T) {
 
 		var err error
 		require.NotPanics(t, func() {
-			_, err = httpapi.Handle[panickingRequest](request, api, noteDecider())
+			_, err = httpapi.Handle(request, api, toNotePanicking, noteDecider())
 		})
 
 		assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(err), "a panic is a mistake in the code, not a transient failure")
@@ -313,7 +309,7 @@ func TestPanicsInHandleAndAsk(t *testing.T) {
 		request.Header.Set("Content-Type", "application/json")
 
 		assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
-			_, _ = httpapi.Handle[abortingRequest](request, api, noteDecider())
+			_, _ = httpapi.Handle(request, api, toNoteAborting, noteDecider())
 		})
 	})
 
@@ -322,7 +318,7 @@ func TestPanicsInHandleAndAsk(t *testing.T) {
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
 		mux.HandleFunc("POST /note", func(w http.ResponseWriter, r *http.Request) {
-			_, err := httpapi.Handle[uncheckedNoteRequest](r, api, uncheckedNoteDecider())
+			_, err := httpapi.Handle(r, api, toUncheckedNote, uncheckedNoteDecider())
 			httpapi.Respond(w, r, api, nil, err)
 		})
 

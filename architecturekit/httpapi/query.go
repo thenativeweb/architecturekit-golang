@@ -17,8 +17,9 @@ import (
 var ErrNotFound = errors.New("httpapi: not found")
 
 // ToQuery turns request data and the user into a query. It is the read
-// side's counterpart to ToCommand, and it is a function rather than a method,
-// because a query reads from the URL instead of from a body.
+// side's counterpart to ToCommand, without a decoded body, since a query
+// usually reads from the URL. One whose input does not fit there reads the
+// body itself, with BodyOf.
 //
 // Its errors are treated as those of ToCommand: one that StatusFor maps to a
 // status of its own keeps it, and so does one of the category

@@ -1879,46 +1879,46 @@ mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
 
 ### Handling Commands over HTTP
 
-To accept a command over HTTP, define a request type with JSON annotations, and implement the `ToCommand` function, which receives the user and returns the command. For example, for the `BorrowBook` that checks the revision of the caller (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)):
+To accept a command over HTTP, define a request type with JSON annotations for the body, and a function that returns the command. Like the function that returns a query (see [Handling Queries over HTTP](#handling-queries-over-http)), it receives the request and the user, and in addition the body, decoded into the request type. So it takes from the request what the body does not hold, such as a value of the path, a header, or the context. For example, for the `BorrowBook` that checks the revision of the caller (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)), with the ID of the book in the path:
 
 ```go
 type borrowBookRequest struct {
-  BookID          string `json:"bookId"`
   BorrowedUntil   string `json:"borrowedUntil"`
   ExpectedEventID string `json:"expectedEventId"`
 }
 
-func (r borrowBookRequest) ToCommand(user User) (BorrowBook, error) {
-  if err := bookSubject.Check(r.BookID); err != nil {
+func toBorrowBook(r *http.Request, request borrowBookRequest, user User) (BorrowBook, error) {
+  bookID := r.PathValue("id")
+  if err := bookSubject.Check(bookID); err != nil {
     return BorrowBook{}, err
   }
-  if _, err := time.Parse(time.DateOnly, r.BorrowedUntil); err != nil {
+  if _, err := time.Parse(time.DateOnly, request.BorrowedUntil); err != nil {
     return BorrowBook{}, errors.New("borrowedUntil must be a date")
   }
 
   return BorrowBook{
-    BookID:          r.BookID,
+    BookID:          bookID,
     ReaderID:        user.ID,
-    BorrowedUntil:   r.BorrowedUntil,
-    ExpectedEventID: r.ExpectedEventID,
+    BorrowedUntil:   request.BorrowedUntil,
+    ExpectedEventID: request.ExpectedEventID,
   }, nil
 }
 ```
 
-`ToCommand` is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
+The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake.
 
-Then call the `Route` function with the request type, the API, the mux, a pattern, and the decider:
+Then call the `Route` function with the API, the mux, a pattern, the function that returns the command, and the decider:
 
 ```go
-httpapi.Route[borrowBookRequest](api, mux, "POST /api/borrow-book", borrowBook)
+httpapi.Route(api, mux, "POST /api/books/{id}/borrow", toBorrowBook, borrowBook)
 ```
 
 The route decodes the request body, builds the command, and executes it:
 
 ```shell
-curl -X POST http://localhost:8080/api/borrow-book \
+curl -X POST http://localhost:8080/api/books/42/borrow \
   -H "Content-Type: application/json" \
-  -d '{"bookId":"42","borrowedUntil":"2026-10-24","expectedEventId":"0"}'
+  -d '{"borrowedUntil":"2026-10-24","expectedEventId":"0"}'
 ```
 
 If this succeeds, it answers with `200 OK` and the revision it has written, which is the ID of the last written event:
@@ -1945,15 +1945,17 @@ The message is the error message if the error is written for the caller, such as
 
 The actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)): at level `Info` for `401` and `409`, since the server did not fail, and at level `Error` for `500` and above.
 
-If handling a request panics, for example because `Build` received an ID that `ToCommand` did not check, the route answers with `500 Internal Server Error` and the message `internal server error`, like any other internal failure, and logs the panic at level `Error`, with its value and its stack. Otherwise, `net/http` would close the connection, and the caller would get no answer at all.
+If handling a request panics, for example because `Build` received an ID that was not checked, the route answers with `500 Internal Server Error` and the message `internal server error`, like any other internal failure, and logs the panic at level `Error`, with its value and its stack. Otherwise, `net/http` would close the connection, and the caller would get no answer at all.
 
 *Note that a panic with `http.ErrAbortHandler` is passed on, since `net/http` expects it to abort the response.*
 
 To answer this way in a handler of your own, call the `Respond` function with the response writer, the request, the API, the written events, and the error. Like the route, it logs through the logger of the API, with the route of the request.
 
+*Note that the function has the type `httpapi.ToCommand`. The request type only describes the body, so it may come from another package, for example one that the application shares with its clients.*
+
 #### Adding to the Answer
 
-To answer with more than the revision, for example with the ID of a new book that `ToCommand` has generated, hand over the `Adding` option. It takes a function that receives a `Handled` value with the command and the written events, and returns the fields to add, usually as a struct with JSON annotations, and an error:
+To answer with more than the revision, for example with the ID that `toAcquireBook` below makes up for a new book, hand over the `Adding` option. It takes a function that receives a `Handled` value with the command and the written events, and returns the fields to add, usually as a struct with JSON annotations, and an error:
 
 ```go
 type acquireBookRequest struct {
@@ -1962,16 +1964,16 @@ type acquireBookRequest struct {
   ISBN   string `json:"isbn"`
 }
 
-func (r acquireBookRequest) ToCommand(user User) (AcquireBook, error) {
+func toAcquireBook(r *http.Request, request acquireBookRequest, user User) (AcquireBook, error) {
   return AcquireBook{
     BookID: rand.Text(),
-    Title:  r.Title,
-    Author: r.Author,
-    ISBN:   r.ISBN,
+    Title:  request.Title,
+    Author: request.Author,
+    ISBN:   request.ISBN,
   }, nil
 }
 
-httpapi.Route[acquireBookRequest](api, mux, "POST /api/acquire-book", acquireBook,
+httpapi.Route(api, mux, "POST /api/acquire-book", toAcquireBook, acquireBook,
   httpapi.Adding(func(handled httpapi.Handled[AcquireBook]) (any, error) {
     return struct {
       ID string `json:"id"`
@@ -1997,7 +1999,7 @@ To answer in a format of your own, for example with another status code, call th
 
 ```go
 mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Request) {
-  handled, err := httpapi.Handle[acquireBookRequest](r, api, acquireBook)
+  handled, err := httpapi.Handle(r, api, toAcquireBook, acquireBook)
   if err != nil {
     httpapi.Respond(w, r, api, nil, err)
     return
@@ -2017,30 +2019,30 @@ mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Req
 
 #### Authorizing Commands
 
-To refuse a command, return `httpapi.ErrForbidden` from `ToCommand`. The request is then answered with `403 Forbidden`, and the command is not executed:
+To refuse a command, return `httpapi.ErrForbidden` from the function that returns it. The request is then answered with `403 Forbidden`, and the command is not executed:
 
 ```go
-func (r acquireBookRequest) ToCommand(user User) (AcquireBook, error) {
+func toAcquireBook(r *http.Request, request acquireBookRequest, user User) (AcquireBook, error) {
   if !user.IsLibrarian {
     return AcquireBook{}, httpapi.ErrForbidden
   }
 
   return AcquireBook{
     BookID: rand.Text(),
-    Title:  r.Title,
-    Author: r.Author,
-    ISBN:   r.ISBN,
+    Title:  request.Title,
+    Author: request.Author,
+    ISBN:   request.ISBN,
   }, nil
 }
 ```
 
-The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if `ToCommand` looks something up in another service, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
+The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if the function looks something up in another service, with the context of the request, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
 
-Any other error returned from `ToCommand` is answered with `400 Bad Request`, with the error as the message. In `Handle`, it wraps `httpapi.ErrMalformed` as well as the original error, so that `errors.Is` and `errors.As` find either.
+Any other error returned from the function is answered with `400 Bad Request`, with the error as the message. In `Handle`, it wraps `httpapi.ErrMalformed` as well as the original error, so that `errors.Is` and `errors.As` find either.
 
 #### Validating Requests
 
-Before a request reaches `ToCommand`, it is validated:
+Before the function that returns the command receives the body, the request is validated:
 
 - The `Content-Type` header must be `application/json`, otherwise the request is answered with `415 Unsupported Media Type`, and the error is `httpapi.ErrUnsupportedMediaType`.
 - The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`.
@@ -2112,7 +2114,7 @@ Then call the `Query` function with the API, the mux, a pattern, the function th
 httpapi.Query(api, mux, "GET /api/books", toListBooks, answerBooks(listBooks(catalog)))
 ```
 
-The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from `ToCommand` (see [Authorizing Commands](#authorizing-commands)).
+The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
 
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error.
 
@@ -2210,7 +2212,7 @@ It checks the categories in this order:
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged.*
 
-*Note that an error of `ToCommand`, of the function that returns a query, or of the function that determines the user keeps its status code only if it has one of its own, or belongs to the category `ErrPermanent`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
+*Note that an error of the function that returns a command, of the one that returns a query, or of the one that determines the user keeps its status code only if it has one of its own, or belongs to the category `ErrPermanent`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
 
 *Note that a panic while a route handles a request is answered with `500 Internal Server Error` as well (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
