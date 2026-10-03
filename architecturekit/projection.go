@@ -42,7 +42,8 @@ type Transactional interface {
 // Tx is one unit of work of a transactional projection. Commit has to make the
 // applied events and the last event ID durable together, or neither. Rollback
 // is not called after Commit fails, so Commit has to roll back itself if it can
-// not finish.
+// not finish. That holds for a panic in Commit as well, while a panic in Apply
+// is rolled back like an error.
 type Tx interface {
 	Apply(ctx context.Context, event eventsourcingdb.Event) error
 	Commit(ctx context.Context, lastEventID string) error
@@ -100,6 +101,14 @@ func refuseTransactional(projection Projection) {
 	}
 }
 
+// requireProjection panics for a nil projection, which would otherwise only
+// fail once it is called, for a run in the background.
+func requireProjection(function string, projection any) {
+	if projection == nil {
+		panic(fmt.Sprintf("architecturekit: %s needs a projection, not nil", function))
+	}
+}
+
 // batchSizeOf takes any projection, because resumable and transactional ones
 // can both be batched, and they share no interface.
 func batchSizeOf(projection any) int {
@@ -118,8 +127,12 @@ func batchSizeOf(projection any) int {
 // If the context ends first, it returns the context's error, so that a read
 // model that is only partly built does not look complete.
 //
-// A projection that is transactional as well is a programming error and
-// panics; use CatchUpTransactionalProjection for it.
+// If the projection panics, it returns an error of the category ErrPermanent
+// that holds the value and the stack of the panic, as a run ends with (see
+// StartProjection).
+//
+// A nil projection, or one that is transactional as well, is a programming
+// error and panics; use CatchUpTransactionalProjection for the latter.
 func CatchUpProjection(
 	ctx context.Context,
 	store *Store,
@@ -128,19 +141,18 @@ func CatchUpProjection(
 	options ...ProjectionOption,
 ) error {
 	requireSubjects(subjects)
+	requireProjection("CatchUpProjection", projection)
 	refuseTransactional(projection)
 
 	// Catching up has no use for a name, but checks the options all the same,
 	// so that a mistake in them shows here as well.
 	_ = projectionSettingsOf(options)
 
-	_, err := catchUp(ctx, store, subjects, writerFor(projection), batchSizeOf(projection), nil)
-
-	return err
+	return catchUpOnce(ctx, store, subjects, writerFor(projection), projection)
 }
 
 // CatchUpTransactionalProjection is CatchUpProjection for a transactional
-// projection.
+// projection. A nil projection is a programming error and panics.
 func CatchUpTransactionalProjection(
 	ctx context.Context,
 	store *Store,
@@ -149,13 +161,28 @@ func CatchUpTransactionalProjection(
 	options ...ProjectionOption,
 ) error {
 	requireSubjects(subjects)
+	requireProjection("CatchUpTransactionalProjection", projection)
 
 	// Catching up has no use for a name, but checks the options all the same,
 	// so that a mistake in them shows here as well.
 	_ = projectionSettingsOf(options)
 
-	_, err := catchUp(ctx, store, subjects,
-		&transactionalWriter{projection: projection}, batchSizeOf(projection), nil)
+	return catchUpOnce(ctx, store, subjects, &transactionalWriter{projection: projection}, projection)
+}
+
+// catchUpOnce is what the catch-up functions share. A panic on the way, such
+// as one in the projection, comes back as the error a run ends with (see run),
+// rather than as a panic that the caller does not expect.
+func catchUpOnce(
+	ctx context.Context,
+	store *Store,
+	subjects Subjects,
+	writer projectionWriter,
+	projection any,
+) (err error) {
+	defer recoverInto(&err)
+
+	_, err = catchUp(ctx, store, subjects, writer, batchSizeOf(projection), nil)
 
 	return err
 }
@@ -164,6 +191,10 @@ func CatchUpTransactionalProjection(
 // failure that trying again will not fix. The batch size is read from the
 // projection behind the writer, which is the one that knows its target.
 // Progress is reported to the given run.
+//
+// A run has a goroutine of its own, where a panic on the way, such as one in
+// the projection, would end the whole process. So it ends the run instead,
+// with an error of the category ErrPermanent (see panicError).
 func run(
 	ctx context.Context,
 	store *Store,
@@ -171,7 +202,9 @@ func run(
 	writer projectionWriter,
 	projection any,
 	progress *ProjectionRun,
-) error {
+) (failure error) {
+	defer recoverInto(&failure)
+
 	catchUpSize := batchSizeOf(projection)
 	delay := store.reconnectInitialDelay
 	attempt := 0
@@ -183,7 +216,12 @@ func run(
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err != nil && !errors.Is(err, ErrTransient) {
+
+		// A panic ends the run even together with a failure that may pass, as
+		// when a transaction panics and then fails to roll back because the
+		// connection is lost, since trying again would only panic again.
+		_, hasPanicked := errors.AsType[*panicError](err)
+		if err != nil && (hasPanicked || !errors.Is(err, ErrTransient)) {
 			return err
 		}
 
@@ -484,7 +522,11 @@ func (w *transactionalWriter) begin(ctx context.Context) error {
 	return nil
 }
 
-func (w *transactionalWriter) apply(ctx context.Context, event eventsourcingdb.Event) error {
+// apply turns a panic into an error right where it happens, so that drive
+// rolls the transaction back, as for an error, instead of leaving it open.
+func (w *transactionalWriter) apply(ctx context.Context, event eventsourcingdb.Event) (err error) {
+	defer recoverInto(&err)
+
 	return w.tx.Apply(ctx, event)
 }
 
@@ -494,12 +536,16 @@ func (w *transactionalWriter) commit(ctx context.Context, lastEventID string) er
 	return err
 }
 
-func (w *transactionalWriter) rollback(ctx context.Context) error {
+// rollback turns a panic into an error as well, so that drive reports it
+// alongside the failure that made it roll back, never instead of it.
+func (w *transactionalWriter) rollback(ctx context.Context) (err error) {
 	if w.tx == nil {
 		return nil
 	}
 
-	err := w.tx.Rollback(ctx)
+	defer recoverInto(&err)
+
+	err = w.tx.Rollback(ctx)
 	w.tx = nil
 
 	return err
