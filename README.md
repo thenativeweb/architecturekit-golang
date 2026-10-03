@@ -1099,7 +1099,7 @@ If an upcaster splits a stored event into several events, they all carry the ID 
 To add an item, call the `Insert` function with a context, the ID of the event, and the item:
 
 ```go
-err := catalog.Insert(ctx, event.ID, BookItem{
+outcome, err := catalog.Insert(ctx, event.ID, BookItem{
   ID:     "42",
   Title:  "2001 – A Space Odyssey",
   Author: "Arthur C. Clarke",
@@ -1109,14 +1109,18 @@ if err != nil {
 }
 ```
 
+`Insert` returns an `Outcome`, which tells what it did: `architecturekit.Added` if it added the item, and `architecturekit.AlreadyApplied` if an item with the same key has seen the event, or a newer one, so the event was skipped. The latter is not an error, since it happens when events are applied a second time. So a projection that does more than store the item, for example one that also counts the books, does so only for `architecturekit.Added` (see [Changing and Removing Items](#changing-and-removing-items)).
+
 If the key of the item is already taken, and the event is newer than the item with that key, `Insert` fails with an error of the category `ErrPermanent`, since two items with the same key point to a mistake in the events or in the key. To add an item or change the existing one, call the `Upsert` function instead, with the key and a function that changes the item. It starts from the existing item, or from an empty one if there is none, so it has to set the fields that make up the key:
 
 ```go
-err := catalog.Upsert(ctx, "42", event.ID, func(item *BookItem) {
+outcome, err := catalog.Upsert(ctx, "42", event.ID, func(item *BookItem) {
   item.ID = "42"
   item.IsBorrowed = true
 })
 ```
+
+`Upsert` returns an `Outcome` as well: `architecturekit.Added` if it added the item, `architecturekit.Applied` if it changed the existing one, and `architecturekit.AlreadyApplied` if the existing item has seen the event, or a newer one, so the event was skipped.
 
 *Note that an item whose key, after the change, differs from the given one fails with an error of the category `ErrPermanent`, which also catches a function that forgets to set the key.*
 
@@ -1148,7 +1152,7 @@ for item := range items {
 
 #### Changing and Removing Items
 
-To change the item with a given key, call the `Update` function with a function that changes it. To remove it, call the `Delete` function. Both return an `Outcome`, which tells what they did:
+To change the item with a given key, call the `Update` function with a function that changes it. To remove it, call the `Delete` function. Like `Insert` and `Upsert`, both return an `Outcome`, which tells what they did:
 
 ```go
 updated, err := catalog.Update(ctx, "42", event.ID, func(item *BookItem) {
@@ -1160,11 +1164,12 @@ deleted, err := catalog.Delete(ctx, "42", event.ID)
 
 | Outcome | Meaning |
 |---|---|
-| `architecturekit.Applied` | The item was changed or removed. |
-| `architecturekit.Missing` | There is no item with the key. |
+| `architecturekit.Added` | A new item was added. Only `Insert` and `Upsert` report it. |
+| `architecturekit.Applied` | An existing item was changed or removed. |
+| `architecturekit.Missing` | There is no item with the key. Only `Update` and `Delete` report it. |
 | `architecturekit.AlreadyApplied` | The item has seen the event, or a newer one, so nothing was changed. |
 
-Neither of the latter is an error, since both happen when events are applied a second time, as a later event may have removed the item already. If an event about an item that does not exist means that the view and the database disagree, say so in the projection:
+Neither `Missing` nor `AlreadyApplied` is an error, since both happen when events are applied a second time, as a later event may have removed the item already. If an event about an item that does not exist means that the view and the database disagree, say so in the projection:
 
 ```go
 outcome, err := catalog.Update(ctx, bookID, event.ID, func(item *BookItem) {
@@ -1289,11 +1294,12 @@ A projection turns events into a view. Call the `NewProjection` function, and ca
 func newCatalogProjection(catalog *architecturekit.InMemoryView[string, BookItem]) *architecturekit.TypedProjection {
   return architecturekit.NewProjection().
     On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
-      return catalog.Insert(ctx, event.ID, BookItem{
+      _, err := catalog.Insert(ctx, event.ID, BookItem{
         ID:     bookIDOf(event.Subject),
         Title:  event.Data.Title,
         Author: event.Data.Author,
       })
+      return err
     }).
     On(func(ctx context.Context, event architecturekit.Envelope[BookBorrowed]) error {
       _, err := catalog.Update(ctx, bookIDOf(event.Subject), event.ID, func(item *BookItem) {
