@@ -64,12 +64,23 @@ type RevisionSink interface {
 // the projection has to write it itself. That is why a transactional
 // projection cannot be tracked: it has no Apply to wrap, and a projection that
 // is transactional as well is a programming error and panics. So does calling
-// Tracking without any view.
+// Tracking without any view, or with a nil projection or a nil view, which
+// would otherwise only fail once the first event reaches the projection.
 func Tracking(projection Projection, sinks ...RevisionSink) Projection {
+	if projection == nil {
+		panic("architecturekit: Tracking needs a projection, not nil")
+	}
+
 	refuseTransactional(projection)
 
 	if len(sinks) == 0 {
 		panic("architecturekit: Tracking needs at least one view to record the events in")
+	}
+
+	for i, sink := range sinks {
+		if sink == nil {
+			panic(fmt.Sprintf("architecturekit: Tracking needs views to record the events in, but view %d is nil", i))
+		}
 	}
 
 	tracked := &trackedProjection{sinks: sinks, projection: projection}

@@ -365,19 +365,52 @@ func TestPanicsInHandleAndAsk(t *testing.T) {
 	})
 }
 
-// A nil function given to Handle or Ask is a mistake in the code, as it is for
-// Route and Query. Handle and Ask are called on every request, so they report
-// it there, before they determine the caller, and name it, rather than fail
-// with a nil pointer.
+// A nil API or function given to Handle or Ask, or a decider without its state
+// or without its function that decides, is a mistake in the code, as it is
+// for Route and Query. Handle and Ask are called on every request, so they
+// report it there, before they determine the caller, and name it, rather than
+// fail with a nil pointer.
 
-func TestNilFunctionsInHandleAndAsk(t *testing.T) {
-	const handleWithoutCommand = "architecturekit/httpapi: Handle needs a function that turns the request into a command, not nil"
+func TestMissingPartsInHandleAndAsk(t *testing.T) {
+	const (
+		handleWithoutAPI     = "architecturekit/httpapi: Handle needs the API, not nil"
+		handleWithoutCommand = "architecturekit/httpapi: Handle needs a function that turns the request into a command, not nil"
+		askWithoutAPI        = "architecturekit/httpapi: Ask needs the API, not nil"
+	)
 
 	var (
+		noAPI       *httpapi.API[user]
 		toNoCommand httpapi.ToCommand[user, noteRequest, note]
 		toNoQuery   httpapi.ToQuery[user, listNotes]
 		noAnswer    httpapi.Answer[listNotes, []noteResponse]
 	)
+
+	withoutState := noteDecider()
+	withoutState.State = nil
+
+	withoutDecide := noteDecider()
+	withoutDecide.Decide = nil
+
+	// handleWithout lists the ways to give Handle, along with an API, a nil
+	// function or a decider without one of its parts, with the message it
+	// fails with.
+	handleWithout := map[string]struct {
+		toCommand httpapi.ToCommand[user, noteRequest, note]
+		decider   architecturekit.Decider[note, notes]
+		message   string
+	}{
+		"a function that turns the request into a command": {
+			toNoCommand, noteDecider(), handleWithoutCommand,
+		},
+		"a state in the decider": {
+			toNote, withoutState,
+			"architecturekit/httpapi: Handle needs a decider with a state, not one whose State is nil",
+		},
+		"a function in the decider that decides": {
+			toNote, withoutDecide,
+			"architecturekit/httpapi: Handle needs a decider with a function that decides, not one whose Decide is nil",
+		},
+	}
 
 	// askWithout lists the ways to give Ask a nil function, with the message
 	// it fails with.
@@ -396,34 +429,69 @@ func TestNilFunctionsInHandleAndAsk(t *testing.T) {
 		},
 	}
 
+	// postingNote returns a request that posts a note, from the given caller.
+	postingNote := func(id string) *http.Request {
+		request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"id":"1","text":"hello"}`))
+		request.Header.Set("X-User", id)
+		request.Header.Set("Content-Type", "application/json")
+
+		return request
+	}
+
+	// askingForNotes returns a request that asks for the notes, from the given
+	// caller.
+	askingForNotes := func(id string) *http.Request {
+		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request.Header.Set("X-User", id)
+
+		return request
+	}
+
 	for caller, id := range map[string]string{"a known caller": "golo", "an unknown caller": ""} {
-		t.Run("Handle without a function returns an internal failure that names the mistake, for "+caller, func(t *testing.T) {
-			api := httpapi.NewAPI(deadStore(t), userFrom)
-
-			request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"id":"1","text":"hello"}`))
-			request.Header.Set("X-User", id)
-			request.Header.Set("Content-Type", "application/json")
-
+		t.Run("Handle without an API returns an internal failure that names the mistake, for "+caller, func(t *testing.T) {
 			var err error
 			require.NotPanics(t, func() {
-				_, err = httpapi.Handle(request, api, toNoCommand, noteDecider())
+				_, err = httpapi.Handle(postingNote(id), noAPI, toNote, noteDecider())
 			})
 
 			require.Error(t, err)
 			assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(err))
-			assert.ErrorContains(t, err, handleWithoutCommand)
+			assert.ErrorContains(t, err, handleWithoutAPI)
+		})
+
+		for without, test := range handleWithout {
+			t.Run("Handle without "+without+" returns an internal failure that names the mistake, for "+caller, func(t *testing.T) {
+				api := httpapi.NewAPI(deadStore(t), userFrom)
+
+				var err error
+				require.NotPanics(t, func() {
+					_, err = httpapi.Handle(postingNote(id), api, test.toCommand, test.decider)
+				})
+
+				require.Error(t, err)
+				assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(err))
+				assert.ErrorContains(t, err, test.message)
+			})
+		}
+
+		t.Run("Ask without an API returns an internal failure that names the mistake, for "+caller, func(t *testing.T) {
+			var err error
+			require.NotPanics(t, func() {
+				_, err = httpapi.Ask(askingForNotes(id), noAPI, toListNotes, answerListNotes)
+			})
+
+			require.Error(t, err)
+			assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(err))
+			assert.ErrorContains(t, err, askWithoutAPI)
 		})
 
 		for without, test := range askWithout {
 			t.Run("Ask without "+without+" returns an internal failure that names the mistake, for "+caller, func(t *testing.T) {
 				api := httpapi.NewAPI(deadStore(t), userFrom)
 
-				request := httptest.NewRequest(http.MethodGet, "/notes", nil)
-				request.Header.Set("X-User", id)
-
 				var err error
 				require.NotPanics(t, func() {
-					_, err = httpapi.Ask(request, api, test.toQuery, test.answer)
+					_, err = httpapi.Ask(askingForNotes(id), api, test.toQuery, test.answer)
 				})
 
 				require.Error(t, err)
@@ -433,24 +501,22 @@ func TestNilFunctionsInHandleAndAsk(t *testing.T) {
 		}
 	}
 
-	t.Run("Respond answers Handle without a function with 500, and logs the mistake", func(t *testing.T) {
-		var logs bytes.Buffer
-		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
-		mux := http.NewServeMux()
-		mux.HandleFunc("POST /note", func(w http.ResponseWriter, r *http.Request) {
-			_, err := httpapi.Handle(r, api, toNoCommand, noteDecider())
-			httpapi.Respond(w, r, api, nil, err)
+	for without, test := range handleWithout {
+		t.Run("Respond answers Handle without "+without+" with 500, and logs the mistake", func(t *testing.T) {
+			var logs bytes.Buffer
+			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /note", func(w http.ResponseWriter, r *http.Request) {
+				_, err := httpapi.Handle(r, api, test.toCommand, test.decider)
+				httpapi.Respond(w, r, api, nil, err)
+			})
+
+			response := serve(t, mux, postingNote("golo"))
+
+			assertPanicAnswered(t, response, logs.String(), "POST", "POST /note", test.message, "architecturekit/httpapi.Handle[")
+			assert.NotContains(t, logs.String(), "nil pointer dereference")
 		})
-
-		request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"id":"1","text":"hello"}`))
-		request.Header.Set("X-User", "golo")
-		request.Header.Set("Content-Type", "application/json")
-
-		response := serve(t, mux, request)
-
-		assertPanicAnswered(t, response, logs.String(), "POST", "POST /note", handleWithoutCommand, "architecturekit/httpapi.Handle[")
-		assert.NotContains(t, logs.String(), "nil pointer dereference")
-	})
+	}
 
 	for without, test := range askWithout {
 		t.Run("RespondResult answers Ask without "+without+" with 500, and logs the mistake", func(t *testing.T) {

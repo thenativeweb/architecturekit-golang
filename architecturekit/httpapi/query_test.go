@@ -161,6 +161,7 @@ func TestQuery(t *testing.T) {
 	})
 
 	var (
+		noAPI     *httpapi.API[user]
 		toNothing httpapi.ToQuery[user, listNotes]
 		noAnswer  httpapi.Answer[listNotes, []noteResponse]
 	)
@@ -169,6 +170,14 @@ func TestQuery(t *testing.T) {
 		"query":            nil,
 		"revisioned query": {httpapi.Revisioned(noteView(), time.Second)},
 	} {
+		t.Run("a "+kind+" panics for a nil API", func(t *testing.T) {
+			// Without the panic, every request panics again while the panic is
+			// answered, and net/http closes the connection without an answer.
+			assert.PanicsWithValue(t, "architecturekit/httpapi: Query needs the API, not nil", func() {
+				httpapi.Query(noAPI, http.NewServeMux(), "GET /notes", toListNotes, answerListNotes, options...)
+			})
+		})
+
 		t.Run("a "+kind+" panics for a nil function that turns the request into a query", func(t *testing.T) {
 			assert.PanicsWithValue(t, "architecturekit/httpapi: Query needs a function that turns the request into a query, not nil", func() {
 				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "GET /notes", toNothing, answerListNotes, options...)
