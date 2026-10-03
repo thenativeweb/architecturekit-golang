@@ -2090,7 +2090,9 @@ curl -X POST http://localhost:8080/api/books/42/return
 
 A body of `{}` is accepted as well, whatever the `Content-Type` header says, so that a caller that sends one out of habit keeps working. Any other body is answered with `400 Bad Request`, and the message says that the route takes no body.
 
-*Note that requiring `application/json` also keeps a browser from sending a command from another site without asking the server first, since a form can not send JSON. A route that takes no body does not require it, so if the application authenticates with cookies, protect such a route in another way, for example with cookies that are `SameSite`.*
+Requiring `application/json` is what keeps a browser from sending a command from another site without asking the server first, since a form can not send JSON. A route without a body can not rely on that, so before it looks at the body, it checks where the request comes from, with the `CrossOriginProtection` of `net/http`. A request that a browser sends from another origin, which the `Sec-Fetch-Site` header says, or, without it, an `Origin` header whose host differs from the `Host` header, is answered with `403 Forbidden`, and the error is `httpapi.ErrForbidden`. A request from the same origin passes, and so does one without these headers, such as one of `curl` or of another server, and one with `GET`, `HEAD`, or `OPTIONS`, which must not change anything.
+
+*Note that this also refuses a browser frontend that runs on another origin than the API, even on another subdomain, so such a frontend can not call a route without a body for now.*
 
 #### Adding to the Answer
 
@@ -2193,7 +2195,7 @@ Before the function that returns the command receives the body, the request is v
 
 *Note that parsers disagree on what a name that occurs twice means, and on data after the value: one takes the first value, another the last, and one stops after the value, while another reads on. A filter or a proxy in front of the application might then check another value than the one the application uses, which is why both are refused.*
 
-If the request type is `httpapi.NoBody`, the request is validated differently (see [Handling Commands Without a Body](#handling-commands-without-a-body)): the `Content-Type` header is not required, and the body must be empty or `{}`, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. A body larger than `httpapi.MaxRequestBody` is still answered with `413 Request Entity Too Large`.
+If the request type is `httpapi.NoBody`, the request is validated differently (see [Handling Commands Without a Body](#handling-commands-without-a-body)): a request that a browser sends from another origin is answered with `403 Forbidden` first, and the error is `httpapi.ErrForbidden`. The `Content-Type` header is not required, and the body must be empty or `{}`, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. A body larger than `httpapi.MaxRequestBody` is still answered with `413 Request Entity Too Large`.
 
 To read a body by the same rules elsewhere, call the `BodyOf` function (see [Reading Queries from the Body](#reading-queries-from-the-body)). With `httpapi.NoBody`, it checks that a request has no body, as the route does.
 

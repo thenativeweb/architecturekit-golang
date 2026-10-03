@@ -248,11 +248,16 @@ type NoUser struct{}
 // body is ErrMalformed (see BodyOf). Unlike http.NoBody, which is an empty
 // body to send, it is a type to hand to Route, Handle, and BodyOf.
 //
-// Requiring JSON keeps a browser from sending a command from another site
-// without asking the server first, since a form can not send JSON. A route
-// that takes no body does not require it, so if the application authenticates
-// with cookies, it has to protect such a route in another way, for example
-// with cookies that are SameSite.
+// Requiring JSON is what keeps a browser from sending a command from another
+// site without asking the server first, since a form can not send JSON. A
+// route that takes no body can not rely on that, so it checks first where the
+// request comes from, with http.CrossOriginProtection. A request that a
+// browser sends from another origin, which Sec-Fetch-Site says, or without
+// it, an Origin whose host differs from Host, is ErrForbidden. A request from
+// the same origin passes, and so does one without these headers, such as one
+// of curl or of another server, and one with GET, HEAD, or OPTIONS, which
+// must not change anything. So a browser frontend on another origin than the
+// API can not call such a route for now.
 type NoBody struct{}
 
 // NewPublicAPI creates an API for an application without authentication.
@@ -390,7 +395,8 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 //
 // A command that takes no body, such as one that needs nothing but a value of
 // the path, has the request type NoBody. Its route then requires neither a
-// Content-Type nor a body (see BodyOf).
+// Content-Type nor a body, but refuses a request that a browser sends from
+// another origin (see NoBody).
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack. Left to
@@ -669,12 +675,13 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // case, as with encoding/json, so two names that match the same field count
 // as the same name, even if they differ in case.
 //
-// If TBody is NoBody, the request is read without a body instead. The
-// Content-Type does not matter then, since there is no body for it to
-// describe, and the body has to be empty, or {}, the object without fields,
-// whatever the Content-Type says. Any other body is ErrMalformed, which says
-// that the route takes no body, and one of more than MaxRequestBody bytes is
-// still ErrTooLarge.
+// If TBody is NoBody, the request is read without a body instead. A request
+// that a browser sends from another origin is ErrForbidden then, before the
+// body is looked at (see NoBody). The Content-Type does not matter, since
+// there is no body for it to describe, and the body has to be empty, or {},
+// the object without fields, whatever the Content-Type says. Any other body
+// is ErrMalformed, which says that the route takes no body, and one of more
+// than MaxRequestBody bytes is still ErrTooLarge.
 func BodyOf[TBody any](r *http.Request) (TBody, error) {
 	var value TBody
 
@@ -765,9 +772,18 @@ func requireJSON(r *http.Request) error {
 	return nil
 }
 
-// requireNoBody reads the body of a request that takes none, and accepts it
-// only if it is empty, or {}.
+// crossOrigin tells a request that a browser sends from another origin (see
+// NoBody). It has no trusted origins.
+var crossOrigin = http.NewCrossOriginProtection()
+
+// requireNoBody refuses a request that a browser sends from another origin,
+// before it looks at the body. Then it reads the body, and accepts it only if
+// it is empty, or {}.
 func requireNoBody(r *http.Request) error {
+	if crossOrigin.Check(r) != nil {
+		return fmt.Errorf("%w: a command without a body is not accepted from another origin", ErrForbidden)
+	}
+
 	// A request that a server receives always has a body, which is empty if
 	// the caller sent none, but one that is made with http.NewRequest without
 	// a body, as in a test of a handler, has nil instead.

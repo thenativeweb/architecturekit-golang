@@ -252,3 +252,130 @@ func TestNoBody(t *testing.T) {
 		}
 	})
 }
+
+// fromOrigin sets the headers by which a browser tells where a request comes
+// from, leaving out a header whose value is empty. The request goes to the
+// host example.com, as httptest.NewRequest makes it.
+func fromOrigin(request *http.Request, secFetchSite, origin string) *http.Request {
+	if secFetchSite != "" {
+		request.Header.Set("Sec-Fetch-Site", secFetchSite)
+	}
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
+
+	return request
+}
+
+// crossOrigins are requests that a browser sends from another origin.
+var crossOrigins = []struct {
+	label, secFetchSite, origin string
+}{
+	{label: "another site", secFetchSite: "cross-site", origin: "https://elsewhere.example"},
+	{label: "another subdomain of the same site", secFetchSite: "same-site", origin: "https://admin.example.com"},
+	{label: "an old browser on another host", secFetchSite: "", origin: "https://elsewhere.example"},
+}
+
+// sameOrigins are requests from the same origin, or not from a browser.
+var sameOrigins = []struct {
+	label, secFetchSite, origin string
+}{
+	{label: "the same origin", secFetchSite: "same-origin", origin: "http://example.com"},
+	{label: "an address the user typed in", secFetchSite: "none", origin: ""},
+	{label: "no such headers, as from curl", secFetchSite: "", origin: ""},
+	{label: "an old browser on the same host", secFetchSite: "", origin: "http://example.com"},
+}
+
+const fromAnotherOrigin = "httpapi: forbidden: a command without a body is not accepted from another origin"
+
+func TestNoBodyFromAnotherOrigin(t *testing.T) {
+	for _, test := range crossOrigins {
+		t.Run("a route refuses "+test.label, func(t *testing.T) {
+			mux := routedShowing(t, "POST /notes/{id}/close", toClosedNote)
+
+			response := serve(t, mux, fromOrigin(closing("", http.NoBody), test.secFetchSite, test.origin))
+
+			assert.Equal(t, http.StatusForbidden, response.Code)
+			assert.JSONEq(t, `{"message": "`+fromAnotherOrigin+`"}`, response.Body.String())
+		})
+
+		t.Run("BodyOf refuses "+test.label, func(t *testing.T) {
+			_, err := httpapi.BodyOf[httpapi.NoBody](fromOrigin(bodyRequest("", http.NoBody), test.secFetchSite, test.origin))
+
+			require.ErrorIs(t, err, httpapi.ErrForbidden)
+			assert.EqualError(t, err, fromAnotherOrigin)
+		})
+	}
+
+	for _, test := range sameOrigins {
+		t.Run("a route accepts "+test.label, func(t *testing.T) {
+			mux := routedShowing(t, "POST /notes/{id}/close", toClosedNote)
+
+			response := serve(t, mux, fromOrigin(closing("", http.NoBody), test.secFetchSite, test.origin))
+
+			assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			assert.JSONEq(t, `{"revision": "0", "id": "42", "text": "closed"}`, response.Body.String())
+		})
+
+		t.Run("BodyOf accepts "+test.label, func(t *testing.T) {
+			_, err := httpapi.BodyOf[httpapi.NoBody](fromOrigin(bodyRequest("", http.NoBody), test.secFetchSite, test.origin))
+
+			assert.NoError(t, err)
+		})
+	}
+
+	t.Run("a route refuses another origin before it looks at the body", func(t *testing.T) {
+		mux := routedShowing(t, "POST /notes/{id}/close", toClosedNote)
+
+		response := serve(t, mux, fromOrigin(closing("application/json", strings.NewReader(`{"text":"hello"}`)), "cross-site", ""))
+
+		assert.Equal(t, http.StatusForbidden, response.Code, "a body from another origin has to be refused for its origin, not for the body")
+		assert.JSONEq(t, `{"message": "`+fromAnotherOrigin+`"}`, response.Body.String())
+	})
+
+	t.Run("BodyOf refuses another origin before it reads the body", func(t *testing.T) {
+		for label, body := range map[string]io.Reader{
+			"a body":           strings.NewReader(`{"text":"hello"}`),
+			"a body too large": strings.NewReader(strings.Repeat(" ", httpapi.MaxRequestBody+1)),
+			"a broken body":    failingReader{},
+		} {
+			t.Run(label, func(t *testing.T) {
+				_, err := httpapi.BodyOf[httpapi.NoBody](fromOrigin(bodyRequest("", body), "cross-site", ""))
+
+				assert.EqualError(t, err, fromAnotherOrigin)
+			})
+		}
+	})
+
+	t.Run("BodyOf lets GET, HEAD, and OPTIONS pass, which must not change anything", func(t *testing.T) {
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions} {
+			t.Run(method, func(t *testing.T) {
+				request := fromOrigin(httptest.NewRequest(method, "/notes/42", nil), "cross-site", "")
+
+				_, err := httpapi.BodyOf[httpapi.NoBody](request)
+
+				assert.NoError(t, err)
+			})
+		}
+	})
+
+	t.Run("a route with a body accepts another origin, since it requires JSON", func(t *testing.T) {
+		mux := routedShowing(t, "POST /notes/{id}/text", func(r *http.Request, request textRequest, _ user) (note, error) {
+			return note{ID: r.PathValue("id"), Text: request.Text}, nil
+		})
+
+		response := serve(t, mux, fromOrigin(postingTo("/notes/42/text", `{"text":"hello"}`), "cross-site", ""))
+
+		assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		assert.JSONEq(t, `{"revision": "0", "id": "42", "text": "hello"}`, response.Body.String())
+	})
+
+	t.Run("BodyOf with a body accepts another origin", func(t *testing.T) {
+		request := fromOrigin(bodyRequest("application/json", strings.NewReader(`{"text":"hello"}`)), "cross-site", "")
+
+		body, err := httpapi.BodyOf[textRequest](request)
+
+		require.NoError(t, err)
+		assert.Equal(t, textRequest{Text: "hello"}, body)
+	})
+}
