@@ -392,6 +392,9 @@ func (s *Store) verify(event eventsourcingdb.Event) error {
 // the client does, and handed over as a json.RawMessage, which the client
 // writes as it is. The database receives exactly the JSON the client would
 // have written itself.
+//
+// The test fixture of architecturekittest refuses such data with the same
+// error, which it words itself, so a test compares the two.
 func (s *Store) candidateFor(subject string, event Event) (eventsourcingdb.EventCandidate, error) {
 	data, err := json.Marshal(event)
 	if err != nil {
