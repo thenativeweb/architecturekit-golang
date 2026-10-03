@@ -287,11 +287,13 @@ var bookState = architecturekit.NewState(Book{}).
 A decider connects a state with the decision made on it. Create a `Decider`, hand over the state, and provide a `Decide` function that receives the command and the current state, and returns the events to write:
 
 ```go
+var ErrBookAlreadyAcquired = architecturekit.NewDomainError("book has already been acquired")
+
 var acquireBook = architecturekit.Decider[AcquireBook, Book]{
   State: bookState,
   Decide: func(ctx context.Context, cmd AcquireBook, book Book) ([]architecturekit.Event, error) {
     if book.IsAcquired {
-      return nil, architecturekit.NewDomainError("book %s has already been acquired", cmd.BookID)
+      return nil, fmt.Errorf("%w: %s", ErrBookAlreadyAcquired, cmd.BookID)
     }
 
     return []architecturekit.Event{
@@ -306,6 +308,8 @@ var acquireBook = architecturekit.Decider[AcquireBook, Book]{
 ```
 
 To reject a command, return an error created with the `NewDomainError` function. It takes a format string and arguments, like `fmt.Errorf`, and returns an error of the type `*DomainError`, whose message is exactly the formatted text, and which belongs to the category `ErrDomain` (see [Handling Errors](#handling-errors)).
+
+To let a caller or a test tell a rejection apart from the others, create it once, as a variable such as `ErrBookAlreadyAcquired`, and return it, or wrap it with `fmt.Errorf` and `%w` to add details, such as the ID of the book. `errors.Is` then finds the variable in the error, as well as the category `ErrDomain` (see [Expecting Rejections](#expecting-rejections)).
 
 A decider may check several rules:
 
@@ -2660,21 +2664,23 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
 
 #### Expecting Rejections
 
-To expect that a command is rejected with exactly the given message, call the `ThenRejected` function:
+To expect that a command is rejected, call the `ThenFailed` function with the error you expect. It matches with `errors.Is`, so it takes the error the decider returns, as well as every error that this error wraps. For example, `acquireBook` wraps `ErrBookAlreadyAcquired` to add the ID of the book (see [Making Decisions](#making-decisions)), and `ThenFailed` still finds it:
 
 ```go
 architecturekittest.Given(t, acquireBook, BookAcquired{}).
   When(AcquireBook{BookID: "42"}).
-  ThenRejected("book 42 has already been acquired")
+  ThenFailed(ErrBookAlreadyAcquired)
 ```
 
-To expect an error of a category instead, call the `ThenFailed` function:
+To expect any error of a category instead, hand over the category, such as `architecturekit.ErrDomain` or `architecturekit.ErrPermanent`. For example, `borrowBook` rejects a book that does not exist with an error that it creates in place with `NewDomainError`, which belongs to the category `ErrDomain`:
 
 ```go
 architecturekittest.Given(t, borrowBook).
   When(BorrowBook{BookID: "42"}).
   ThenFailed(architecturekit.ErrDomain)
 ```
+
+*Note that `ThenFailed` does not compare messages, so rewording a rejection breaks no test. To tell a rejection apart from the others of the same category, create it once, as a variable, as `ErrBookAlreadyAcquired` is.*
 
 #### Expecting Preconditions
 
@@ -2733,8 +2739,10 @@ architecturekittest.GivenStored(t, borrowBook,
   },
 ).
   When(BorrowBook{BookID: "42", ReaderID: "17"}).
-  ThenRejected("book 42 is already borrowed")
+  ThenFailed(architecturekit.ErrDomain)
 ```
+
+The upcaster turns the older event into a `BookBorrowed` event, so the book is borrowed already, and `borrowBook` rejects the command.
 
 #### Replaying Events Directly
 
@@ -2783,7 +2791,11 @@ func TestCatalogProjection(t *testing.T) {
 
 `Project` hands over the events as they are stored, so a projection that uses upcasters runs them, just as it does with a database. To test that a projection handles an older event type, hand over an event of that type.
 
-The `ExpectItems` function expects the view to hold exactly the given items, in the given order. It requires an item type that is comparable. To get the items as a slice instead, call the `ItemsOf` function:
+The `ExpectItems` function expects the view to hold exactly the given items, in the given order. It compares the items by value, so that items with slices or maps work too.
+
+*Note that `ExpectItems` compares with `reflect.DeepEqual`, so a `nil` slice or map is not equal to an empty one.*
+
+To get the items as a slice instead, call the `ItemsOf` function:
 
 ```go
 items := architecturekittest.ItemsOf(t, catalog)

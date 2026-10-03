@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"time"
@@ -142,7 +143,11 @@ func ExpectMode(t TestingT, projection architecturekit.Projection, want architec
 }
 
 // ExpectItems expects the view to hold exactly these items, in this order.
-func ExpectItems[TItem comparable](t TestingT, view architecturekit.View[TItem], expected ...TItem) {
+//
+// It compares the items by value, with reflect.DeepEqual, so that an item may
+// hold slices, maps, or pointers, and two items are equal if what they hold
+// is. A nil slice or map is not equal to an empty one, though.
+func ExpectItems[TItem any](t TestingT, view architecturekit.View[TItem], expected ...TItem) {
 	t.Helper()
 
 	items := ItemsOf(t, view)
@@ -153,7 +158,7 @@ func ExpectItems[TItem comparable](t TestingT, view architecturekit.View[TItem],
 	}
 
 	for i := range expected {
-		if items[i] != expected[i] {
+		if !reflect.DeepEqual(items[i], expected[i]) {
 			t.Fatalf("item %d: got %+v, want %+v", i, items[i], expected[i])
 			return
 		}

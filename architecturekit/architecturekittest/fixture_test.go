@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,6 +44,28 @@ func (s *spy) expectNoFailure(t *testing.T) {
 	t.Helper()
 
 	require.Empty(t, s.failures)
+}
+
+// refusalOf returns the error with which the fixture refuses the command, as
+// ThenNothing reports it. ThenFailed only tells whether that error matches
+// another one, so this is how the tests compare its wording with the one of
+// Execute.
+func refusalOf[TCommand architecturekit.Command, TState any](
+	t *testing.T,
+	decider architecturekit.Decider[TCommand, TState],
+	cmd TCommand,
+) string {
+	t.Helper()
+
+	recorder := &spy{}
+	architecturekittest.Given(recorder, decider).When(cmd).ThenNothing()
+
+	require.Len(t, recorder.failures, 1, "the fixture has to refuse the command")
+
+	refusal, found := strings.CutPrefix(recorder.firstFailure(), "expected nothing to happen, got error: ")
+	require.True(t, found, "the fixture has to refuse the command, but reported: %s", recorder.firstFailure())
+
+	return refusal
 }
 
 // --- test domain ---
@@ -161,12 +184,22 @@ type uncomparableSubjectPrecondition struct {
 
 func (p uncomparableSubjectPrecondition) Subject() string { return p.subject[0] }
 
+// The rejections of the account. The decider wraps them to name the owner, so
+// that only errors.Is finds them, not a comparison of the errors themselves.
+var (
+	errAccountAlreadyOpen = architecturekit.NewDomainError("account is already open")
+	errOwnerBanned        = architecturekit.NewDomainError("owner is banned")
+)
+
 func decider() architecturekit.Decider[open, account] {
 	return architecturekit.Decider[open, account]{
 		State: accountState(),
 		Decide: func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
 			if current.IsOpen {
-				return nil, architecturekit.NewDomainError("account is already open")
+				return nil, fmt.Errorf("%w: owned by %s", errAccountAlreadyOpen, current.Owner)
+			}
+			if cmd.Owner == "mallory" {
+				return nil, fmt.Errorf("%w: %s", errOwnerBanned, cmd.Owner)
 			}
 			if cmd.Owner == "" {
 				return nil, fmt.Errorf("%w: no owner given", architecturekit.ErrPermanent)
@@ -272,40 +305,45 @@ func TestThenNothing(t *testing.T) {
 	})
 }
 
-func TestThenRejected(t *testing.T) {
-	t.Run("and ThenFailed describe the same rejection", func(t *testing.T) {
-		architecturekittest.Given(t, decider(), opened{Owner: "golo"}).
-			When(open{Owner: "jane"}).
-			ThenRejected("account is already open").
-			ThenFailed(architecturekit.ErrDomain)
-	})
-
-	t.Run("fails when events were produced", func(t *testing.T) {
-		recorder := &spy{}
-
-		architecturekittest.Given(recorder, decider()).
-			When(open{Owner: "golo"}).
-			ThenRejected("account is already open")
-
-		recorder.expectFailure(t, "1 event(s)")
-	})
-
-	t.Run("fails on wrong message", func(t *testing.T) {
-		recorder := &spy{}
-
-		architecturekittest.Given(recorder, decider(), opened{Owner: "golo"}).
-			When(open{Owner: "jane"}).
-			ThenRejected("something else")
-
-		recorder.expectFailure(t, "something else")
-	})
-}
-
 func TestThenFailed(t *testing.T) {
 	t.Run("tells categories apart", func(t *testing.T) {
 		architecturekittest.Given(t, decider()).
 			When(open{}).
 			ThenFailed(architecturekit.ErrPermanent)
+	})
+
+	t.Run("matches a sentinel error the decider wraps, and its category", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider(), opened{Owner: "golo"}).
+			When(open{Owner: "jane"}).
+			ThenFailed(errAccountAlreadyOpen).
+			ThenFailed(architecturekit.ErrDomain)
+
+		recorder.expectNoFailure(t)
+	})
+
+	t.Run("tells the sentinel errors of a decider apart", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider()).
+			When(open{Owner: "mallory"}).
+			ThenFailed(errOwnerBanned)
+
+		recorder.expectNoFailure(t)
+	})
+
+	t.Run("fails on a different sentinel error", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.Given(recorder, decider(), opened{Owner: "golo"}).
+			When(open{Owner: "jane"}).
+			ThenFailed(errOwnerBanned)
+
+		require.Len(t, recorder.failures, 1)
+		assert.Equal(t,
+			"expected an error matching owner is banned, got account is already open: owned by golo",
+			recorder.firstFailure())
 	})
 
 	t.Run("fails when nothing failed", func(t *testing.T) {
@@ -315,7 +353,10 @@ func TestThenFailed(t *testing.T) {
 			When(open{Owner: "golo"}).
 			ThenFailed(architecturekit.ErrDomain)
 
-		recorder.expectFailure(t, "1 event(s)")
+		require.Len(t, recorder.failures, 1)
+		assert.Equal(t,
+			"expected an error matching architecturekit: domain rule violated, got 1 event(s): [test.account.opened]",
+			recorder.firstFailure())
 	})
 
 	t.Run("fails on the wrong category", func(t *testing.T) {
@@ -325,7 +366,8 @@ func TestThenFailed(t *testing.T) {
 			When(open{Owner: "jane"}).
 			ThenFailed(architecturekit.ErrTransient)
 
-		recorder.expectFailure(t, "category")
+		recorder.expectFailure(t,
+			"expected an error matching architecturekit: transient failure, got account is already open")
 	})
 }
 
@@ -360,7 +402,7 @@ func TestGivenStored(t *testing.T) {
 			ThenState(func(state account) {
 				assert.Equal(t, "from the old shape", state.Owner, "the upcaster did not run")
 			}).
-			ThenRejected("account is already open")
+			ThenFailed(errAccountAlreadyOpen)
 	})
 
 	t.Run("fails on event without rule", func(t *testing.T) {
@@ -668,10 +710,15 @@ func TestEventThatCanNotBeEncoded(t *testing.T) {
 	refusal := encodingRefusal("test.account.measured", "/account/1", "json: unsupported value: NaN")
 
 	t.Run("is a permanent failure that names the event type, the subject, and the reason", func(t *testing.T) {
+		toAnotherSubject := emit{subject: "/account/2", events: withNaN.events}
+
 		architecturekittest.Given(t, measuringDecider()).
-			When(emit{subject: "/account/2", events: withNaN.events}).
-			ThenFailed(architecturekit.ErrPermanent).
-			ThenRejected(encodingRefusal("test.account.measured", "/account/2", "json: unsupported value: NaN"))
+			When(toAnotherSubject).
+			ThenFailed(architecturekit.ErrPermanent)
+
+		assert.Equal(t,
+			encodingRefusal("test.account.measured", "/account/2", "json: unsupported value: NaN"),
+			refusalOf(t, measuringDecider(), toAnotherSubject))
 	})
 
 	t.Run("fails every assertion that expects events or nothing, naming the cause", func(t *testing.T) {
@@ -697,13 +744,13 @@ func TestEventThatCanNotBeEncoded(t *testing.T) {
 		notANumber := measured{Value: math.NaN()}
 		channel := unmarshallable{Channel: make(chan int)}
 
-		architecturekittest.Given(t, measuringDecider()).
-			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, notANumber, channel}}).
-			ThenRejected(refusal)
+		assert.Equal(t, refusal, refusalOf(t, measuringDecider(),
+			emit{events: []architecturekit.Event{opened{Owner: "golo"}, notANumber, channel}}))
 
-		architecturekittest.Given(t, measuringDecider()).
-			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, channel, notANumber}}).
-			ThenRejected(encodingRefusal("test.account.opened", "/account/1", "json: unsupported type: chan int"))
+		assert.Equal(t,
+			encodingRefusal("test.account.opened", "/account/1", "json: unsupported type: chan int"),
+			refusalOf(t, measuringDecider(),
+				emit{events: []architecturekit.Event{opened{Owner: "golo"}, channel, notANumber}}))
 	})
 
 	t.Run("comes after an event without a rule, as with Execute", func(t *testing.T) {
@@ -739,10 +786,12 @@ func TestNilEvent(t *testing.T) {
 	refusal := nilRefusal(1, "/account/1")
 
 	t.Run("is a permanent failure that names the subject and the index", func(t *testing.T) {
+		withOnlyNil := emit{subject: "/account/2", events: []architecturekit.Event{nil}}
+
 		architecturekittest.Given(t, emitDecider()).
-			When(emit{subject: "/account/2", events: []architecturekit.Event{nil}}).
-			ThenFailed(architecturekit.ErrPermanent).
-			ThenRejected(nilRefusal(0, "/account/2"))
+			When(withOnlyNil).
+			ThenFailed(architecturekit.ErrPermanent)
+		assert.Equal(t, nilRefusal(0, "/account/2"), refusalOf(t, emitDecider(), withOnlyNil))
 	})
 
 	t.Run("fails every assertion that expects events or nothing, naming the cause", func(t *testing.T) {
@@ -765,17 +814,15 @@ func TestNilEvent(t *testing.T) {
 	})
 
 	t.Run("names the first event that is nil", func(t *testing.T) {
-		architecturekittest.Given(t, emitDecider()).
-			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, nil, opened{Owner: "jane"}, nil}}).
-			ThenRejected(refusal)
+		assert.Equal(t, refusal, refusalOf(t, emitDecider(),
+			emit{events: []architecturekit.Event{opened{Owner: "golo"}, nil, opened{Owner: "jane"}, nil}}))
 	})
 
 	t.Run("comes before an event without a rule and one that can not be encoded, as with Execute", func(t *testing.T) {
 		// The event that is nil comes last, so it is reported only because all
 		// events are checked for nil first.
-		architecturekittest.Given(t, measuringDecider()).
-			When(emit{events: []architecturekit.Event{measured{Value: math.NaN()}, unheardOf{}, nil}}).
-			ThenRejected(nilRefusal(2, "/account/1"))
+		assert.Equal(t, nilRefusal(2, "/account/1"), refusalOf(t, measuringDecider(),
+			emit{events: []architecturekit.Event{measured{Value: math.NaN()}, unheardOf{}, nil}}))
 	})
 }
 
@@ -816,8 +863,9 @@ func TestWhenChecksPreconditions(t *testing.T) {
 
 			architecturekittest.Given(t, decider()).
 				When(cmd).
-				ThenFailed(architecturekit.ErrPermanent).
-				ThenRejected(architecturekit.CheckPreconditions(cmd).Error())
+				ThenFailed(architecturekit.ErrPermanent)
+
+			assert.Equal(t, architecturekit.CheckPreconditions(cmd).Error(), refusalOf(t, decider(), cmd))
 		})
 
 		t.Run("fails ThenEvents for "+test.name+", naming the cause", func(t *testing.T) {

@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
@@ -244,7 +243,7 @@ func TestExecuteWithInvalidPreconditions(t *testing.T) {
 				require.ErrorIs(t, err, architecturekit.ErrPermanent, "Execute has to refuse the command")
 
 				assert.Equal(t, err, architecturekit.CheckPreconditions(cmd))
-				architecturekittest.Given(t, counterDecider()).When(cmd).ThenRejected(err.Error())
+				assert.Equal(t, err.Error(), fixtureRefusal(t, counterDecider(), cmd))
 			})
 		}
 	})
