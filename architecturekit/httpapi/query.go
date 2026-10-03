@@ -38,6 +38,11 @@ type Answer[TQuery any, TResult any] func(ctx context.Context, query TQuery) (TR
 // that RespondResult logs with the value and the stack of the panic. Only
 // http.ErrAbortHandler panics on, since net/http expects it to abort the
 // response.
+//
+// A nil toQuery or answer is a programming error, so Ask panics, and does so
+// first, on every request, also one whose caller is unknown. Like any other
+// panic, that comes back as an error, which names the mistake rather than a
+// nil pointer.
 func Ask[TUser any, TQuery any, TResult any](
 	r *http.Request,
 	api *API[TUser],
@@ -45,6 +50,13 @@ func Ask[TUser any, TQuery any, TResult any](
 	answer Answer[TQuery, TResult],
 ) (result TResult, err error) {
 	defer recoverInto(&err)
+
+	if toQuery == nil {
+		panic("architecturekit/httpapi: Ask needs a function that turns the request into a query, not nil")
+	}
+	if answer == nil {
+		panic("architecturekit/httpapi: Ask needs a function that answers the query, not nil")
+	}
 
 	user, err := UserOf(r, api)
 	if err != nil {

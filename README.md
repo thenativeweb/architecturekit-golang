@@ -2115,6 +2115,8 @@ mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Req
 
 *Note that `Handle` returns a panic as an error, which `StatusFor` maps to `500`, and which `Respond` logs with the value and the stack of the panic.*
 
+*Note that calling `Handle` with `nil` as the function panics, as with `Route`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
+
 #### Authorizing Commands
 
 To refuse a command, return `httpapi.ErrForbidden` from the function that returns it. The request is then answered with `403 Forbidden`, and the command is not executed:
@@ -2236,6 +2238,8 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
 ```
 
 *Note that `Ask` returns a panic as an error, as `Handle` does (see [Answering Commands in Your Own Format](#answering-commands-in-your-own-format)).*
+
+*Note that calling `Ask` with `nil` for either function panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
 #### Reading Queries from the Body
 
