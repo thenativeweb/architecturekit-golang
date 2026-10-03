@@ -2,8 +2,11 @@ package architecturekit_test
 
 import (
 	"context"
+	"encoding"
 	"encoding/json"
 	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -293,6 +296,12 @@ func TestDeriveSchema(t *testing.T) {
 		}], `{"type": "object", "additionalProperties": false,
 			"properties": {"payload": {}}, "required": ["payload"]}`},
 
+		{"allows any value for an interface with a Schema function", schemaJSON[struct {
+			Shape shape      `json:"shape"`
+			Named namedShape `json:"named"`
+		}], `{"type": "object", "additionalProperties": false,
+			"properties": {"shape": {}, "named": {}}, "required": ["shape", "named"]}`},
+
 		{"describes a field type by its own Schema function", schemaJSON[struct {
 			Country country   `json:"country"`
 			Visited []country `json:"visited,omitempty"`
@@ -430,6 +439,18 @@ func TestDeriveSchemaPanics(t *testing.T) {
 		{"for a type that encodes itself with MarshalJSONTo on a pointer",
 			func() { architecturekit.DeriveSchema[struct{ Value encodedToOnPointer }]() },
 			"architecturekit_test.encodedToOnPointer encodes itself with MarshalJSON or MarshalJSONTo"},
+		{"for an interface that encodes itself as JSON",
+			func() { architecturekit.DeriveSchema[struct{ Value json.Marshaler }]() },
+			"json.Marshaler encodes itself with MarshalJSON or MarshalJSONTo"},
+		{"for an interface that encodes itself with MarshalJSONTo",
+			func() { architecturekit.DeriveSchema[struct{ Value jsonv2.MarshalerTo }]() },
+			"json.MarshalerTo encodes itself with MarshalJSON or MarshalJSONTo"},
+		{"for an interface with a Schema function that encodes itself as JSON, as for one without",
+			func() { architecturekit.DeriveSchema[struct{ Value jsonShape }]() },
+			"architecturekit_test.jsonShape encodes itself with MarshalJSON or MarshalJSONTo"},
+		{"for an interface with a Schema function that encodes itself with MarshalJSONTo, as for one without",
+			func() { architecturekit.DeriveSchema[struct{ Value jsonToShape }]() },
+			"architecturekit_test.jsonToShape encodes itself with MarshalJSON or MarshalJSONTo"},
 		{"for a slice of a type that can not be derived",
 			func() { architecturekit.DeriveSchema[struct{ Secrets []secret }]() },
 			"architecturekit_test.secret encodes itself with MarshalJSON"},
@@ -543,6 +564,13 @@ func TestDeriveSchemaPanics(t *testing.T) {
 				}]()
 			},
 			"has a Schema function only from its embedded field describer"},
+		{"for a type with the Schema function of an embedded interface that declares further functions",
+			func() { architecturekit.DeriveSchema[shapeFramed]() },
+			"architecturekit_test.shapeFramed has a Schema function only from its embedded field shape, which describes shape alone"},
+		{"for a field whose type has the Schema function of an embedded interface only",
+			func() { architecturekit.DeriveSchema[struct{ Framed shapeFramed }]() },
+			"field Framed of struct { Framed architecturekit_test.shapeFramed }: " +
+				"architecturekit_test.shapeFramed has a Schema function only from its embedded field shape"},
 		{"for a generic type with the Schema function of an embedded struct only",
 			func() { architecturekit.DeriveSchema[priced[string]]() },
 			"architecturekit_test.priced[string] has a Schema function only from its embedded field money"},
@@ -984,6 +1012,204 @@ func TestSchemaFunctionsOfEmbeddedFields(t *testing.T) {
 			Data:    feePaidWithSchema{money: money{Amount: 5, Currency: "euro"}, Note: "late"},
 		}}, nil)
 		assert.ErrorContains(t, err, "schema", "the database must check the currency against the pattern of money")
+	})
+}
+
+// shape is an interface that declares a Schema function. encoding/json writes
+// the value a field of the interface holds, or null, and every value has a
+// Schema function that describes it alone.
+type shape interface {
+	Schema() map[string]any
+	Area() float64
+}
+
+// square and circle are shapes that encoding/json writes as different objects.
+type square struct {
+	Side float64 `json:"side"`
+}
+
+func (square) Schema() map[string]any {
+	return map[string]any{"type": "object", "required": []any{"side"}}
+}
+
+func (s square) Area() float64 { return s.Side * s.Side }
+
+type circle struct {
+	Radius float64 `json:"radius"`
+}
+
+func (circle) Schema() map[string]any {
+	return map[string]any{"type": "object", "required": []any{"radius"}}
+}
+
+func (c circle) Area() float64 { return math.Pi * c.Radius * c.Radius }
+
+// namedShape has its Schema function from an embedded interface, which, for
+// an interface, is the same as declaring it.
+type namedShape interface {
+	shape
+	Name() string
+}
+
+// textShape, appendedShape, jsonShape and jsonToShape are shapes that also
+// encode themselves.
+type textShape interface {
+	shape
+	encoding.TextMarshaler
+}
+
+type appendedShape interface {
+	shape
+	encoding.TextAppender
+}
+
+type jsonShape interface {
+	shape
+	json.Marshaler
+}
+
+type jsonToShape interface {
+	shape
+	jsonv2.MarshalerTo
+}
+
+// shapeDrawn has fields of an interface type with a Schema function.
+type shapeDrawn struct {
+	Shape  shape   `json:"shape"`
+	Shapes []shape `json:"shapes"`
+}
+
+func (shapeDrawn) EventType() string { return "io.thenativeweb.test.shape-drawn" }
+
+// shapeFramed has a Schema function only because it embeds shape.
+type shapeFramed struct {
+	shape
+	Frame string `json:"frame"`
+}
+
+func (shapeFramed) EventType() string { return "io.thenativeweb.test.shape-framed" }
+
+func TestInterfacesWithSchemaFunctions(t *testing.T) {
+	t.Run("describes a field of such an interface as any value, wherever it appears", func(t *testing.T) {
+		assert.JSONEq(t, `{"type": "object", "additionalProperties": false,
+			"properties": {
+				"shape": {},
+				"optional": {},
+				"shapes": {"anyOf": [{"type": "array", "items": {}}, {"type": "null"}]},
+				"optionalShapes": {"type": "array", "items": {}},
+				"fixed": {"type": "array", "items": {}, "minItems": 2, "maxItems": 2},
+				"byName": {"anyOf": [{"type": "object", "additionalProperties": {}}, {"type": "null"}]},
+				"pinned": {"anyOf": [{}, {"type": "null"}]},
+				"optionalPinned": {}},
+			"required": ["shape", "shapes", "fixed", "byName", "pinned"]}`,
+			schemaJSON[struct {
+				Shape          shape            `json:"shape"`
+				Optional       shape            `json:"optional,omitempty"`
+				Shapes         []shape          `json:"shapes"`
+				OptionalShapes []shape          `json:"optionalShapes,omitempty"`
+				Fixed          [2]shape         `json:"fixed"`
+				ByName         map[string]shape `json:"byName"`
+				Pinned         *shape           `json:"pinned"`
+				OptionalPinned *shape           `json:"optionalPinned,omitempty"`
+			}](t))
+	})
+
+	t.Run("describes it exactly as an interface without a Schema function", func(t *testing.T) {
+		assert.JSONEq(t,
+			schemaJSON[struct {
+				Shape          any                    `json:"shape"`
+				Named          any                    `json:"named"`
+				Optional       any                    `json:"optional,omitempty"`
+				Shapes         []any                  `json:"shapes"`
+				Fixed          [2]any                 `json:"fixed"`
+				ByName         map[string]any         `json:"byName"`
+				Pinned         *any                   `json:"pinned"`
+				OptionalPinned *any                   `json:"optionalPinned,omitempty"`
+				Text           encoding.TextMarshaler `json:"text"`
+				Appended       encoding.TextAppender  `json:"appended"`
+			}](t),
+			schemaJSON[struct {
+				Shape          shape            `json:"shape"`
+				Named          namedShape       `json:"named"`
+				Optional       shape            `json:"optional,omitempty"`
+				Shapes         []shape          `json:"shapes"`
+				Fixed          [2]shape         `json:"fixed"`
+				ByName         map[string]shape `json:"byName"`
+				Pinned         *shape           `json:"pinned"`
+				OptionalPinned *shape           `json:"optionalPinned,omitempty"`
+				Text           textShape        `json:"text"`
+				Appended       appendedShape    `json:"appended"`
+			}](t))
+	})
+
+	t.Run("keeps describing an interface with MarshalText or AppendText as a string", func(t *testing.T) {
+		// With a Schema function, such an interface is described the same way,
+		// as the test above shows.
+		assert.JSONEq(t, `{"type": "object", "additionalProperties": false,
+			"properties": {"text": {"type": "string"}, "appended": {"type": "string"}},
+			"required": ["text", "appended"]}`,
+			schemaJSON[struct {
+				Text     encoding.TextMarshaler `json:"text"`
+				Appended encoding.TextAppender  `json:"appended"`
+			}](t))
+	})
+
+	t.Run("describes such an interface itself as any value", func(t *testing.T) {
+		assert.JSONEq(t, `{}`, schemaJSON[shape](t))
+	})
+
+	t.Run("derives the schema of an event with such a field in Evolve and in Ignore", func(t *testing.T) {
+		want := `{"type": "object", "additionalProperties": false,
+			"properties": {"shape": {}, "shapes": {"anyOf": [{"type": "array", "items": {}}, {"type": "null"}]}},
+			"required": ["shape", "shapes"]}`
+
+		for name, state := range map[string]func() *architecturekit.State[int]{
+			"Evolve": func() *architecturekit.State[int] {
+				return architecturekit.NewState(0).Evolve(func(count int, _ shapeDrawn) int { return count + 1 })
+			},
+			"Ignore": func() *architecturekit.State[int] {
+				return architecturekit.NewState(0).Ignore[shapeDrawn]()
+			},
+		} {
+			schemas := state().Schemas()
+			require.Len(t, schemas, 1, name)
+
+			encoded, err := json.Marshal(schemas[0].Schema)
+			require.NoError(t, err)
+			assert.JSONEq(t, want, string(encoded), name)
+		}
+	})
+
+	t.Run("keeps refusing an event with the Schema function of an embedded interface only", func(t *testing.T) {
+		message := panicMessage(t, func() {
+			architecturekit.NewState(0).Evolve(func(count int, _ shapeFramed) int { return count + 1 })
+		})
+
+		assert.Contains(t, message, `architecturekit: event type "io.thenativeweb.test.shape-framed": `+
+			"architecturekit_test.shapeFramed has a Schema function only from its embedded field shape")
+	})
+
+	t.Run("is accepted and checked by the database", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+
+		state := architecturekit.NewState(0).Evolve(func(count int, _ shapeDrawn) int { return count + 1 })
+		require.NoError(t, architecturekit.RegisterSchemas(t.Context(), store, state.Schemas()))
+
+		// A square and a circle are written as different objects, each of which
+		// the Schema function of the other one refuses.
+		writeRaw(t, subject,
+			shapeDrawn{Shape: square{Side: 2}, Shapes: []shape{circle{Radius: 1}, nil}},
+			shapeDrawn{Shape: circle{Radius: 3}},
+			shapeDrawn{})
+
+		_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+			Source:  "https://thenativeweb.io",
+			Subject: subject,
+			Type:    shapeDrawn{}.EventType(),
+			Data:    map[string]any{"shape": square{Side: 2}, "shapes": nil, "unknown": true},
+		}}, nil)
+		assert.ErrorContains(t, err, "schema", "the database must still check the fields of the event")
 	})
 }
 

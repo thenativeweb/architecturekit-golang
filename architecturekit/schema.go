@@ -86,9 +86,12 @@ type derivedSchema struct {
 //   - A time.Time is a string in the date-time format, a json.Number a number,
 //     unless the string option makes it a string, and a type with a
 //     MarshalText or an AppendText function a string. An interface allows any
-//     value.
+//     value, even if it declares a Schema function.
 //   - The type of a field that has a Schema function is described by it, like
-//     an event is.
+//     an event is, unless the type is an interface. encoding/json writes the
+//     value an interface holds, or null, so there is no value whose Schema
+//     function could be asked, and the interface is described as if it had
+//     none.
 //
 // T's own Schema function, if it has one, is not called, so that it can start
 // from the derived schema. The returned schema belongs to the caller, and it
@@ -135,12 +138,15 @@ func eventSchemaOf[TEvent Event]() (map[string]any, error) {
 
 // ownSchema calls the Schema function of a type, if it has one, with either a
 // value or a pointer receiver. A pointer has no schema of its own, since it
-// only borrows the functions of the type it points to. It does not tell a
-// Schema function the type has only from an embedded field from one of its
+// only borrows the functions of the type it points to. Nor has an interface,
+// even one that declares a Schema function: encoding/json writes the value the
+// interface holds, or null, so there is no value whose Schema function could
+// be asked, and the interface is described as if it had none. It does not tell
+// a Schema function the type has only from an embedded field from one of its
 // own; refuseEmbeddedSchema does.
 func ownSchema(valueType reflect.Type) (map[string]any, bool) {
 	switch {
-	case valueType.Kind() == reflect.Pointer:
+	case valueType.Kind() == reflect.Pointer, valueType.Kind() == reflect.Interface:
 		return nil, false
 	case valueType.Implements(describesSchemaType):
 		return reflect.Zero(valueType).Interface().(describesSchema).Schema(), true
