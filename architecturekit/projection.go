@@ -534,13 +534,19 @@ type KeyedView[TKey comparable, TItem any] interface {
 // Outcome tells what an operation on a single item of a view did with an
 // event. A projection needs to tell the cases apart when an event about an
 // item that does not exist means that something is wrong, while an event that
-// has been applied before is to be expected after a restart.
+// has been applied before is to be expected after a restart. It also needs
+// them when it does more than store an item, such as counting the items, which
+// it does only for an item that was really added.
+//
+// Insert reports Added or AlreadyApplied, Upsert reports Added, Applied, or
+// AlreadyApplied, and Update and Delete report Applied, Missing, or
+// AlreadyApplied.
 //
 // The zero value is no outcome, which is what comes with an error.
 type Outcome int
 
 const (
-	// Applied means that the event changed or removed the item.
+	// Applied means that the event changed or removed an existing item.
 	Applied Outcome = iota + 1
 
 	// Missing means that there is no item with the key.
@@ -549,6 +555,10 @@ const (
 	// AlreadyApplied means that the item has seen the event, or a newer one,
 	// so the event changed nothing.
 	AlreadyApplied
+
+	// Added means that the event added a new item. It comes last, so that the
+	// others keep the values they had before it.
+	Added
 )
 
 // String names the outcome.
@@ -560,6 +570,8 @@ func (o Outcome) String() string {
 		return "missing"
 	case AlreadyApplied:
 		return "already applied"
+	case Added:
+		return "added"
 	default:
 		return fmt.Sprintf("Outcome(%d)", int(o))
 	}
