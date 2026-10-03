@@ -1428,6 +1428,8 @@ If reading fails with an error of the category `ErrTransient`, or if the databas
 
 *Note that how long the projection followed the stream is compared with the initial delay, not with the delay it has grown to. Otherwise, once an outage had let the delay grow to one minute, a load balancer that ends connections every 30 seconds would keep a quiet projection waiting for a minute after each of them, and a caller who wants to read their own write in the meantime would not see it (see [Reading Your Own Writes](#reading-your-own-writes)). In return, a database that ends every stream a few seconds after the projection has caught up is tried again every few seconds rather than once a minute. That is not a loop without a pause, and catching up, the expensive part, succeeds each time.*
 
+A connection can also stall without being closed, for example behind a proxy that keeps it open but no longer passes anything on. While there is nothing else to send, the database sends a heartbeat every second, so the client ends a stream on which neither an event nor a heartbeat has arrived for 30 seconds, and the run reconnects as after any other failure of the category `ErrTransient`. Without that, the run would wait for the next event forever, while `Status` kept reporting `PhaseLive`.
+
 To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
 
 ```go
