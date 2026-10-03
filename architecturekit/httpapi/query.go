@@ -85,17 +85,19 @@ type querySettings struct {
 
 // Revisioned has a query wait for the revision a caller asks for, for at most
 // the given time (DefaultWait, unless there is a reason for another), answer
-// 304 when nothing has changed, or 412 for a method other than GET and HEAD,
-// and tag the answer with the revision of the view it served.
+// 304 when nothing has changed, or 412 for a method other than GET, HEAD and
+// QUERY, and tag the answer with the revision of the view it served.
 //
 // Whether nothing has changed, it tells from If-None-Match, which it reads
 // the way HTTP has it: as a list of tags, or *, compared weakly, so that a tag
 // that a proxy marked as weak while compressing the answer still matches.
 //
-// HTTP has 304 for GET and HEAD only, and 412 for every other method (RFC
-// 9110, 13.1.2). So a query that is sent as POST, since its input does not
-// fit into the query string, is answered with 412 when nothing has changed.
-// It carries the tag and the revision, as 304 does, and a message.
+// HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, a method
+// that asks with a body and changes nothing, which it treats like GET
+// (draft-ietf-httpbis-safe-method-w-body), and 412 for every other method. So
+// a query that is sent as POST, since its input does not fit into the query
+// string, is answered with 412 when nothing has changed. It carries the tag
+// and the revision, as 304 does, and a message.
 //
 // The tag holds the query, so two callers get the same tag only if they ask
 // the same: a query that holds the user, or anything else that tells callers
@@ -162,9 +164,9 @@ func Varying(varies Volatile) QueryOption {
 
 // Query wires a query to the mux and answers in the kit's default format,
 // which is the result itself. With Revisioned, it reads its own writes and
-// answers 304 when nothing has changed, or 412 for a method other than GET
-// and HEAD; with Varying in addition, its tag changes with what the answer
-// takes from elsewhere.
+// answers 304 when nothing has changed, or 412 for a method other than GET,
+// HEAD and QUERY; with Varying in addition, its tag changes with what the
+// answer takes from elsewhere.
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack, as with Route.
