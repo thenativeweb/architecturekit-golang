@@ -31,7 +31,7 @@ func noteView() *architecturekit.InMemoryView[string, noteItem] {
 func insertNote(t *testing.T, view *architecturekit.InMemoryView[string, noteItem], eventID string, note noteItem) {
 	t.Helper()
 
-	err := view.Insert(context.Background(), eventID, note)
+	_, err := view.Insert(context.Background(), eventID, note)
 	require.NoError(t, err, "failed to insert %+v", note)
 }
 
@@ -603,8 +603,10 @@ func servingOwnNotes(t *testing.T, wait time.Duration) *http.ServeMux {
 	t.Helper()
 
 	view := ownedNoteView()
-	require.NoError(t, view.Insert(t.Context(), "1", ownedNote{Owner: "alice", Text: "alice's secret"}))
-	require.NoError(t, view.Insert(t.Context(), "2", ownedNote{Owner: "bob", Text: "bob's list"}))
+	_, err := view.Insert(t.Context(), "1", ownedNote{Owner: "alice", Text: "alice's secret"})
+	require.NoError(t, err)
+	_, err = view.Insert(t.Context(), "2", ownedNote{Owner: "bob", Text: "bob's list"})
+	require.NoError(t, err)
 	view.Seen("2")
 
 	mux := http.NewServeMux()
