@@ -99,8 +99,8 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/testcontainers/testcontainers-go v0.44.0 h1:/Fwh6HY1mIikhnm9e7HwoxGycx0lzRAE0f5VQpjFxzI=
 github.com/testcontainers/testcontainers-go v0.44.0/go.mod h1:IcnwQrYTO86xHXu5bvMaBH7ATlbS3Qn1M1QWW3c66rE=
-github.com/thenativeweb/eventsourcingdb-client-golang v1.7.0 h1:YcDWqfZpg8HpIfgeD7aXOphZqELcmXC9O1Z3IyXACj0=
-github.com/thenativeweb/eventsourcingdb-client-golang v1.7.0/go.mod h1:kBCSiqfan4cMEix83hzDHSPMqnHW+AXI7L1hGzA2a/4=
+github.com/thenativeweb/eventsourcingdb-client-golang v1.8.0 h1:ZoC+vIjaj+uAty7Lq9vNdeo9/ww2dk+3pvxlb1g1T1Y=
+github.com/thenativeweb/eventsourcingdb-client-golang v1.8.0/go.mod h1:kBCSiqfan4cMEix83hzDHSPMqnHW+AXI7L1hGzA2a/4=
 github.com/tklauser/go-sysconf v0.4.0 h1:7H0uAN+7RkwWRaxhYXDLqa5V3LPrJeV8wmD9dRUgPQU=
 github.com/tklauser/go-sysconf v0.4.0/go.mod h1:8mTNWyog7H+MpKijp4VmKJAd2bbYQ2zuUwkYRbUArPI=
 github.com/tklauser/numcpus v0.12.0 h1:NR85qdvHA9pFse3x3weVZ0r0ST8R6l5RHbZrlRaqob4=
