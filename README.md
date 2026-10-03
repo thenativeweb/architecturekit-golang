@@ -913,14 +913,10 @@ if err != nil {
 
 ### Reading Events
 
-Some reads need the events themselves rather than a state, and fit neither `Load` nor a projection, for example one page of a long history, the events up to a certain one, or a single event. To read the events of a subject as they are stored, call the `Read` function with a context, the store, the subject, and the options of the client SDK. It returns an iterator over the events and errors:
+Some reads need the events themselves rather than a state, and fit neither `Load` nor a projection, for example one page of a long history, the events up to a certain one, or a single event. To read the events as they are stored, call the `Read` function with a context, the store, and the subjects to read. Say which subjects with the `SubjectTree` or the `ExactSubject` function, as for a projection (see [Running Projections](#running-projections)). It returns an iterator over the events and errors:
 
 ```go
-options := eventsourcingdb.ReadEventsOptions{
-  LowerBound: &eventsourcingdb.Bound{ID: afterEventID, Type: eventsourcingdb.BoundTypeExclusive},
-}
-
-for event, err := range architecturekit.Read(context.TODO(), store, "/books/42", options) {
+for event, err := range architecturekit.Read(context.TODO(), store, architecturekit.ExactSubject("/books/42")) {
   if err != nil {
     // ...
   }
@@ -929,9 +925,43 @@ for event, err := range architecturekit.Read(context.TODO(), store, "/books/42",
 }
 ```
 
+Without options, `Read` hands out every event of the subjects, oldest first. To read fewer of them, or in the other order, hand over options:
+
+- `FromEvent` reads from the event with the given ID on, including it, and `AfterEvent` reads the events after it.
+- `UpToEvent` reads up to the event with the given ID, including it, and `BeforeEvent` reads the events before it.
+- `NewestFirst` hands out the newest event first. The bounds stay what they are.
+- `FromLatestEvent` starts at the latest event of a type on a subject, including it, as `FromLatest` does for a state (see [Reading Long Streams](#reading-long-streams)). If the subject has no such event, `ReadEverything` reads all events, and `ReadNothing` reads none.
+
+For example, to read the next page of the history of a book, hand over the ID of the last event of the page before:
+
+```go
+events := architecturekit.Read(context.TODO(), store, architecturekit.ExactSubject("/books/42"),
+  architecturekit.AfterEvent(lastEventID),
+)
+```
+
+To read the history of a book from its latest audit on, up to a certain event:
+
+```go
+events := architecturekit.Read(context.TODO(), store, architecturekit.ExactSubject("/books/42"),
+  architecturekit.FromLatestEvent("/books/42", BookAudited{}.EventType(), architecturekit.ReadEverything),
+  architecturekit.UpToEvent(eventID),
+)
+```
+
+The IDs are strings, as everywhere else in the kit. The database hands them out as one ascending sequence across all subjects, so a bound does not have to be an event of the subjects that are read. An ID that is not the one of an event, such as `abc` or an empty one, ends the iteration with an error that wraps `ErrNotARevision`, before the database is asked. That way, an ID that comes from a request can be told apart from a failure of the database.
+
+*Note that a read has at most one lower bound, one upper bound, and one order, and that `FromLatestEvent` counts as a lower bound. Options that contradict each other, such as `FromEvent` together with `AfterEvent`, or `NewestFirst` given twice, make `Read` panic. So does `FromLatestEvent` together with `NewestFirst`, since the database reads from the latest event of a type only oldest first, and so do a subject for `FromLatestEvent` that does not start with a slash, and the zero value of `Subjects`.*
+
+*Note that `FromLatestEvent` looks for the event on the given subject alone, not below it, and that this subject does not have to be one of those that are read.*
+
+*Note that the database refuses bounds that leave no room for any event, such as `AfterEvent` and `BeforeEvent` with two neighboring IDs, or an upper bound before the latest event of the type given to `FromLatestEvent`. `Read` then fails with the error of the database.*
+
 Every event is verified, like everything else the store reads, before the loop sees it (see [Verifying Events](#verifying-events)). A failure belongs to a category, as with `Load` (see [Handling Errors](#handling-errors)), and ends the iteration. The store stops reading as soon as the loop ends, so breaking out of it after a page is fine.
 
 The events come as they are stored, without upcasters or rules, since there is no state. To get at the data of an event, call the `Decode` function (see [Executing Commands](#executing-commands)).
+
+For anything that `Read` does not offer, call the `ReadEvents` function of the client SDK, which takes the options of the database as they are. The events it hands out are not verified then, and a failure belongs to no category.
 
 ### Stepping Through States
 
@@ -1388,7 +1418,7 @@ logProjection := architecturekit.ProjectionFunc(func(ctx context.Context, event 
 
 To run a projection, call the `StartProjection` function with a context, the store, the subjects to read, and the projection. Say which subjects with the `SubjectTree` function, which stands for the given subject together with every subject below it, or with the `ExactSubject` function, which stands for the given subject alone. A projection usually reads a tree, such as every book below `/books`. There is no default, so that every projection says which one it means, since the client SDK reads a single subject unless told otherwise.
 
-*Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection` and the other functions that run a projection panic, as does a `nil` projection.*
+*Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection`, the other functions that run a projection, and `Read` panic, as does a `nil` projection.*
 
 The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that:
 
@@ -1697,7 +1727,7 @@ Since publishing rides on a projection, it behaves like one:
 - **A transient failure is tried again.** For an error of the category `ErrTransient`, the run tries the failed event again, with a growing delay. Any other error ends the run.
 - **Events arrive in order,** one at a time, as they were stored.
 
-On its first start, the checkpoint is empty, so the projection reads every event that has ever been stored, and publishes all of them, for example by sending a mail for every book that has ever been borrowed. To publish only the events from now on, save the ID of the latest event as the checkpoint before the first start. To find it, read the subjects of the projection in reverse order, and stop after the first event:
+On its first start, the checkpoint is empty, so the projection reads every event that has ever been stored, and publishes all of them, for example by sending a mail for every book that has ever been borrowed. To publish only the events from now on, save the ID of the latest event as the checkpoint before the first start. To find it, read the subjects of the projection newest first, and stop after the first event:
 
 ```go
 checkpoint, err := checkpoints.Load(ctx, "loan-mailer")
@@ -1706,10 +1736,7 @@ if err != nil {
 }
 
 if checkpoint == "" {
-  for event, err := range architecturekit.Read(ctx, store, "/books", eventsourcingdb.ReadEventsOptions{
-    Recursive: true,
-    Order:     eventsourcingdb.OrderAntichronological(),
-  }) {
+  for event, err := range architecturekit.Read(ctx, store, architecturekit.SubjectTree("/books"), architecturekit.NewestFirst()) {
     if err != nil {
       // ...
     }

@@ -21,7 +21,7 @@ func TestSubjects(t *testing.T) {
 	})
 
 	t.Run("a projection needs subjects from SubjectTree or ExactSubject", func(t *testing.T) {
-		const message = "architecturekit: a projection reads the subjects of SubjectTree or ExactSubject, not none"
+		const message = "architecturekit: reading needs the subjects of SubjectTree or ExactSubject, not none"
 
 		for name, start := range map[string]func(){
 			"CatchUpProjection": func() {

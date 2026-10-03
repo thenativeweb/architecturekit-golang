@@ -6,13 +6,15 @@ import (
 	"time"
 )
 
-// Subjects names what a projection reads: a subject, and whether the subjects
-// below it belong to it. Create it with SubjectTree or ExactSubject, so that
-// every projection says which of the two it means, rather than relying on a
-// default that differs from the one of the client SDK.
+// Subjects names what a projection or Read reads: a subject, and whether the
+// subjects below it belong to it. Create it with SubjectTree or ExactSubject,
+// so that every projection and every read says which of the two it means,
+// rather than relying on a default that differs from the one of the client
+// SDK.
 //
 // The zero value names no subject, which is a programming error, so
-// StartProjection and the other functions that run a projection panic for it.
+// StartProjection, the other functions that run a projection, and Read panic
+// for it.
 type Subjects struct {
 	subject   string
 	recursive bool
@@ -37,18 +39,23 @@ func ExactSubject(subject string) Subjects {
 }
 
 func subjectsOf(subject string, recursive bool) Subjects {
+	requireLeadingSlash(subject)
+
+	return Subjects{subject: subject, recursive: recursive}
+}
+
+// requireLeadingSlash panics for a subject that does not start with a slash.
+func requireLeadingSlash(subject string) {
 	if !strings.HasPrefix(subject, "/") {
 		panic(fmt.Sprintf("architecturekit: a subject starts with a slash, which %q does not", subject))
 	}
-
-	return Subjects{subject: subject, recursive: recursive}
 }
 
 // requireSubjects panics for subjects that were not created with SubjectTree
 // or ExactSubject, which the zero value is not.
 func requireSubjects(subjects Subjects) {
 	if subjects.subject == "" {
-		panic("architecturekit: a projection reads the subjects of SubjectTree or ExactSubject, not none")
+		panic("architecturekit: reading needs the subjects of SubjectTree or ExactSubject, not none")
 	}
 }
 
