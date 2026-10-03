@@ -90,13 +90,18 @@ func Await(
 // Returning the current day is usually all it takes.
 type Volatile func(*http.Request) string
 
+// methodQuery is QUERY, a method that asks with a body and changes nothing,
+// like GET (draft-ietf-httpbis-safe-method-w-body). net/http has no name for
+// it yet.
+const methodQuery = "QUERY"
+
 // serveUnchanged answers 304 when the caller already holds the answer with
-// the given tag, or 412 for a method other than GET and HEAD, and reports
-// whether it did.
+// the given tag, or 412 for a method other than GET, HEAD and QUERY, and
+// reports whether it did.
 //
-// HTTP has 304 for GET and HEAD only, and 412 for every other method (RFC
-// 9110, 13.1.2), such as POST, which a query whose input does not fit into
-// the query string is sent with. Both carry the tag and the revision of the
+// HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, which it
+// treats like GET, and 412 for every other method, such as POST, which a
+// query whose input does not fit into the query string is sent with. Both carry the tag and the revision of the
 // current answer, and only 412 has a body, which is a message, as with any
 // other answer that is not a success.
 func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string) bool {
@@ -106,7 +111,7 @@ func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string
 
 	writeRevision(w, revision, tag)
 
-	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == methodQuery {
 		w.WriteHeader(http.StatusNotModified)
 	} else {
 		w.Header().Set("Content-Type", "application/json")

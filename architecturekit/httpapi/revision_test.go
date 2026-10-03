@@ -535,6 +535,7 @@ func TestIfNoneMatchByMethod(t *testing.T) {
 	for method, status := range map[string]int{
 		http.MethodGet:     http.StatusNotModified,
 		http.MethodHead:    http.StatusNotModified,
+		"QUERY":            http.StatusNotModified,
 		http.MethodPost:    http.StatusPreconditionFailed,
 		http.MethodPut:     http.StatusPreconditionFailed,
 		http.MethodPatch:   http.StatusPreconditionFailed,
