@@ -1412,7 +1412,9 @@ return run.Err()
 
 *Note that if the database can not be reached at the start, the run keeps trying, and `CaughtUp` stays open. To wait for a limited time only, add a case with `time.After` to the `select` statement.*
 
-If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again, or has followed the stream for longer than the delay had grown to, even if no event arrived. That way, a load balancer that ends long-lived connections regularly does not hold back a quiet projection, while a database that fails before the projection has caught up, or right after, is given ever more time.
+If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again, or has caught up and followed the stream for longer than the initial delay, even if no event arrived. That way, a load balancer that ends long-lived connections regularly does not hold back a quiet projection, while a database that fails before the projection has caught up, or within the initial delay after, is given ever more time.
+
+*Note that how long the projection followed the stream is compared with the initial delay, not with the delay it has grown to. Otherwise, once an outage had let the delay grow to one minute, a load balancer that ends connections every 30 seconds would keep a quiet projection waiting for a minute after each of them, and a caller who wants to read their own write in the meantime would not see it (see [Reading Your Own Writes](#reading-your-own-writes)). In return, a database that ends every stream a few seconds after the projection has caught up is tried again every few seconds rather than once a minute. That is not a loop without a pause, and catching up, the expensive part, succeeds each time.*
 
 To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
 
@@ -1433,7 +1435,7 @@ The observer receives a `Reconnect` with these fields:
 - `Subject` is the subject the projection reads.
 - `Err` is the reason, which is `nil` if the database ended the stream.
 - `Delay` is how long the projection waits before the next attempt.
-- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event, or has followed the stream for longer than the delay had grown to.
+- `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event, or has followed the stream for longer than the initial delay. So it stays at `1` while a load balancer ends long-lived connections regularly.
 
 *Note that a database that can not be reached is retried as well, since that is usually transient. The observer is how to notice a database that stays unreachable. A failure that trying again will not fix, for example a rejected API token, ends the run (see [Handling Errors](#handling-errors)).*
 
@@ -1442,7 +1444,7 @@ To find out where a run stands, call the `Status` function. It returns a `Projec
 - `Phase` is `PhaseCatchingUp`, `PhaseLive`, `PhaseReconnecting`, or `PhaseStopped`.
 - `Since` is when the phase began. For `PhaseReconnecting`, that is when the disruption began, not when the latest attempt did.
 - `Err` is why the run is reconnecting or has stopped. It is `nil` if the database ended the stream, or if the run stopped because its context ended.
-- `Attempts` counts the attempts to read again within the current disruption. Unlike `Attempt` of `Reconnect`, it starts over whenever the run has caught up, even if the stream ends again right after.
+- `Attempts` counts the attempts to read again within the current disruption. Unlike `Attempt` of `Reconnect`, it starts over whenever the run has caught up, even if the stream ends again within the initial delay.
 - `Revision` is the ID of the last event the run has applied and committed.
 - `HasCaughtUp` tells whether the run has caught up at least once. Like `CaughtUp`, it stays `true` while the run reconnects later on.
 

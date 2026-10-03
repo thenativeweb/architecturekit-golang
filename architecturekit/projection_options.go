@@ -108,10 +108,13 @@ type Reconnect struct {
 
 	// Attempt counts the attempts in a row, starting at one. It grows together
 	// with Delay, and starts over with it once the projection has applied an
-	// event, or has followed the stream for longer than the delay had grown
-	// to, even if no event arrived.
+	// event, or has followed the stream for longer than the initial delay,
+	// even if no event arrived. So it stays at one while every stream ends
+	// only after that, as when a load balancer ends long-lived connections
+	// regularly.
 	//
 	// ProjectionStatus counts differently: its Attempts start over whenever the
-	// projection has caught up, even if the stream ends again right after.
+	// projection has caught up, even if the stream ends again within the
+	// initial delay.
 	Attempt int
 }

@@ -60,7 +60,7 @@ func (r *reconnects) reports() []architecturekit.Reconnect {
 
 // reconnectingStore waits with these delays. They are well above how long a
 // stream that the database ends right away stays live, since a stream that
-// stays live for longer than the delay starts it over.
+// stays live for longer than the initial delay starts the delay over.
 const (
 	testInitialDelay = 20 * time.Millisecond
 	testMaxDelay     = 4 * testInitialDelay
@@ -205,10 +205,10 @@ func TestStartProjectionWithReconnects(t *testing.T) {
 		assert.Equal(t, []time.Duration{testInitialDelay, 2 * testInitialDelay, testMaxDelay}, delays[:3])
 	})
 
-	t.Run("starts over with the initial delay after following the stream for longer than the delay, even if no event arrived", func(t *testing.T) {
+	t.Run("starts over with the initial delay after following the stream for longer than the initial delay, even if no event arrived", func(t *testing.T) {
 		// A load balancer that limits how long a connection may last cuts the
 		// stream of a quiet projection regularly, each time after it has been
-		// live for longer than the delay has grown to by then.
+		// live for longer than the initial delay.
 		database := &fakeDatabase{
 			endObserving: func(int) bool { return false },
 			cutAfter:     3 * testInitialDelay,
@@ -230,29 +230,61 @@ func TestStartProjectionWithReconnects(t *testing.T) {
 		}
 	})
 
-	t.Run("compares how long the projection followed the stream with the delay it has grown to", func(t *testing.T) {
-		// The first streams end right away, so the delay grows to eight times
-		// the initial one. The next stream is cut after it has been live for
-		// longer than the initial delay, and even than the delay the projection
-		// waited last, but not as long as the delay has grown to.
+	t.Run("starts over with the initial delay after following the stream for longer than the initial delay, although the delay has grown to the maximum", func(t *testing.T) {
+		// After an outage, the first streams end right away, so the delay grows
+		// to the maximum. Then a load balancer cuts every stream after it has
+		// been live for longer than the initial delay, but not as long as the
+		// delay has grown to, and no event arrives in between.
 		database := &fakeDatabase{
-			endObserving: func(connection int) bool { return connection <= 3 },
-			cutAfter:     5 * testInitialDelay,
+			endObserving: func(connection int) bool { return connection <= 4 },
+			cutAfter:     3 * testInitialDelay,
 		}
 		observed := &reconnects{}
 		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io",
-			architecturekit.WithReconnectDelays(testInitialDelay, time.Second),
+			architecturekit.WithReconnectDelays(testInitialDelay, 8*testInitialDelay),
 			architecturekit.WithReconnectObserver(observed.observe),
 		)
 
 		stop := runInBackground(t, store, &collector{})
 
-		waitFor(t, func() bool { return observed.count() >= 4 })
+		waitFor(t, func() bool { return observed.count() >= 6 })
 		require.NoError(t, stop(t))
 
-		report := observed.reports()[3]
-		assert.Equal(t, 8*testInitialDelay, report.Delay)
-		assert.Equal(t, 4, report.Attempt)
+		reports := observed.reports()
+		require.Equal(t, 8*testInitialDelay, reports[3].Delay, "want the delay to have grown to the maximum")
+		require.Equal(t, 4, reports[3].Attempt)
+
+		for i, report := range reports[4:6] {
+			assert.Equal(t, testInitialDelay, report.Delay, "delay %d", i+4)
+			assert.Equal(t, 1, report.Attempt, "attempt %d", i+4)
+		}
+	})
+
+	t.Run("doubles the delay if the stream ends after the projection has followed it for less than the initial delay", func(t *testing.T) {
+		// The stream stays live for a moment, as when a database fails shortly
+		// after the projection has caught up, but not as long as the initial
+		// delay.
+		database := &fakeDatabase{
+			endObserving: func(int) bool { return false },
+			cutAfter:     testInitialDelay,
+		}
+		observed := &reconnects{}
+		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io",
+			architecturekit.WithReconnectDelays(5*testInitialDelay, 10*testInitialDelay),
+			architecturekit.WithReconnectObserver(observed.observe),
+		)
+
+		stop := runInBackground(t, store, &collector{})
+
+		waitFor(t, func() bool { return observed.count() >= 3 })
+		require.NoError(t, stop(t))
+
+		_, delays := observed.recorded()
+		assert.Equal(t, []time.Duration{5 * testInitialDelay, 10 * testInitialDelay, 10 * testInitialDelay}, delays[:3])
+
+		for i, report := range observed.reports()[:3] {
+			assert.Equal(t, i+1, report.Attempt, "attempt %d", i)
+		}
 	})
 
 	t.Run("starts over with the initial delay after progress", func(t *testing.T) {
