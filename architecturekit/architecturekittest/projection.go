@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"slices"
 	"strconv"
 	"time"
 
@@ -116,17 +115,22 @@ func ProjectTransactional(t TestingT, projection architecturekit.Transactional, 
 	}
 }
 
-// ItemsOf reads a view, which is what a query would do before filtering.
+// ItemsOf reads a view, which is what a query would do before filtering. A
+// view that fails while it is read fails the test, also after some of the
+// items.
 func ItemsOf[TItem any](t TestingT, view architecturekit.View[TItem]) []TItem {
 	t.Helper()
 
-	items, err := view.All(context.Background())
-	if err != nil {
-		t.Fatalf("reading the view: %v", err)
-		return nil
+	var items []TItem
+	for item, err := range view.All(context.Background()) {
+		if err != nil {
+			t.Fatalf("reading the view failed after %d item(s): %v", len(items), err)
+			return nil
+		}
+		items = append(items, item)
 	}
 
-	return slices.Collect(items)
+	return items
 }
 
 // ExpectMode checks which mode the kit will drive this projection in.

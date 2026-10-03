@@ -47,13 +47,14 @@ import (
 // view clones every item before a change (see CloneWith). A time.Time counts
 // as a value.
 //
-// All operations take a context and return an error, as a view in a database
-// would need to. The view in memory reads nothing but the part of an event
-// from the context, and mostly returns no error, but so a view in a database
-// can offer functions of the same shape, which the handlers of a projection
-// call the same way. There is no interface for the functions that change a
-// view, though, so a projection takes its view by its type, and moving it to a
-// view in a database changes that type.
+// All operations take a context and report an error, as a view in a database
+// would need to: All and Lookup hand it out along with the items, and every
+// other function returns it. The view in memory reads nothing but the part of
+// an event from the context, and mostly reports no error, but so a view in a
+// database can offer functions of the same shape, which the handlers of a
+// projection call the same way. There is no interface for the functions that
+// change a view, though, so a projection takes its view by its type, and
+// moving it to a view in a database changes that type.
 //
 // Note that this is the stored shape, not the answer to a query. Use the query
 // package to filter, order and project it into whatever an answer needs.
@@ -260,12 +261,14 @@ func (v *InMemoryView[TKey, TItem]) Get(_ context.Context, key TKey) (TItem, boo
 }
 
 // All hands out every item, in the order in which they were inserted. The
-// items are copied under the lock, so a query can take its time without
-// blocking the projection that feeds the view.
+// items are copied under the lock when All is called, so a query can take its
+// time without blocking the projection that feeds the view, and the sequence
+// hands out the same items however often it is read. The view in memory never
+// fails while it hands them out, so the error is always nil.
 //
 // Like with Get, every item is a plain copy, which shares its slices, maps,
 // and pointees with the view and with every other reader, so never change it.
-func (v *InMemoryView[TKey, TItem]) All(context.Context) (iter.Seq[TItem], error) {
+func (v *InMemoryView[TKey, TItem]) All(context.Context) iter.Seq2[TItem, error] {
 	v.mutex.RLock()
 	defer v.mutex.RUnlock()
 
@@ -276,7 +279,19 @@ func (v *InMemoryView[TKey, TItem]) All(context.Context) (iter.Seq[TItem], error
 		}
 	}
 
-	return slices.Values(items), nil
+	return sequenceOf(items)
+}
+
+// sequenceOf hands out the items without an error, and stops as soon as the
+// caller does.
+func sequenceOf[TItem any](items []TItem) iter.Seq2[TItem, error] {
+	return func(yield func(TItem, error) bool) {
+		for _, item := range items {
+			if !yield(item, nil) {
+				return
+			}
+		}
+	}
 }
 
 // Insert adds an item for the given event, and reports what it did: Added if
@@ -712,9 +727,10 @@ func (i *InMemoryIndex[TKey, TItem, TValue]) keysOf(value TValue) []TKey {
 }
 
 // Lookup hands out the items with the given value, in the order of the view.
-// Like with All, they share their slices, maps, and pointees with the view, so
-// never change them.
-func (i *InMemoryIndex[TKey, TItem, TValue]) Lookup(_ context.Context, value TValue) (iter.Seq[TItem], error) {
+// Like with All, they are copied when Lookup is called, the error is always
+// nil, and they share their slices, maps, and pointees with the view, so never
+// change them.
+func (i *InMemoryIndex[TKey, TItem, TValue]) Lookup(_ context.Context, value TValue) iter.Seq2[TItem, error] {
 	i.view.mutex.RLock()
 	defer i.view.mutex.RUnlock()
 
@@ -724,7 +740,7 @@ func (i *InMemoryIndex[TKey, TItem, TValue]) Lookup(_ context.Context, value TVa
 		items = append(items, i.view.entries[key].item)
 	}
 
-	return slices.Values(items), nil
+	return sequenceOf(items)
 }
 
 // Update changes every item with the given value for which the event is
