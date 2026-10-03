@@ -266,6 +266,11 @@ type Handled[TCommand any] struct {
 // and that Respond logs with the value and the stack of the panic. Only
 // http.ErrAbortHandler panics on, since net/http expects it to abort the
 // response.
+//
+// A nil toCommand is a programming error, so Handle panics, and does so first,
+// on every request, also one whose caller is unknown. Like any other panic,
+// that comes back as an error, which names the mistake rather than a nil
+// pointer.
 func Handle[
 	TUser any,
 	TRequest any,
@@ -278,6 +283,10 @@ func Handle[
 	decider architecturekit.Decider[TCommand, TState],
 ) (handled Handled[TCommand], err error) {
 	defer recoverInto(&err)
+
+	if toCommand == nil {
+		panic("architecturekit/httpapi: Handle needs a function that turns the request into a command, not nil")
+	}
 
 	user, err := UserOf(r, api)
 	if err != nil {
