@@ -141,7 +141,7 @@ Every event type has a JSON schema, which the database checks every event of the
 - A `string` is a string, a `bool` a boolean, an integer an integer, and a floating-point number a number. The `string` option of a `json` tag turns such a field into a string.
 - A slice is an array, a `[]byte` a string, and an array an array of exactly its length. A map is an object whose values all have the same schema.
 - A pointer, a slice and a map may also be `null`, since `encoding/json` writes `null` for `nil`, unless a field of such a type is optional and therefore left out instead.
-- A `time.Time` is a string in the `date-time` format, a `json.Number` a number, unless the `string` option makes it a string, and a type with a `MarshalText` or an `AppendText` function a string. An interface allows any value, even if it declares a `Schema` function.
+- A `time.Time` is a string in the `date-time` format, a `json.Number` a number, unless the `string` option makes it a string, and a type with a `MarshalText` or an `AppendText` function a string. An interface allows any value, even if it declares a `Schema` function. So does a `json.RawMessage`, which is the same type as `jsontext.Value` of `encoding/json/v2`, since `encoding/json` writes the JSON it holds, or `null` if it is `nil`.
 
 For `BookBorrowed`, this yields the following schema:
 
@@ -176,9 +176,11 @@ type BookBorrowed struct {
 
 *Note that the other examples in this README keep `BorrowedUntil` a `string`. With the `Date` type, they would convert between the two, as in `Date(cmd.BorrowedUntil)`.*
 
-A type that encodes itself with a `MarshalJSON` function, or with `MarshalJSONTo` of `encoding/json/v2`, which `encoding/json` calls as well, needs such a `Schema` function, too, since the kit can not know what the function writes. So does a type that has its `MarshalText` or `AppendText` function on a pointer receiver only: `encoding/json` calls it only for a value it can take the address of, so whether such a value is written as a string depends on where it is. If the schema of an event can not be derived, for example because of such a type, a recursive type, or a channel, `Evolve` panics and names the field.
+Apart from `time.Time`, `json.Number` and `json.RawMessage`, a type that encodes itself with a `MarshalJSON` function, or with `MarshalJSONTo` of `encoding/json/v2`, which `encoding/json` calls as well, needs such a `Schema` function, too, since the kit can not know what the function writes. So does a type that has its `MarshalText` or `AppendText` function on a pointer receiver only: `encoding/json` calls it only for a value it can take the address of, so whether such a value is written as a string depends on where it is. If the schema of an event can not be derived, for example because of such a type, a recursive type, or a channel, `Evolve` panics and names the field.
 
 *Note that the derived schema never takes over the `Schema` function of an interface. `encoding/json` writes the value a field of the interface holds, or `null`, so there is no value whose `Schema` function could be asked, and the field is described as if the interface had none. To constrain such a field, or one whose interface encodes itself with `MarshalJSON`, give the event a `Schema` function of its own.*
+
+*Note that a field of type `json.RawMessage` is constrained the same way, with a `Schema` function of the event. A type declared from `json.RawMessage`, as in `type Details json.RawMessage`, does not help, since it does not take over the `MarshalJSON` function: `encoding/json` writes such a value as a `[]byte`, which is a string.*
 
 If an event needs a schema that its fields can not express, give the event itself a `Schema` function. It takes precedence over the derived schema. To start from the derived schema, call the `DeriveSchema` function, which derives the schema of a type without calling its own `Schema` function. For example, to require at least one of two optional fields:
 
@@ -1881,7 +1883,7 @@ Then run `trackedProjection` instead of `catalogProjection` (see [Running Projec
 
 `Tracking` accepts every view that implements the `RevisionSink` interface, which consists of the `Seen` function. `InMemoryView` implements it.
 
-*Note that calling `Tracking` without any view panics.*
+*Note that calling `Tracking` with `nil` as the projection, without any view, or with `nil` as one of the views panics.*
 
 The tracked projection keeps the mode and the batch size of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
 
@@ -2061,7 +2063,7 @@ To answer this way in a handler of your own, call the `Respond` function with th
 
 *Note that the function has the type `httpapi.ToCommand`. The request type only describes the body, so it may come from another package, for example one that the application shares with its clients.*
 
-*Note that calling `Route` with `nil` as the function panics.*
+*Note that calling `Route` with `nil` as the API or as the function, or with a decider whose `State` or `Decide` is `nil`, panics, rather than failing every request.*
 
 #### Adding to the Answer
 
@@ -2129,7 +2131,7 @@ mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Req
 
 *Note that `Handle` returns a panic as an error, which `StatusFor` maps to `500`, and which `Respond` logs with the value and the stack of the panic.*
 
-*Note that calling `Handle` with `nil` as the function panics, as with `Route`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
+*Note that calling `Handle` with `nil` as the API or as the function, or with a decider whose `State` or `Decide` is `nil`, panics, as with `Route`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
 #### Authorizing Commands
 
@@ -2234,7 +2236,7 @@ To answer this way in a handler of your own, call the `RespondResult` function w
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 
-*Note that calling `Query` with `nil` for either function panics.*
+*Note that calling `Query` with `nil` as the API, or for either function, panics, rather than failing every request.*
 
 #### Answering Queries in Your Own Format
 
@@ -2253,7 +2255,7 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
 
 *Note that `Ask` returns a panic as an error, as `Handle` does (see [Answering Commands in Your Own Format](#answering-commands-in-your-own-format)).*
 
-*Note that calling `Ask` with `nil` for either function panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
+*Note that calling `Ask` with `nil` as the API, or for either function, panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
 #### Reading Queries from the Body
 
