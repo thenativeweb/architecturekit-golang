@@ -118,6 +118,18 @@ type conformSpecial struct {
 	Anon     struct{ Inner string } `json:"anon"`
 }
 
+type conformRaw struct {
+	Raw            json.RawMessage            `json:"raw"`
+	Optional       json.RawMessage            `json:"optional,omitempty"`
+	Zero           json.RawMessage            `json:"zero,omitzero"`
+	Raws           []json.RawMessage          `json:"raws"`
+	OptionalRaws   []json.RawMessage          `json:"optionalRaws,omitempty"`
+	Fixed          [2]json.RawMessage         `json:"fixed"`
+	ByName         map[string]json.RawMessage `json:"byName"`
+	Pinned         *json.RawMessage           `json:"pinned"`
+	OptionalPinned *json.RawMessage           `json:"optionalPinned,omitempty"`
+}
+
 func TestDerivedSchemasAcceptWhatEncodingJSONWrites(t *testing.T) {
 	// The other side of DeriveSchema: whatever encoding/json writes for a value,
 	// the database accepts under the schema derived for its type. The values
@@ -128,6 +140,7 @@ func TestDerivedSchemasAcceptWhatEncodingJSONWrites(t *testing.T) {
 	t.Run("options", conforms[conformOptions])
 	t.Run("embedding", conforms[conformEmbedding])
 	t.Run("special types", conforms[conformSpecial])
+	t.Run("raw messages", conforms[conformRaw])
 }
 
 func TestDerivedSchemasRefuseWhatEncodingJSONDoesNotWrite(t *testing.T) {
@@ -205,8 +218,9 @@ func registerDerived[T any](t *testing.T, client *eventsourcingdb.Client, name s
 }
 
 var (
-	timeKind   = reflect.TypeFor[time.Time]()
-	numberKind = reflect.TypeFor[json.Number]()
+	timeKind       = reflect.TypeFor[time.Time]()
+	numberKind     = reflect.TypeFor[json.Number]()
+	rawMessageKind = reflect.TypeFor[json.RawMessage]()
 )
 
 // randomize sets a value to something random that encoding/json can write,
@@ -221,6 +235,16 @@ func randomize(random *rand.Rand, value reflect.Value, depth int) {
 		return
 	case numberKind:
 		value.SetString(randomNumberLiteral(random))
+		return
+	case rawMessageKind:
+		// A raw message is nil, or holds JSON of any kind, null included, but
+		// never nothing, which encoding/json can not write.
+		if random.IntN(4) == 0 {
+			value.SetZero()
+			return
+		}
+		raw, _ := json.Marshal(randomJSON(random, depth))
+		value.SetBytes(raw)
 		return
 	}
 

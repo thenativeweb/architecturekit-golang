@@ -1213,6 +1213,178 @@ func TestInterfacesWithSchemaFunctions(t *testing.T) {
 	})
 }
 
+// remarked has fields of type json.RawMessage, which hold JSON that
+// encoding/json writes as it is.
+type remarked struct {
+	Note  json.RawMessage   `json:"note"`
+	Extra json.RawMessage   `json:"extra,omitempty"`
+	Notes []json.RawMessage `json:"notes"`
+}
+
+func (remarked) EventType() string { return "io.thenativeweb.test.remarked" }
+
+func remarkedState() *architecturekit.State[[]json.RawMessage] {
+	return architecturekit.NewState([]json.RawMessage{}).
+		Evolve(func(notes []json.RawMessage, event remarked) []json.RawMessage { return append(notes, event.Note) })
+}
+
+// details is declared from json.RawMessage, but does not take over its
+// MarshalJSON function, so encoding/json writes it as a []byte.
+type details json.RawMessage
+
+// rawEmbedded has the MarshalJSON function of the json.RawMessage it embeds,
+// which writes the embedded value alone.
+type rawEmbedded struct {
+	json.RawMessage
+	Note string `json:"note"`
+}
+
+// signature is a []byte like json.RawMessage, but its MarshalJSON function
+// writes something other than the bytes it holds.
+type signature []byte
+
+func (signature) MarshalJSON() ([]byte, error) { return []byte(`"signed"`), nil }
+
+func TestRawMessages(t *testing.T) {
+	t.Run("describes a field of type json.RawMessage as any value, wherever it appears", func(t *testing.T) {
+		assert.JSONEq(t, `{"type": "object", "additionalProperties": false,
+			"properties": {
+				"raw": {},
+				"optional": {},
+				"zero": {},
+				"quoted": {},
+				"raws": {"anyOf": [{"type": "array", "items": {}}, {"type": "null"}]},
+				"optionalRaws": {"type": "array", "items": {}},
+				"fixed": {"type": "array", "items": {}, "minItems": 2, "maxItems": 2},
+				"byName": {"anyOf": [{"type": "object", "additionalProperties": {}}, {"type": "null"}]},
+				"pinned": {"anyOf": [{}, {"type": "null"}]},
+				"optionalPinned": {}},
+			"required": ["raw", "quoted", "raws", "fixed", "byName", "pinned"]}`,
+			schemaJSON[struct {
+				Raw      json.RawMessage `json:"raw"`
+				Optional json.RawMessage `json:"optional,omitempty"`
+				Zero     json.RawMessage `json:"zero,omitzero"`
+				//lint:ignore SA5008 the test is about encoding/json ignoring the string option here
+				Quoted         json.RawMessage            `json:"quoted,string"`
+				Raws           []json.RawMessage          `json:"raws"`
+				OptionalRaws   []json.RawMessage          `json:"optionalRaws,omitempty"`
+				Fixed          [2]json.RawMessage         `json:"fixed"`
+				ByName         map[string]json.RawMessage `json:"byName"`
+				Pinned         *json.RawMessage           `json:"pinned"`
+				OptionalPinned *json.RawMessage           `json:"optionalPinned,omitempty"`
+			}](t))
+	})
+
+	t.Run("describes it exactly as a field of an interface type", func(t *testing.T) {
+		assert.JSONEq(t,
+			schemaJSON[struct {
+				Raw            any            `json:"raw"`
+				Optional       any            `json:"optional,omitempty"`
+				Raws           []any          `json:"raws"`
+				ByName         map[string]any `json:"byName"`
+				Pinned         *any           `json:"pinned"`
+				OptionalPinned *any           `json:"optionalPinned,omitempty"`
+			}](t),
+			schemaJSON[struct {
+				Raw            json.RawMessage            `json:"raw"`
+				Optional       json.RawMessage            `json:"optional,omitempty"`
+				Raws           []json.RawMessage          `json:"raws"`
+				ByName         map[string]json.RawMessage `json:"byName"`
+				Pinned         *json.RawMessage           `json:"pinned"`
+				OptionalPinned *json.RawMessage           `json:"optionalPinned,omitempty"`
+			}](t))
+	})
+
+	t.Run("describes jsontext.Value of encoding/json/v2 the same way, since it is the same type", func(t *testing.T) {
+		assert.Equal(t, reflect.TypeFor[json.RawMessage](), reflect.TypeFor[jsontext.Value]())
+		assert.JSONEq(t, `{"type": "object", "additionalProperties": false,
+			"properties": {"value": {}}, "required": ["value"]}`,
+			schemaJSON[struct {
+				Value jsontext.Value `json:"value"`
+			}](t))
+	})
+
+	t.Run("describes json.RawMessage itself as any value", func(t *testing.T) {
+		assert.JSONEq(t, `{}`, schemaJSON[json.RawMessage](t))
+	})
+
+	t.Run("keeps describing a type declared from json.RawMessage as a []byte, since it has no MarshalJSON function", func(t *testing.T) {
+		encoded, err := json.Marshal(details(`{"page": 42}`))
+		require.NoError(t, err)
+
+		var text string
+		require.NoError(t, json.Unmarshal(encoded, &text), "encoding/json must write it as a string")
+
+		assert.JSONEq(t, `{"type": "object", "additionalProperties": false,
+			"properties": {"details": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+			"required": ["details"]}`,
+			schemaJSON[struct {
+				Details details `json:"details"`
+			}](t))
+	})
+
+	t.Run("keeps refusing a struct that embeds json.RawMessage, since its MarshalJSON function writes the struct", func(t *testing.T) {
+		message := panicMessage(t, func() { architecturekit.DeriveSchema[struct{ Embedded rawEmbedded }]() })
+		assert.Contains(t, message, "architecturekit_test.rawEmbedded encodes itself with MarshalJSON or MarshalJSONTo")
+	})
+
+	t.Run("keeps refusing another []byte that encodes itself with MarshalJSON", func(t *testing.T) {
+		message := panicMessage(t, func() { architecturekit.DeriveSchema[struct{ Signature signature }]() })
+		assert.Contains(t, message, "architecturekit_test.signature encodes itself with MarshalJSON or MarshalJSONTo")
+	})
+
+	t.Run("derives the schema of an event with such a field in Evolve and in Ignore", func(t *testing.T) {
+		want := `{"type": "object", "additionalProperties": false,
+			"properties": {"note": {}, "extra": {}, "notes": {"anyOf": [{"type": "array", "items": {}}, {"type": "null"}]}},
+			"required": ["note", "notes"]}`
+
+		for name, state := range map[string]func() *architecturekit.State[int]{
+			"Evolve": func() *architecturekit.State[int] {
+				return architecturekit.NewState(0).Evolve(func(count int, _ remarked) int { return count + 1 })
+			},
+			"Ignore": func() *architecturekit.State[int] {
+				return architecturekit.NewState(0).Ignore[remarked]()
+			},
+		} {
+			schemas := state().Schemas()
+			require.Len(t, schemas, 1, name)
+
+			encoded, err := json.Marshal(schemas[0].Schema)
+			require.NoError(t, err)
+			assert.JSONEq(t, want, string(encoded), name)
+		}
+	})
+
+	t.Run("is accepted and checked by the database", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+
+		require.NoError(t, architecturekit.RegisterSchemas(t.Context(), store, remarkedState().Schemas()))
+
+		// encoding/json writes a raw object and a raw number as they are, and a
+		// nil raw message as null.
+		writeRaw(t, subject,
+			remarked{Note: json.RawMessage(`{"page": 42, "text": "dog-eared"}`), Notes: []json.RawMessage{json.RawMessage(`1.5e3`), nil}},
+			remarked{Note: json.RawMessage(`42`), Extra: json.RawMessage(`null`)},
+			remarked{})
+
+		notes, err := architecturekit.Load(t.Context(), store, remarkedState(), subject)
+		require.NoError(t, err)
+		require.Len(t, notes, 3)
+		assert.JSONEq(t, `{"page": 42, "text": "dog-eared"}`, string(notes[0]))
+		assert.JSONEq(t, `42`, string(notes[1]))
+		assert.JSONEq(t, `null`, string(notes[2]))
+
+		_, err = rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+			Source:  "https://thenativeweb.io",
+			Subject: subject,
+			Type:    remarked{}.EventType(),
+			Data:    map[string]any{"note": 42, "notes": nil, "unknown": true},
+		}}, nil)
+		assert.ErrorContains(t, err, "schema", "the database must still check the fields of the event")
+	})
+}
+
 // The following types are exported, so that the test that compares with
 // encoding/json can fill in their fields through reflection.
 
