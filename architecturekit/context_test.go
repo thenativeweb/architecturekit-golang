@@ -154,7 +154,7 @@ func TestTheEndOfTheContext(t *testing.T) {
 		eventsRead := 0
 		var readErr error
 
-		for _, err := range architecturekit.Read(ctx, store, subject, eventsourcingdb.ReadEventsOptions{}) {
+		for _, err := range architecturekit.Read(ctx, store, architecturekit.ExactSubject(subject)) {
 			if err != nil {
 				readErr = err
 				break
