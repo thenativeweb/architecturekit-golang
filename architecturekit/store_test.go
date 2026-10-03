@@ -253,6 +253,58 @@ func TestExecute(t *testing.T) {
 		assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
 	})
 
+	t.Run("refuses a nil event and writes nothing", func(t *testing.T) {
+		for _, test := range []struct {
+			name   string
+			events []architecturekit.Event
+			index  int
+		}{
+			{"as the only event", []architecturekit.Event{nil}, 0},
+			{"before another event", []architecturekit.Event{nil, incremented{By: 1}}, 0},
+			{"after another event", []architecturekit.Event{incremented{By: 1}, nil}, 1},
+			{"as the first of several", []architecturekit.Event{incremented{By: 1}, nil, incremented{By: 2}, nil}, 1},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				store := requireStore(t)
+				subject := subjectFor(t)
+
+				_, err := architecturekit.Execute(context.Background(), store,
+					emittingDecider(counterState(), test.events...), increment{subject: subject})
+
+				require.ErrorIs(t, err, architecturekit.ErrPermanent, "a nil event is permanent")
+				assert.EqualError(t, err, fmt.Sprintf("%v: refusing to write to %q, since event %d that the decider "+
+					"returned is nil", architecturekit.ErrPermanent, subject, test.index),
+					"error should name the subject and the index of the event")
+				assert.Empty(t, eventTypesIn(t, subject), "nothing may have been written")
+			})
+		}
+	})
+
+	t.Run("refuses a nil event with the same error as the test fixture", func(t *testing.T) {
+		decider := emittingDecider(counterState(), incremented{By: 1}, nil)
+		cmd := increment{subject: subjectFor(t)}
+
+		_, err := architecturekit.Execute(context.Background(), requireStore(t), decider, cmd)
+		require.ErrorIs(t, err, architecturekit.ErrPermanent, "Execute has to refuse the event")
+		require.ErrorContains(t, err, "event 1 that the decider returned is nil", "Execute has to refuse the nil event")
+
+		// The fixture checks for nil events itself, as Execute does, so both
+		// have to word the refusal alike.
+		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+	})
+
+	t.Run("checks for nil events before the rules and the encoding like the test fixture", func(t *testing.T) {
+		decider := emittingDecider(encodingState(), measured{Value: math.NaN()}, labelled{Label: "no rule"}, nil)
+		cmd := increment{subject: subjectFor(t)}
+
+		_, err := architecturekit.Execute(context.Background(), requireStore(t), decider, cmd)
+		require.ErrorIs(t, err, architecturekit.ErrPermanent, "Execute has to refuse the events")
+		require.ErrorContains(t, err, "event 2 that the decider returned is nil",
+			"Execute has to check all events for nil first")
+
+		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+	})
+
 	t.Run("writes an event its state ignores", func(t *testing.T) {
 		store := requireStore(t)
 		subject := subjectFor(t)

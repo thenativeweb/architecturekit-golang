@@ -775,6 +775,57 @@ func TestEventThatCanNotBeEncoded(t *testing.T) {
 	})
 }
 
+// nilRefusal is the error with which Execute refuses an event that is nil.
+func nilRefusal(index int, subject string) string {
+	return fmt.Sprintf("%v: refusing to write to %q, since event %d that the decider returned is nil",
+		architecturekit.ErrPermanent, subject, index)
+}
+
+func TestNilEvent(t *testing.T) {
+	withNil := emit{events: []architecturekit.Event{opened{Owner: "golo"}, nil}}
+	refusal := nilRefusal(1, "/account/1")
+
+	t.Run("is a permanent failure that names the subject and the index", func(t *testing.T) {
+		architecturekittest.Given(t, emitDecider()).
+			When(emit{subject: "/account/2", events: []architecturekit.Event{nil}}).
+			ThenFailed(architecturekit.ErrPermanent).
+			ThenRejected(nilRefusal(0, "/account/2"))
+	})
+
+	t.Run("fails every assertion that expects events or nothing, naming the cause", func(t *testing.T) {
+		always := func(architecturekit.Event) bool { return true }
+		never := func(architecturekit.Event) bool { return false }
+
+		for label, check := range map[string]func(o *architecturekittest.Outcome[emit, account]){
+			"ThenEvents":     func(o *architecturekittest.Outcome[emit, account]) { o.ThenEvents(opened{Owner: "golo"}) },
+			"ThenNothing":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNothing() },
+			"ThenSomeEvent":  func(o *architecturekittest.Outcome[emit, account]) { o.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(o *architecturekittest.Outcome[emit, account]) { o.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNoEvent(never) },
+		} {
+			t.Run(label, func(t *testing.T) {
+				recorder := &spy{}
+				check(architecturekittest.Given(recorder, emitDecider()).When(withNil))
+				recorder.expectFailure(t, "got error: "+refusal)
+			})
+		}
+	})
+
+	t.Run("names the first event that is nil", func(t *testing.T) {
+		architecturekittest.Given(t, emitDecider()).
+			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, nil, opened{Owner: "jane"}, nil}}).
+			ThenRejected(refusal)
+	})
+
+	t.Run("comes before an event without a rule and one that can not be encoded, as with Execute", func(t *testing.T) {
+		// The event that is nil comes last, so it is reported only because all
+		// events are checked for nil first.
+		architecturekittest.Given(t, measuringDecider()).
+			When(emit{events: []architecturekit.Event{measured{Value: math.NaN()}, unheardOf{}, nil}}).
+			ThenRejected(nilRefusal(2, "/account/1"))
+	})
+}
+
 func TestWhenChecksPreconditions(t *testing.T) {
 	invalid := []struct {
 		name          string

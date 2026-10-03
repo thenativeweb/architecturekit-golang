@@ -141,7 +141,7 @@ Every event type has a JSON schema, which the database checks every event of the
 - A `string` is a string, a `bool` a boolean, an integer an integer, and a floating-point number a number. The `string` option of a `json` tag turns such a field into a string.
 - A slice is an array, a `[]byte` a string, and an array an array of exactly its length. A map is an object whose values all have the same schema.
 - A pointer, a slice and a map may also be `null`, since `encoding/json` writes `null` for `nil`, unless a field of such a type is optional and therefore left out instead.
-- A `time.Time` is a string in the `date-time` format, a `json.Number` a number, unless the `string` option makes it a string, and a type with a `MarshalText` or an `AppendText` function a string. An interface allows any value, even if it declares a `Schema` function.
+- A `time.Time` is a string in the `date-time` format, a `json.Number` a number, unless the `string` option makes it a string, and a type with a `MarshalText` or an `AppendText` function a string. An interface allows any value, even if it declares a `Schema` function. So does a `json.RawMessage`, which is the same type as `jsontext.Value` of `encoding/json/v2`, since `encoding/json` writes the JSON it holds, or `null` if it is `nil`.
 
 For `BookBorrowed`, this yields the following schema:
 
@@ -176,9 +176,11 @@ type BookBorrowed struct {
 
 *Note that the other examples in this README keep `BorrowedUntil` a `string`. With the `Date` type, they would convert between the two, as in `Date(cmd.BorrowedUntil)`.*
 
-A type that encodes itself with a `MarshalJSON` function, or with `MarshalJSONTo` of `encoding/json/v2`, which `encoding/json` calls as well, needs such a `Schema` function, too, since the kit can not know what the function writes. So does a type that has its `MarshalText` or `AppendText` function on a pointer receiver only: `encoding/json` calls it only for a value it can take the address of, so whether such a value is written as a string depends on where it is. If the schema of an event can not be derived, for example because of such a type, a recursive type, or a channel, `Evolve` panics and names the field.
+Apart from `time.Time`, `json.Number` and `json.RawMessage`, a type that encodes itself with a `MarshalJSON` function, or with `MarshalJSONTo` of `encoding/json/v2`, which `encoding/json` calls as well, needs such a `Schema` function, too, since the kit can not know what the function writes. So does a type that has its `MarshalText` or `AppendText` function on a pointer receiver only: `encoding/json` calls it only for a value it can take the address of, so whether such a value is written as a string depends on where it is. If the schema of an event can not be derived, for example because of such a type, a recursive type, or a channel, `Evolve` panics and names the field.
 
 *Note that the derived schema never takes over the `Schema` function of an interface. `encoding/json` writes the value a field of the interface holds, or `null`, so there is no value whose `Schema` function could be asked, and the field is described as if the interface had none. To constrain such a field, or one whose interface encodes itself with `MarshalJSON`, give the event a `Schema` function of its own.*
+
+*Note that a field of type `json.RawMessage` is constrained the same way, with a `Schema` function of the event. A type declared from `json.RawMessage`, as in `type Details json.RawMessage`, does not help, since it does not take over the `MarshalJSON` function: `encoding/json` writes such a value as a `[]byte`, which is a string.*
 
 If an event needs a schema that its fields can not express, give the event itself a `Schema` function. It takes precedence over the derived schema. To start from the derived schema, call the `DeriveSchema` function, which derives the schema of a type without calling its own `Schema` function. For example, to require at least one of two optional fields:
 
@@ -372,9 +374,11 @@ if err != nil {
 
 `Execute` reads the events of the command's subject, evolves the state from them, calls the decider, and writes the events it returns. The function returns the written events, including the fields added by the server. If the decider returns no events, nothing is written, and the function returns `nil`.
 
+If one of the events the decider returns is `nil`, `Execute` writes none of them, and fails with an error of the category `ErrPermanent` that names the index of the event, since an event that is `nil` has neither a type nor data. The test fixture reports such an event the same way (see [Testing Deciders](#testing-deciders)).
+
 Every event the decider returns needs a rule on the state of the decider, an `Evolve` function or `Ignore`. `Execute` writes the events to the subject that the same state reads for the next command, and the database keeps every event, so an event without a rule would leave a subject that the state can not read any more. If the state has no rule for one of the events, `Execute` writes none of them, and fails with an error of the category `ErrPermanent` that names the event type (see [Handling Errors](#handling-errors)). The test fixture reports such an event the same way (see [Testing Deciders](#testing-deciders)).
 
-Nor does `Execute` write any of the events if the data of one of them can not be encoded as JSON, for example because it holds a float `NaN`. It then fails with an error of the category `ErrPermanent` that names the event type and the reason, since trying again would fail the same way. `Execute` checks the rules of all events before it encodes any of them. The test fixture checks both in the same order, and reports such an event the same way (see [Testing Deciders](#testing-deciders)).
+Nor does `Execute` write any of the events if the data of one of them can not be encoded as JSON, for example because it holds a float `NaN`. It then fails with an error of the category `ErrPermanent` that names the event type and the reason, since trying again would fail the same way. `Execute` checks all events for `nil` first, then all of them for a rule, and encodes them last. The test fixture checks in the same order, and reports such an event the same way (see [Testing Deciders](#testing-deciders)).
 
 The written events come as they are stored, with their data as JSON. To read the data of one of them, call the `Decode` function with the type of the event. It returns an `Envelope`, the same a projection gets (see [Defining Projections](#defining-projections)), with the data in its `Data` field:
 
@@ -709,7 +713,7 @@ Every failure of architecturekit itself in reading and writing belongs to one of
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
 - `ErrTransient` means that trying again may help, for example if the database can not be reached.
-- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if the data of an event can not be encoded as JSON, such as a float `NaN`, if an event does not match the schema of its type, if a subject contains an event type the state has no rule for, or if a decider returns one.
+- `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if the data of an event can not be encoded as JSON, such as a float `NaN`, if an event does not match the schema of its type, if a subject contains an event type the state has no rule for, if a decider returns one, or if it returns an event that is `nil`.
 
 A failure of the database is sorted by what its answer means, the same way for reading and for writing:
 
@@ -737,7 +741,7 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 *Note that `ErrConflict` is a special case of `ErrTransient`, so check for it first.*
 
-An error that your own code returns, for example from a decider or a projection, passes through unchanged, so it belongs to a category only if you wrap it with one, as `NewDomainError` does. The `httpapi` and `query` packages have errors of their own, which `StatusFor` maps to status codes (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes) and [Getting a Single Item](#getting-a-single-item)).
+An error that your own code returns, for example from a decider or a projection, passes through unchanged, so it belongs to a category only if you wrap it with one, as `NewDomainError` does. A panic in a projection, on the other hand, comes back as an error of the category `ErrPermanent` (see [Running Projections](#running-projections)). The `httpapi` and `query` packages have errors of their own, which `StatusFor` maps to status codes (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes) and [Getting a Single Item](#getting-a-single-item)).
 
 If the context ends, reading and writing stop, and the error is the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides.
 
@@ -1103,7 +1107,7 @@ If an upcaster splits a stored event into several events, they all carry the ID 
 To add an item, call the `Insert` function with a context, the ID of the event, and the item:
 
 ```go
-err := catalog.Insert(ctx, event.ID, BookItem{
+outcome, err := catalog.Insert(ctx, event.ID, BookItem{
   ID:     "42",
   Title:  "2001 – A Space Odyssey",
   Author: "Arthur C. Clarke",
@@ -1113,14 +1117,18 @@ if err != nil {
 }
 ```
 
+`Insert` returns an `Outcome`, which tells what it did: `architecturekit.Added` if it added the item, and `architecturekit.AlreadyApplied` if an item with the same key has seen the event, or a newer one, so the event was skipped. The latter is not an error, since it happens when events are applied a second time. So a projection that does more than store the item, for example one that also counts the books, does so only for `architecturekit.Added` (see [Changing and Removing Items](#changing-and-removing-items)).
+
 If the key of the item is already taken, and the event is newer than the item with that key, `Insert` fails with an error of the category `ErrPermanent`, since two items with the same key point to a mistake in the events or in the key. To add an item or change the existing one, call the `Upsert` function instead, with the key and a function that changes the item. It starts from the existing item, or from an empty one if there is none, so it has to set the fields that make up the key:
 
 ```go
-err := catalog.Upsert(ctx, "42", event.ID, func(item *BookItem) {
+outcome, err := catalog.Upsert(ctx, "42", event.ID, func(item *BookItem) {
   item.ID = "42"
   item.IsBorrowed = true
 })
 ```
+
+`Upsert` returns an `Outcome` as well: `architecturekit.Added` if it added the item, `architecturekit.Applied` if it changed the existing one, and `architecturekit.AlreadyApplied` if the existing item has seen the event, or a newer one, so the event was skipped.
 
 *Note that an item whose key, after the change, differs from the given one fails with an error of the category `ErrPermanent`, which also catches a function that forgets to set the key.*
 
@@ -1152,7 +1160,7 @@ for item := range items {
 
 #### Changing and Removing Items
 
-To change the item with a given key, call the `Update` function with a function that changes it. To remove it, call the `Delete` function. Both return an `Outcome`, which tells what they did:
+To change the item with a given key, call the `Update` function with a function that changes it. To remove it, call the `Delete` function. Like `Insert` and `Upsert`, both return an `Outcome`, which tells what they did:
 
 ```go
 updated, err := catalog.Update(ctx, "42", event.ID, func(item *BookItem) {
@@ -1164,11 +1172,12 @@ deleted, err := catalog.Delete(ctx, "42", event.ID)
 
 | Outcome | Meaning |
 |---|---|
-| `architecturekit.Applied` | The item was changed or removed. |
-| `architecturekit.Missing` | There is no item with the key. |
+| `architecturekit.Added` | A new item was added. Only `Insert` and `Upsert` report it. |
+| `architecturekit.Applied` | An existing item was changed or removed. |
+| `architecturekit.Missing` | There is no item with the key. Only `Update` and `Delete` report it. |
 | `architecturekit.AlreadyApplied` | The item has seen the event, or a newer one, so nothing was changed. |
 
-Neither of the latter is an error, since both happen when events are applied a second time, as a later event may have removed the item already. If an event about an item that does not exist means that the view and the database disagree, say so in the projection:
+Neither `Missing` nor `AlreadyApplied` is an error, since both happen when events are applied a second time, as a later event may have removed the item already. If an event about an item that does not exist means that the view and the database disagree, say so in the projection:
 
 ```go
 outcome, err := catalog.Update(ctx, bookID, event.ID, func(item *BookItem) {
@@ -1293,11 +1302,12 @@ A projection turns events into a view. Call the `NewProjection` function, and ca
 func newCatalogProjection(catalog *architecturekit.InMemoryView[string, BookItem]) *architecturekit.TypedProjection {
   return architecturekit.NewProjection().
     On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
-      return catalog.Insert(ctx, event.ID, BookItem{
+      _, err := catalog.Insert(ctx, event.ID, BookItem{
         ID:     bookIDOf(event.Subject),
         Title:  event.Data.Title,
         Author: event.Data.Author,
       })
+      return err
     }).
     On(func(ctx context.Context, event architecturekit.Envelope[BookBorrowed]) error {
       _, err := catalog.Update(ctx, bookIDOf(event.Subject), event.ID, func(item *BookItem) {
@@ -1378,7 +1388,7 @@ logProjection := architecturekit.ProjectionFunc(func(ctx context.Context, event 
 
 To run a projection, call the `StartProjection` function with a context, the store, the subjects to read, and the projection. Say which subjects with the `SubjectTree` function, which stands for the given subject together with every subject below it, or with the `ExactSubject` function, which stands for the given subject alone. A projection usually reads a tree, such as every book below `/books`. There is no default, so that every projection says which one it means, since the client SDK reads a single subject unless told otherwise.
 
-*Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection` and the other functions that run a projection panic.*
+*Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection` and the other functions that run a projection panic, as does a `nil` projection.*
 
 The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that:
 
@@ -1406,6 +1416,8 @@ The options after the projection are optional. `Named` gives the projection a na
 *Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic.*
 
 `CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did, since canceling the context is how a projection is stopped. If `Apply` returns an error that trying again will not fix, the run ends, and `Err` returns it.
+
+If the projection panics, for example because `Apply` writes into a map that was never made, the run ends as well, rather than the whole process. `Err` then returns an error of the category `ErrPermanent`, since a panic is a mistake in the code that trying again will not fix. Its message holds the value and the stack of the panic, so log it to find out where the panic happened. This holds for every function of the projection that the run calls, and for the observer of reconnects (see below). Once the run has ended, `Liveness` answers `503`, so that the orchestrator restarts the application (see [Checking Health over HTTP](#checking-health-over-http)).
 
 *Note that canceling the context stops the projection, so `defer cancel()` stops it as soon as the surrounding function returns. That is too early for a function that only sets up the application (see [Putting It Together](#putting-it-together)).*
 
@@ -1462,7 +1474,7 @@ if status.Phase == architecturekit.PhaseReconnecting && time.Since(status.Since)
 }
 ```
 
-To only apply the events that are already stored, for example for a batch job or in a test, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied. If the context ends before that, it returns the error of the context, so that a read model that is only partly built does not look complete:
+To only apply the events that are already stored, for example for a batch job or in a test, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied. If the context ends before that, it returns the error of the context, so that a read model that is only partly built does not look complete. If the projection panics, it returns the same error a run ends with, rather than panicking:
 
 ```go
 err := architecturekit.CatchUpProjection(context.TODO(), store, architecturekit.SubjectTree("/books"), catalogProjection)
@@ -1596,7 +1608,7 @@ func (tx *bookTableTx) Rollback(ctx context.Context) error {
 }
 ```
 
-*Note that `Rollback` is not called after `Commit` fails, so `Commit` has to roll back itself if it can not finish, as above.*
+*Note that `Rollback` is not called after `Commit` fails, or panics, so `Commit` has to roll back itself if it can not finish, as above.*
 
 To run a transactional projection, call the `StartTransactionalProjection` or the `CatchUpTransactionalProjection` function instead of `StartProjection` or `CatchUpProjection`. They take the same arguments:
 
@@ -1608,7 +1620,7 @@ run := architecturekit.StartTransactionalProjection(ctx, store, architecturekit.
 
 *Note that `StartProjection`, `CatchUpProjection`, and `Tracking` panic for a projection that implements `Transactional` in addition to `Apply`, since calling `Apply` would bypass the transactions.*
 
-The place where a view keeps its data can fail as well, and such a failure counts like an error of `Apply`, whether it comes from `Checkpoint`, `SaveCheckpoint`, `Begin`, `Commit`, or the `Apply` function of a `Tx`. An error that does not belong to `ErrTransient` ends the run, so `Liveness` answers `503`, and the orchestrator restarts the application (see [Checking Health over HTTP](#checking-health-over-http)). That fits a mistake, such as a statement that the database refuses, but not a failure that may pass, such as a lost connection or a deadlock. Report such a failure as an error of the category `ErrTransient`, as `Begin` does above. The run then waits and tries again from where it stopped, with the same growing delay as when reading from EventSourcingDB fails (see [Running Projections](#running-projections)).
+The place where a view keeps its data can fail as well, and such a failure counts like an error of `Apply`, whether it comes from `Checkpoint`, `SaveCheckpoint`, `Begin`, `Commit`, or the `Apply` function of a `Tx`. An error that does not belong to `ErrTransient` ends the run, so `Liveness` answers `503`, and the orchestrator restarts the application (see [Checking Health over HTTP](#checking-health-over-http)). That fits a mistake, such as a statement that the database refuses, but not a failure that may pass, such as a lost connection or a deadlock. Report such a failure as an error of the category `ErrTransient`, as `Begin` does above. The run then waits and tries again from where it stopped, with the same growing delay as when reading from EventSourcingDB fails (see [Running Projections](#running-projections)). A panic in any of these functions, on the other hand, always ends the run, since it is a mistake in the code, even if it panics with an error of the category `ErrTransient`. A panic in the `Apply` function of a `Tx` rolls the transaction back first, as an error does.
 
 *Note that which failures may pass depends on the database and its driver, so mark only those. A failure that is marked as transient but never passes keeps the run trying forever, while `Liveness` keeps answering `200`.*
 
@@ -1875,7 +1887,7 @@ Then run `trackedProjection` instead of `catalogProjection` (see [Running Projec
 
 `Tracking` accepts every view that implements the `RevisionSink` interface, which consists of the `Seen` function. `InMemoryView` implements it.
 
-*Note that calling `Tracking` without any view panics.*
+*Note that calling `Tracking` with `nil` as the projection, without any view, or with `nil` as one of the views panics.*
 
 The tracked projection keeps the mode and the batch size of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
 
@@ -2055,7 +2067,7 @@ To answer this way in a handler of your own, call the `Respond` function with th
 
 *Note that the function has the type `httpapi.ToCommand`. The request type only describes the body, so it may come from another package, for example one that the application shares with its clients.*
 
-*Note that calling `Route` with `nil` as the function panics.*
+*Note that calling `Route` with `nil` as the API or as the function, or with a decider whose `State` or `Decide` is `nil`, panics, rather than failing every request.*
 
 #### Adding to the Answer
 
@@ -2123,7 +2135,7 @@ mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Req
 
 *Note that `Handle` returns a panic as an error, which `StatusFor` maps to `500`, and which `Respond` logs with the value and the stack of the panic.*
 
-*Note that calling `Handle` with `nil` as the function panics, as with `Route`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
+*Note that calling `Handle` with `nil` as the API or as the function, or with a decider whose `State` or `Decide` is `nil`, panics, as with `Route`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
 #### Authorizing Commands
 
@@ -2228,7 +2240,7 @@ To answer this way in a handler of your own, call the `RespondResult` function w
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 
-*Note that calling `Query` with `nil` for either function panics.*
+*Note that calling `Query` with `nil` as the API, or for either function, panics, rather than failing every request.*
 
 #### Answering Queries in Your Own Format
 
@@ -2247,7 +2259,7 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
 
 *Note that `Ask` returns a panic as an error, as `Handle` does (see [Answering Commands in Your Own Format](#answering-commands-in-your-own-format)).*
 
-*Note that calling `Ask` with `nil` for either function panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
+*Note that calling `Ask` with `nil` as the API, or for either function, panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
 #### Reading Queries from the Body
 
@@ -2623,7 +2635,7 @@ func TestBorrowBook(t *testing.T) {
 
 `Given` returns a `*Fixture`, and `When` returns an `*Outcome`. The functions that check the outcome return the outcome again, so they can be chained.
 
-Like `Execute`, `When` refuses an event that the state of the decider has no rule for, and, once every event has a rule, an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
+Like `Execute`, `When` refuses an event that is `nil`, an event that the state of the decider has no rule for, and an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). As `Execute` does, it checks all events for `nil` first, then all of them for a rule, and encodes them last. It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
 
 *Note that `Given` accepts any value that provides the `Helper` and `Fatalf` functions, as described by the `TestingT` interface.*
 

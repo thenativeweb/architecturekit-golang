@@ -31,10 +31,12 @@ func bookView() *architecturekit.InMemoryView[string, book] {
 	)
 }
 
-func mustInsert(t *testing.T, view *architecturekit.InMemoryView[string, book], eventID string, item book) {
+func mustInsert[TItem any](t *testing.T, view *architecturekit.InMemoryView[string, TItem], eventID string, item TItem) {
 	t.Helper()
 
-	require.NoError(t, view.Insert(context.Background(), eventID, item), "failed to insert %+v", item)
+	outcome, err := view.Insert(context.Background(), eventID, item)
+	require.NoError(t, err, "failed to insert %+v", item)
+	require.Equal(t, architecturekit.Added, outcome, "failed to add %+v", item)
 }
 
 func mustGet(t *testing.T, view *architecturekit.InMemoryView[string, book], id string) book {
@@ -64,7 +66,10 @@ func idsIn(t *testing.T, view architecturekit.View[book]) []string {
 func TestInMemoryView(t *testing.T) {
 	t.Run("inserts and gets items", func(t *testing.T) {
 		view := bookView()
-		mustInsert(t, view, "1", book{ID: "42", Title: "2001"})
+
+		outcome, err := view.Insert(context.Background(), "1", book{ID: "42", Title: "2001"})
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.Added, outcome)
 
 		got := mustGet(t, view, "42")
 		assert.Equal(t, "2001", got.Title)
@@ -105,8 +110,13 @@ func TestInMemoryView(t *testing.T) {
 		mustInsert(t, view, "5", book{ID: "42", Title: "first"})
 
 		// The same event, applied a second time, and an older one.
-		mustInsert(t, view, "5", book{ID: "42", Title: "again"})
-		mustInsert(t, view, "3", book{ID: "42", Title: "older"})
+		outcome, err := view.Insert(context.Background(), "5", book{ID: "42", Title: "again"})
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.AlreadyApplied, outcome, "the same event has to be skipped")
+
+		outcome, err = view.Insert(context.Background(), "3", book{ID: "42", Title: "older"})
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.AlreadyApplied, outcome, "an older event has to be skipped")
 
 		got := mustGet(t, view, "42")
 		assert.Equal(t, "first", got.Title)
@@ -117,11 +127,12 @@ func TestInMemoryView(t *testing.T) {
 		view := bookView()
 		mustInsert(t, view, "1", book{ID: "42"})
 
-		err := view.Insert(context.Background(), "2", book{ID: "42"})
+		outcome, err := view.Insert(context.Background(), "2", book{ID: "42"})
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a taken key is permanent")
 		assert.ErrorContains(t, err, "42", "the error has to name the key")
 		assert.ErrorContains(t, err, "event 2", "the error has to name the event")
+		assert.Zero(t, outcome, "an error comes without an outcome")
 	})
 
 	t.Run("updates an item", func(t *testing.T) {
@@ -190,19 +201,25 @@ func TestInMemoryView(t *testing.T) {
 			}
 		}
 
-		require.NoError(t, view.Upsert(context.Background(), "42", "1", shelve("new")))
+		outcome, err := view.Upsert(context.Background(), "42", "1", shelve("new"))
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.Added, outcome, "a missing book is added")
 		got := mustGet(t, view, "42")
 		assert.Equal(t, "new", got.Title, "a missing book is added")
 		assert.Equal(t, "|new", got.Shelf, "a missing book starts from the zero value")
 		assert.Equal(t, "1", got.Revision, "a missing book is added with the event")
 
-		require.NoError(t, view.Upsert(context.Background(), "42", "2", shelve("renamed")))
+		outcome, err = view.Upsert(context.Background(), "42", "2", shelve("renamed"))
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.Applied, outcome, "an existing book is changed")
 		got = mustGet(t, view, "42")
 		assert.Equal(t, "renamed", got.Title, "an existing book is changed")
 		assert.Equal(t, "|new|renamed", got.Shelf, "an existing book is changed, not replaced")
 		assert.Equal(t, "2", got.Revision, "an existing book is changed with the event")
 
-		require.NoError(t, view.Upsert(context.Background(), "42", "2", shelve("replayed")))
+		outcome, err = view.Upsert(context.Background(), "42", "2", shelve("replayed"))
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.AlreadyApplied, outcome, "an event that is not newer is skipped")
 		got = mustGet(t, view, "42")
 		assert.Equal(t, "renamed", got.Title, "an event that is not newer is skipped")
 	})
@@ -210,16 +227,18 @@ func TestInMemoryView(t *testing.T) {
 	t.Run("refuses to upsert an item under another key", func(t *testing.T) {
 		view := bookView()
 
-		err := view.Upsert(context.Background(), "42", "1", func(item *book) { item.Title = "no key set" })
+		outcome, err := view.Upsert(context.Background(), "42", "1", func(item *book) { item.Title = "no key set" })
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a missing key is permanent")
 		assert.ErrorContains(t, err, "42", "the error has to name the key")
 		assert.ErrorContains(t, err, "event 1", "the error has to name the event")
+		assert.Zero(t, outcome, "an error comes without an outcome")
 		assert.Empty(t, idsIn(t, view), "a refused item must not be added")
 
 		mustInsert(t, view, "2", book{ID: "42"})
-		err = view.Upsert(context.Background(), "42", "3", func(item *book) { item.ID = "23" })
+		outcome, err = view.Upsert(context.Background(), "42", "3", func(item *book) { item.ID = "23" })
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "changing the key of an existing item is permanent")
+		assert.Zero(t, outcome, "an error comes without an outcome")
 	})
 
 	t.Run("deletes an item", func(t *testing.T) {
@@ -296,23 +315,24 @@ func TestInMemoryView(t *testing.T) {
 		anything := func(book) bool { return true }
 		noChange := func(*book) {}
 
-		operations := map[string]func() error{
-			"Insert": func() error { return view.Insert(ctx, "", book{ID: "42"}) },
-			"Upsert": func() error { return view.Upsert(ctx, "42", "", noChange) },
-			"Update": func() error { _, err := view.Update(ctx, "42", "", noChange); return err },
-			"Delete": func() error { _, err := view.Delete(ctx, "42", ""); return err },
-			"UpdateWhere": func() error {
-				_, err := view.UpdateWhere(ctx, anything, "", noChange)
-				return err
-			},
-			"DeleteWhere":  func() error { _, err := view.DeleteWhere(ctx, anything, ""); return err },
-			"Index.Update": func() error { _, err := byShelf.Update(ctx, "left", "", noChange); return err },
-			"Index.Delete": func() error { _, err := byShelf.Delete(ctx, "left", ""); return err },
+		// Each operation hands out its outcome, or its count, which has to be
+		// zero along with the error.
+		operations := map[string]func() (any, error){
+			"Insert":       func() (any, error) { return view.Insert(ctx, "", book{ID: "42"}) },
+			"Upsert":       func() (any, error) { return view.Upsert(ctx, "42", "", noChange) },
+			"Update":       func() (any, error) { return view.Update(ctx, "42", "", noChange) },
+			"Delete":       func() (any, error) { return view.Delete(ctx, "42", "") },
+			"UpdateWhere":  func() (any, error) { return view.UpdateWhere(ctx, anything, "", noChange) },
+			"DeleteWhere":  func() (any, error) { return view.DeleteWhere(ctx, anything, "") },
+			"Index.Update": func() (any, error) { return byShelf.Update(ctx, "left", "", noChange) },
+			"Index.Delete": func() (any, error) { return byShelf.Delete(ctx, "left", "") },
 		}
 
 		for name, operation := range operations {
 			t.Run(name, func(t *testing.T) {
-				assert.ErrorIs(t, operation(), architecturekit.ErrPermanent)
+				result, err := operation()
+				assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+				assert.Zero(t, result, "an error comes without an outcome or a count")
 			})
 		}
 	})
@@ -321,12 +341,13 @@ func TestInMemoryView(t *testing.T) {
 		view := bookView()
 		mustInsert(t, view, "1", book{ID: "42"})
 
-		err := view.Insert(context.Background(), "not a revision", book{ID: "42"})
+		outcome, err := view.Insert(context.Background(), "not a revision", book{ID: "42"})
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
 		assert.ErrorIs(t, err, architecturekit.ErrNotARevision)
+		assert.Zero(t, outcome, "an error comes without an outcome")
 
-		outcome, err := view.Update(context.Background(), "42", "not a revision", func(*book) {})
+		outcome, err = view.Update(context.Background(), "42", "not a revision", func(*book) {})
 		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "updating")
 		assert.Zero(t, outcome, "an error comes without an outcome")
 
@@ -334,8 +355,9 @@ func TestInMemoryView(t *testing.T) {
 		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "deleting")
 		assert.Zero(t, outcome, "an error comes without an outcome")
 
-		err = view.Upsert(context.Background(), "42", "not a revision", func(*book) {})
+		outcome, err = view.Upsert(context.Background(), "42", "not a revision", func(*book) {})
 		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "upserting an existing item")
+		assert.Zero(t, outcome, "an error comes without an outcome")
 	})
 
 	t.Run("reports a failure among several items", func(t *testing.T) {
@@ -459,7 +481,15 @@ func TestOutcome(t *testing.T) {
 		assert.Equal(t, "applied", architecturekit.Applied.String())
 		assert.Equal(t, "missing", architecturekit.Missing.String())
 		assert.Equal(t, "already applied", architecturekit.AlreadyApplied.String())
+		assert.Equal(t, "added", architecturekit.Added.String())
 		assert.Equal(t, "Outcome(0)", architecturekit.Outcome(0).String(), "the zero value is no outcome")
+	})
+
+	t.Run("keeps the values the outcomes had before Added", func(t *testing.T) {
+		assert.Equal(t, 1, int(architecturekit.Applied))
+		assert.Equal(t, 2, int(architecturekit.Missing))
+		assert.Equal(t, 3, int(architecturekit.AlreadyApplied))
+		assert.Equal(t, 4, int(architecturekit.Added))
 	})
 }
 
@@ -513,7 +543,8 @@ func TestCloneWith(t *testing.T) {
 				return err
 			},
 			"Upsert": func(view *architecturekit.InMemoryView[string, shelfItem]) error {
-				return view.Upsert(ctx, "a", "2", rearrange)
+				_, err := view.Upsert(ctx, "a", "2", rearrange)
+				return err
 			},
 			"UpdateWhere": func(view *architecturekit.InMemoryView[string, shelfItem]) error {
 				_, err := view.UpdateWhere(ctx, func(shelfItem) bool { return true }, "2", rearrange)
@@ -529,7 +560,7 @@ func TestCloneWith(t *testing.T) {
 		for name, change := range changes {
 			t.Run(name, func(t *testing.T) {
 				view := shelfView(architecturekit.CloneWith(cloneShelfItem))
-				require.NoError(t, view.Insert(ctx, "1", newShelfItem("a")))
+				mustInsert(t, view, "1", newShelfItem("a"))
 
 				got := mustGetShelf(t, view, "a")
 				items, err := view.All(ctx)
@@ -560,16 +591,20 @@ func TestCloneWith(t *testing.T) {
 			return cloneShelfItem(item)
 		}))
 
-		require.NoError(t, view.Insert(ctx, "1", newShelfItem("a")))
-		require.NoError(t, view.Upsert(ctx, "b", "2", func(item *shelfItem) { item.ID = "b" }))
+		mustInsert(t, view, "1", newShelfItem("a"))
+		outcome, err := view.Upsert(ctx, "b", "2", func(item *shelfItem) { item.ID = "b" })
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.Added, outcome)
 		assert.Zero(t, clones, "a new item has no readers yet")
 
-		_, err := view.Update(ctx, "a", "3", rearrange)
+		_, err = view.Update(ctx, "a", "3", rearrange)
 		require.NoError(t, err)
-		require.NoError(t, view.Upsert(ctx, "b", "4", func(*shelfItem) {}))
+		outcome, err = view.Upsert(ctx, "b", "4", func(*shelfItem) {})
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.Applied, outcome)
 		assert.Equal(t, 2, clones, "every change of an existing item needs a clone")
 
-		outcome, err := view.Update(ctx, "a", "3", rearrange)
+		outcome, err = view.Update(ctx, "a", "3", rearrange)
 		require.NoError(t, err)
 		assert.Equal(t, architecturekit.AlreadyApplied, outcome)
 		outcome, err = view.Update(ctx, "c", "5", rearrange)
@@ -586,7 +621,7 @@ func TestCloneWith(t *testing.T) {
 				return shelfItem{ID: item.ID, BookIDs: slices.Clone(item.BookIDs), Labels: maps.Clone(item.Labels)}
 			}),
 		)
-		require.NoError(t, view.Insert(context.Background(), "1", newShelfItem("a")))
+		mustInsert(t, view, "1", newShelfItem("a"))
 		got := mustGetShelf(t, view, "a")
 
 		_, err := view.Update(context.Background(), "a", "2", rearrange)
@@ -602,7 +637,7 @@ func TestCloneWith(t *testing.T) {
 		ctx := context.Background()
 		view := shelfView(architecturekit.CloneWith(cloneShelfItem))
 		byGenre := view.Index(func(item shelfItem) string { return item.Labels["genre"] })
-		require.NoError(t, view.Insert(ctx, "1", newShelfItem("a")))
+		mustInsert(t, view, "1", newShelfItem("a"))
 
 		_, err := view.Update(ctx, "a", "2", rearrange)
 		require.NoError(t, err)
@@ -618,7 +653,7 @@ func TestCloneWith(t *testing.T) {
 	t.Run("lets readers read while a change writes into an item", func(t *testing.T) {
 		ctx := context.Background()
 		view := shelfView(architecturekit.CloneWith(cloneShelfItem))
-		require.NoError(t, view.Insert(ctx, "1", newShelfItem("a")))
+		mustInsert(t, view, "1", newShelfItem("a"))
 
 		const rounds = 1000
 		started, done := make(chan struct{}), make(chan struct{})
@@ -673,7 +708,7 @@ func TestCloneWith(t *testing.T) {
 
 	t.Run("leaves a reader alone without a clone if a change replaces what it holds", func(t *testing.T) {
 		view := shelfView()
-		require.NoError(t, view.Insert(context.Background(), "1", newShelfItem("a")))
+		mustInsert(t, view, "1", newShelfItem("a"))
 		got := mustGetShelf(t, view, "a")
 
 		_, err := view.Update(context.Background(), "a", "2", func(item *shelfItem) {
@@ -720,10 +755,11 @@ func counterItemProjection(
 ) *architecturekit.TypedProjection {
 	projection := architecturekit.NewProjection().
 		On(func(ctx context.Context, event architecturekit.Envelope[incremented]) error {
-			return view.Upsert(ctx, event.Subject, event.ID, func(item *counterItem) {
+			_, err := view.Upsert(ctx, event.Subject, event.ID, func(item *counterItem) {
 				item.Subject = event.Subject
 				item.Total += event.Data.By
 			})
+			return err
 		})
 
 	if followsResets {
@@ -870,23 +906,33 @@ func storedBook(eventID, eventType, data string) eventsourcingdb.Event {
 
 // bookCatalog is a view of books with an index by ID, so that the index can
 // stand in for the view. It counts how often a change of a book runs, and how
-// many books are removed, so that a test sees whether a part was applied again.
+// many books are removed, and it keeps what every acquisition of a book
+// reported, so that a test sees whether a part was applied again.
 type bookCatalog struct {
-	view    *architecturekit.InMemoryView[string, book]
-	byID    *architecturekit.InMemoryIndex[string, book, string]
-	changes int
-	removed int
+	view     *architecturekit.InMemoryView[string, book]
+	byID     *architecturekit.InMemoryIndex[string, book, string]
+	changes  int
+	removed  int
+	acquired []architecturekit.Outcome
 }
 
 // The ways to add, change, and remove a book, through the view or its index.
 type (
-	bookAcquisition func(ctx context.Context, catalog *bookCatalog, id, eventID, title string) error
+	bookAcquisition func(ctx context.Context, catalog *bookCatalog, id, eventID, title string) (architecturekit.Outcome, error)
 	bookChange      func(ctx context.Context, catalog *bookCatalog, id, eventID string, change func(item *book)) error
 	bookRemoval     func(ctx context.Context, catalog *bookCatalog, id, eventID string) (int, error)
 )
 
-func insertBook(ctx context.Context, catalog *bookCatalog, id, eventID, title string) error {
+func insertBook(ctx context.Context, catalog *bookCatalog, id, eventID, title string) (architecturekit.Outcome, error) {
 	return catalog.view.Insert(ctx, eventID, book{ID: id, Title: title})
+}
+
+func upsertBook(ctx context.Context, catalog *bookCatalog, id, eventID, title string) (architecturekit.Outcome, error) {
+	return catalog.view.Upsert(ctx, id, eventID, func(item *book) {
+		catalog.changes++
+		item.ID = id
+		item.Title = title
+	})
 }
 
 func updateBook(ctx context.Context, catalog *bookCatalog, id, eventID string, change func(item *book)) error {
@@ -905,22 +951,17 @@ func deleteBook(ctx context.Context, catalog *bookCatalog, id, eventID string) (
 
 var bookAcquisitions = map[string]bookAcquisition{
 	"Insert": insertBook,
-	"Upsert": func(ctx context.Context, catalog *bookCatalog, id, eventID, title string) error {
-		return catalog.view.Upsert(ctx, id, eventID, func(item *book) {
-			catalog.changes++
-			item.ID = id
-			item.Title = title
-		})
-	},
+	"Upsert": upsertBook,
 }
 
 var bookChanges = map[string]bookChange{
 	"Update": updateBook,
 	"Upsert": func(ctx context.Context, catalog *bookCatalog, id, eventID string, change func(item *book)) error {
-		return catalog.view.Upsert(ctx, id, eventID, func(item *book) {
+		_, err := catalog.view.Upsert(ctx, id, eventID, func(item *book) {
 			item.ID = id
 			change(item)
 		})
+		return err
 	},
 	"UpdateWhere": func(ctx context.Context, catalog *bookCatalog, id, eventID string, change func(item *book)) error {
 		_, err := catalog.view.UpdateWhere(ctx, func(item book) bool { return item.ID == id }, eventID, change)
@@ -954,7 +995,9 @@ func newBookCatalog(
 
 	projection := architecturekit.NewProjection().
 		On(func(ctx context.Context, event architecturekit.Envelope[bookAcquired]) error {
-			return acquire(ctx, catalog, strings.TrimPrefix(event.Subject, "/books/"), event.ID, event.Data.Title)
+			outcome, err := acquire(ctx, catalog, strings.TrimPrefix(event.Subject, "/books/"), event.ID, event.Data.Title)
+			catalog.acquired = append(catalog.acquired, outcome)
+			return err
 		}).
 		On(func(ctx context.Context, event architecturekit.Envelope[bookShelved]) error {
 			return shelve(ctx, catalog, strings.TrimPrefix(event.Subject, "/books/"), event.ID, func(item *book) {
@@ -984,6 +1027,7 @@ func TestSplitEvents(t *testing.T) {
 				want := book{ID: "42", Title: "Dune", Shelf: "A3", Revision: "0"}
 				assert.Equal(t, want, mustGet(t, catalog.view, "42"), "the second part has to change the item")
 				assert.Equal(t, 1, catalog.changes)
+				assert.Equal(t, []architecturekit.Outcome{architecturekit.Added}, catalog.acquired, "the first part has to add the item")
 			})
 		}
 	})
@@ -999,6 +1043,8 @@ func TestSplitEvents(t *testing.T) {
 				want := book{ID: "42", Title: "Dune", Shelf: "A3", Revision: "0"}
 				assert.Equal(t, want, mustGet(t, catalog.view, "42"))
 				assert.Equal(t, 1, catalog.changes, "no part may change the item a second time")
+				assert.Equal(t, []architecturekit.Outcome{architecturekit.Added, architecturekit.AlreadyApplied}, catalog.acquired,
+					"no part may add the item a second time")
 			})
 		}
 	})
@@ -1066,6 +1112,8 @@ func TestSplitEvents(t *testing.T) {
 				want := book{ID: "42", Title: "Dune, second copy", Revision: "1"}
 				assert.Equal(t, want, mustGet(t, catalog.view, "42"), "the first part has to remove the old item, and the second one has to add the new one")
 				assert.Equal(t, 1, catalog.removed)
+				assert.Equal(t, []architecturekit.Outcome{architecturekit.Added, architecturekit.Added}, catalog.acquired,
+					"the second part has to add the item anew")
 				changes := catalog.changes
 
 				require.NoError(t, apply(t, projection, replaced), "applying the stored event again has to skip both parts")
@@ -1073,17 +1121,35 @@ func TestSplitEvents(t *testing.T) {
 				assert.Equal(t, want, mustGet(t, catalog.view, "42"))
 				assert.Equal(t, 1, catalog.removed)
 				assert.Equal(t, changes, catalog.changes, "applying the stored event again must not change anything")
+				assert.Equal(t, []architecturekit.Outcome{architecturekit.Added, architecturekit.Added, architecturekit.AlreadyApplied}, catalog.acquired,
+					"applying the stored event again must not add anything")
 			})
 		}
 	})
 
 	t.Run("refuses a later part that inserts an item whose key an earlier part took", func(t *testing.T) {
-		_, projection := newBookCatalog(insertBook, updateBook, deleteBook)
+		catalog, projection := newBookCatalog(insertBook, updateBook, deleteBook)
 
 		err := apply(t, projection.UpcastWith(bookUpcasters()), storedBook("0", bookAcquiredTwice, `{"title":"Dune"}`))
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a second item with the same key is a mistake, also within one stored event")
 		assert.ErrorContains(t, err, "already taken")
+		assert.Equal(t, []architecturekit.Outcome{architecturekit.Added, 0}, catalog.acquired, "the second part has to fail without an outcome")
+	})
+
+	t.Run("upserts in a later part the item an earlier part added, and skips both when the stored event is applied again", func(t *testing.T) {
+		catalog, projection := newBookCatalog(upsertBook, updateBook, deleteBook)
+		acquiredTwice := storedBook("0", bookAcquiredTwice, `{"title":"Dune"}`)
+
+		require.NoError(t, apply(t, projection.UpcastWith(bookUpcasters()), acquiredTwice, acquiredTwice))
+
+		want := []architecturekit.Outcome{
+			architecturekit.Added, architecturekit.Applied,
+			architecturekit.AlreadyApplied, architecturekit.AlreadyApplied,
+		}
+		assert.Equal(t, want, catalog.acquired, "the first part has to add the item, and the second one has to change it")
+		assert.Equal(t, 2, catalog.changes)
+		assert.Equal(t, book{ID: "42", Title: "Dune", Revision: "0"}, mustGet(t, catalog.view, "42"))
 	})
 
 	t.Run("treats every event as part 0 without upcasters", func(t *testing.T) {
@@ -1099,5 +1165,6 @@ func TestSplitEvents(t *testing.T) {
 		want := book{ID: "42", Title: "Dune", Shelf: "A3", Revision: "1"}
 		assert.Equal(t, want, mustGet(t, catalog.view, "42"), "an event applied again has to be skipped, as before")
 		assert.Equal(t, 1, catalog.changes)
+		assert.Equal(t, []architecturekit.Outcome{architecturekit.Added, architecturekit.AlreadyApplied}, catalog.acquired)
 	})
 }

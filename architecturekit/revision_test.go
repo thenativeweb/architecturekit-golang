@@ -276,6 +276,24 @@ func TestTracking(t *testing.T) {
 		})
 	})
 
+	t.Run("refuses to track a nil projection", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: Tracking needs a projection, not nil", func() {
+			architecturekit.Tracking(nil, intView())
+		})
+	})
+
+	t.Run("refuses to track into a nil view", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: Tracking needs views to record the events in, but view 0 is nil", func() {
+			architecturekit.Tracking(&collector{}, nil)
+		})
+	})
+
+	t.Run("refuses to track into a nil view after another one", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: Tracking needs views to record the events in, but view 1 is nil", func() {
+			architecturekit.Tracking(&collector{}, intView(), nil)
+		})
+	})
+
 	t.Run("does not record a failed event", func(t *testing.T) {
 		view := intView()
 		failed := errors.New("could not apply")

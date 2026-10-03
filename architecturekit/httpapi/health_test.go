@@ -22,6 +22,16 @@ type ignoring struct{}
 
 func (ignoring) Apply(context.Context, eventsourcingdb.Event) error { return nil }
 
+// panickingCheckpoint is a resumable projection that panics when it is asked
+// where it stopped, as one with a bug does.
+type panickingCheckpoint struct{ ignoring }
+
+func (panickingCheckpoint) Checkpoint(context.Context) (string, error) {
+	panic("the checkpoint is broken")
+}
+
+func (panickingCheckpoint) SaveCheckpoint(context.Context, string) error { return nil }
+
 // emptyDatabase answers like an EventSourcingDB without any events. It keeps
 // an observed stream open, sending heartbeats, or ends it at once, which a
 // real database only does when it restarts. Its store waits an hour before it
@@ -153,6 +163,26 @@ func TestHealth(t *testing.T) {
 		<-run.CaughtUp()
 		cancel()
 		<-run.Done()
+		projections := []*architecturekit.ProjectionRun{run}
+
+		code, body, _, _ := askHealth(t, httpapi.Readiness(projections...))
+		assert.Equal(t, http.StatusServiceUnavailable, code)
+		assert.False(t, *body.IsReady)
+		assert.Equal(t, "stopped", body.Projections["catalog"]["phase"])
+
+		code, body, _, _ = askHealth(t, httpapi.Liveness(projections...))
+		assert.Equal(t, http.StatusServiceUnavailable, code)
+		assert.False(t, *body.IsAlive)
+	})
+
+	t.Run("is neither ready nor alive once a projection has panicked", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+
+		run := architecturekit.StartProjection(ctx, emptyDatabase(t, true), architecturekit.SubjectTree("/"), panickingCheckpoint{},
+			architecturekit.Named("catalog"))
+		<-run.Done()
+		require.ErrorIs(t, run.Err(), architecturekit.ErrPermanent, "the panic has to end the run, not the process")
 		projections := []*architecturekit.ProjectionRun{run}
 
 		code, body, _, _ := askHealth(t, httpapi.Readiness(projections...))
