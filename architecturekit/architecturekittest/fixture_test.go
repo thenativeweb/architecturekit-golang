@@ -3,6 +3,7 @@ package architecturekittest_test
 import (
 	"context"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -87,6 +88,18 @@ type unmarshallable struct {
 func (unmarshallable) EventType() string { return "test.account.opened" }
 
 func (unmarshallable) Schema() map[string]any { return openedSchema() }
+
+// measured holds a number, which encoding/json can not encode if it is NaN.
+// The account state has no rule for it, so the tests that need one ignore it.
+type measured struct {
+	Value float64 `json:"value"`
+}
+
+func (measured) EventType() string { return "test.account.measured" }
+
+func (measured) Schema() map[string]any {
+	return objectSchema(map[string]any{"value": map[string]any{"type": "number"}})
+}
 
 type account struct {
 	IsOpen bool
@@ -556,11 +569,14 @@ func TestThenEvents(t *testing.T) {
 	t.Run("fails when the actual event cannot be marshalled", func(t *testing.T) {
 		recorder := &spy{}
 
+		// When refuses the event already, as Execute does, so ThenEvents
+		// reports the refusal.
 		architecturekittest.Given(recorder, emitDecider()).
 			When(emit{events: []architecturekit.Event{unmarshallable{Channel: make(chan int)}}}).
 			ThenEvents(opened{Owner: "golo"})
 
-		recorder.expectFailure(t, "json")
+		recorder.expectFailure(t, "expected events, got error")
+		recorder.expectFailure(t, "can not be encoded as JSON: json: unsupported type: chan int")
 	})
 
 	t.Run("fails when the expected event cannot be marshalled", func(t *testing.T) {
@@ -631,6 +647,85 @@ func TestEventWithoutRule(t *testing.T) {
 			ThenEvents(unheardOf{})
 	})
 
+}
+
+// measuringDecider emits exactly what it was handed, on the account state that
+// also ignores measured, so that its rules let every event of the tests
+// through except unheardOf.
+func measuringDecider() architecturekit.Decider[emit, account] {
+	return emitDeciderOn(accountState().Ignore[measured]())
+}
+
+// encodingRefusal is the error with which Execute refuses an event whose data
+// can not be encoded as JSON.
+func encodingRefusal(eventType, subject, reason string) string {
+	return fmt.Sprintf("%v: refusing to write an event of type %q to %q, since its data can not be encoded as JSON: %s",
+		architecturekit.ErrPermanent, eventType, subject, reason)
+}
+
+func TestEventThatCanNotBeEncoded(t *testing.T) {
+	withNaN := emit{events: []architecturekit.Event{measured{Value: math.NaN()}}}
+	refusal := encodingRefusal("test.account.measured", "/account/1", "json: unsupported value: NaN")
+
+	t.Run("is a permanent failure that names the event type, the subject, and the reason", func(t *testing.T) {
+		architecturekittest.Given(t, measuringDecider()).
+			When(emit{subject: "/account/2", events: withNaN.events}).
+			ThenFailed(architecturekit.ErrPermanent).
+			ThenRejected(encodingRefusal("test.account.measured", "/account/2", "json: unsupported value: NaN"))
+	})
+
+	t.Run("fails every assertion that expects events or nothing, naming the cause", func(t *testing.T) {
+		always := func(architecturekit.Event) bool { return true }
+		never := func(architecturekit.Event) bool { return false }
+
+		for label, check := range map[string]func(o *architecturekittest.Outcome[emit, account]){
+			"ThenEvents":     func(o *architecturekittest.Outcome[emit, account]) { o.ThenEvents(withNaN.events...) },
+			"ThenNothing":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNothing() },
+			"ThenSomeEvent":  func(o *architecturekittest.Outcome[emit, account]) { o.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(o *architecturekittest.Outcome[emit, account]) { o.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNoEvent(never) },
+		} {
+			t.Run(label, func(t *testing.T) {
+				recorder := &spy{}
+				check(architecturekittest.Given(recorder, measuringDecider()).When(withNaN))
+				recorder.expectFailure(t, "got error: "+refusal)
+			})
+		}
+	})
+
+	t.Run("names the first event that can not be encoded", func(t *testing.T) {
+		notANumber := measured{Value: math.NaN()}
+		channel := unmarshallable{Channel: make(chan int)}
+
+		architecturekittest.Given(t, measuringDecider()).
+			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, notANumber, channel}}).
+			ThenRejected(refusal)
+
+		architecturekittest.Given(t, measuringDecider()).
+			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, channel, notANumber}}).
+			ThenRejected(encodingRefusal("test.account.opened", "/account/1", "json: unsupported type: chan int"))
+	})
+
+	t.Run("comes after an event without a rule, as with Execute", func(t *testing.T) {
+		recorder := &spy{}
+
+		// The event without a rule comes second, so it is reported only because
+		// the rules of all events are checked first.
+		architecturekittest.Given(recorder, measuringDecider()).
+			When(emit{events: []architecturekit.Event{measured{Value: math.NaN()}, unheardOf{}}}).
+			ThenNothing()
+
+		recorder.expectFailure(t, `event of type "test.account.unheardOf" to "/account/1"`)
+		recorder.expectFailure(t, "could not read the subject any more")
+	})
+
+	t.Run("does not concern events whose data can be encoded", func(t *testing.T) {
+		events := []architecturekit.Event{opened{Owner: "golo"}, measured{Value: 1.5}, opened{Owner: "jane"}}
+
+		architecturekittest.Given(t, measuringDecider()).
+			When(emit{events: events}).
+			ThenEvents(events...)
+	})
 }
 
 func TestWhenChecksPreconditions(t *testing.T) {

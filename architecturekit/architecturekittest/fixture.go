@@ -71,10 +71,12 @@ func GivenStored[TCommand architecturekit.Command, TState any](
 // architecturekit.CheckPreconditions), and the decider does not decide on a
 // command they refuse. It also refuses an event that the state of the
 // decider has no rule for, since the state could not read the subject any
-// more. Either way, the outcome is then the error of the category
-// architecturekit.ErrPermanent that Execute returns, so that ThenEvents and
-// the other assertions that expect events fail, naming the cause, and
-// ThenFailed(architecturekit.ErrPermanent) matches it.
+// more, and an event whose data can not be encoded as JSON, for example
+// because it holds a float NaN. It checks the rules of all events before it
+// encodes any of them, as Execute does. In each case, the outcome is then the
+// error of the category architecturekit.ErrPermanent that Execute returns, so
+// that ThenEvents and the other assertions that expect events fail, naming
+// the cause, and ThenFailed(architecturekit.ErrPermanent) matches it.
 func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState] {
 	f.t.Helper()
 
@@ -88,12 +90,18 @@ func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState
 		err = checkRules(f.decider.State, cmd.Subject(), events)
 	}
 
+	var encoded [][]byte
+	if err == nil {
+		encoded, err = encode(cmd.Subject(), events)
+	}
+
 	return &Outcome[TCommand, TState]{
-		t:      f.t,
-		cmd:    cmd,
-		state:  f.state,
-		events: events,
-		err:    err,
+		t:       f.t,
+		cmd:     cmd,
+		state:   f.state,
+		events:  events,
+		encoded: encoded,
+		err:     err,
 	}
 }
 
@@ -104,7 +112,12 @@ type Outcome[TCommand architecturekit.Command, TState any] struct {
 	cmd    TCommand
 	state  TState
 	events []architecturekit.Event
-	err    error
+
+	// encoded holds the data of every event as JSON, as Execute would write
+	// it, which is what ThenEvents compares.
+	encoded [][]byte
+
+	err error
 }
 
 // ThenEvents expects exactly these events, in this order.
@@ -129,19 +142,14 @@ func (o *Outcome[TCommand, TState]) ThenEvents(expected ...architecturekit.Event
 			return o
 		}
 
-		gotJSON, err := json.Marshal(got)
-		if err != nil {
-			o.t.Fatalf("event %d: %v", i, err)
-			return o
-		}
 		wantJSON, err := json.Marshal(want)
 		if err != nil {
 			o.t.Fatalf("event %d: %v", i, err)
 			return o
 		}
 
-		if string(gotJSON) != string(wantJSON) {
-			o.t.Fatalf("event %d: got %s, want %s", i, gotJSON, wantJSON)
+		if string(o.encoded[i]) != string(wantJSON) {
+			o.t.Fatalf("event %d: got %s, want %s", i, o.encoded[i], wantJSON)
 			return o
 		}
 	}
@@ -323,6 +331,28 @@ func checkRules[TState any](
 	}
 
 	return nil
+}
+
+// encode encodes the data of every event as JSON, with encoding/json, as
+// Execute does. If one of them can not be encoded, it fails with the same
+// error as Execute, which then refuses to write any of them. Execute encodes
+// with a function of its own, which is not exported, so the wording here has
+// to stay the same as there, and a test compares the two.
+func encode(subject string, events []architecturekit.Event) ([][]byte, error) {
+	encoded := make([][]byte, len(events))
+
+	for i, event := range events {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return nil, fmt.Errorf("%w: refusing to write an event of type %q to %q, "+
+				"since its data can not be encoded as JSON: %v",
+				architecturekit.ErrPermanent, event.EventType(), subject, err)
+		}
+
+		encoded[i] = data
+	}
+
+	return encoded, nil
 }
 
 func describe(events []architecturekit.Event) string {
