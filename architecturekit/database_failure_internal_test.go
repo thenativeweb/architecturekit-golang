@@ -66,6 +66,12 @@ func TestDatabaseFailureByType(t *testing.T) {
 		assert.ErrorContains(t, err, "the answer does not come from an EventSourcingDB")
 	})
 
+	t.Run("sorts a stream on which neither an event nor a heartbeat arrived as transient", func(t *testing.T) {
+		err := databaseFailure(worded{eventsourcingdb.ErrHeartbeatTimeout}, "reading events")
+
+		assert.ErrorIs(t, err, ErrTransient)
+	})
+
 	t.Run("reads no status code from a failure without an answer", func(t *testing.T) {
 		assert.Zero(t, statusCodeOf(errors.New("failed to write events, got HTTP status code '409', expected '200'")),
 			"a text that looks like an answer is no answer")

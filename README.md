@@ -287,11 +287,13 @@ var bookState = architecturekit.NewState(Book{}).
 A decider connects a state with the decision made on it. Create a `Decider`, hand over the state, and provide a `Decide` function that receives the command and the current state, and returns the events to write:
 
 ```go
+var ErrBookAlreadyAcquired = architecturekit.NewDomainError("book has already been acquired")
+
 var acquireBook = architecturekit.Decider[AcquireBook, Book]{
   State: bookState,
   Decide: func(ctx context.Context, cmd AcquireBook, book Book) ([]architecturekit.Event, error) {
     if book.IsAcquired {
-      return nil, architecturekit.NewDomainError("book %s has already been acquired", cmd.BookID)
+      return nil, fmt.Errorf("%w: %s", ErrBookAlreadyAcquired, cmd.BookID)
     }
 
     return []architecturekit.Event{
@@ -306,6 +308,8 @@ var acquireBook = architecturekit.Decider[AcquireBook, Book]{
 ```
 
 To reject a command, return an error created with the `NewDomainError` function. It takes a format string and arguments, like `fmt.Errorf`, and returns an error of the type `*DomainError`, whose message is exactly the formatted text, and which belongs to the category `ErrDomain` (see [Handling Errors](#handling-errors)).
+
+To let a caller or a test tell a rejection apart from the others, create it once, as a variable such as `ErrBookAlreadyAcquired`, and return it, or wrap it with `fmt.Errorf` and `%w` to add details, such as the ID of the book. `errors.Is` then finds the variable in the error, as well as the category `ErrDomain` (see [Expecting Rejections](#expecting-rejections)).
 
 A decider may check several rules:
 
@@ -1429,6 +1433,8 @@ return run.Err()
 If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again, or has caught up and followed the stream for longer than the initial delay, even if no event arrived. That way, a load balancer that ends long-lived connections regularly does not hold back a quiet projection, while a database that fails before the projection has caught up, or within the initial delay after, is given ever more time.
 
 *Note that how long the projection followed the stream is compared with the initial delay, not with the delay it has grown to. Otherwise, once an outage had let the delay grow to one minute, a load balancer that ends connections every 30 seconds would keep a quiet projection waiting for a minute after each of them, and a caller who wants to read their own write in the meantime would not see it (see [Reading Your Own Writes](#reading-your-own-writes)). In return, a database that ends every stream a few seconds after the projection has caught up is tried again every few seconds rather than once a minute. That is not a loop without a pause, and catching up, the expensive part, succeeds each time.*
+
+A connection can also stall without being closed, for example behind a proxy that keeps it open but no longer passes anything on. While there is nothing else to send, the database sends a heartbeat every second, so the client ends a stream on which neither an event nor a heartbeat has arrived for 30 seconds, and the run reconnects as after any other failure of the category `ErrTransient`. Without that, the run would wait for the next event forever, while `Status` kept reporting `PhaseLive`.
 
 To use other delays, or to learn about every attempt, for example to log it, hand over the `WithReconnectDelays` and `WithReconnectObserver` options when creating the store:
 
@@ -2691,21 +2697,23 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
 
 #### Expecting Rejections
 
-To expect that a command is rejected with exactly the given message, call the `ThenRejected` function:
+To expect that a command is rejected, call the `ThenFailed` function with the error you expect. It matches with `errors.Is`, so it takes the error the decider returns, as well as every error that this error wraps. For example, `acquireBook` wraps `ErrBookAlreadyAcquired` to add the ID of the book (see [Making Decisions](#making-decisions)), and `ThenFailed` still finds it:
 
 ```go
 architecturekittest.Given(t, acquireBook, BookAcquired{}).
   When(AcquireBook{BookID: "42"}).
-  ThenRejected("book 42 has already been acquired")
+  ThenFailed(ErrBookAlreadyAcquired)
 ```
 
-To expect an error of a category instead, call the `ThenFailed` function:
+To expect any error of a category instead, hand over the category, such as `architecturekit.ErrDomain` or `architecturekit.ErrPermanent`. For example, `borrowBook` rejects a book that does not exist with an error that it creates in place with `NewDomainError`, which belongs to the category `ErrDomain`:
 
 ```go
 architecturekittest.Given(t, borrowBook).
   When(BorrowBook{BookID: "42"}).
   ThenFailed(architecturekit.ErrDomain)
 ```
+
+*Note that `ThenFailed` does not compare messages, so rewording a rejection breaks no test. To tell a rejection apart from the others of the same category, create it once, as a variable, as `ErrBookAlreadyAcquired` is.*
 
 #### Expecting Preconditions
 
@@ -2764,8 +2772,10 @@ architecturekittest.GivenStored(t, borrowBook,
   },
 ).
   When(BorrowBook{BookID: "42", ReaderID: "17"}).
-  ThenRejected("book 42 is already borrowed")
+  ThenFailed(architecturekit.ErrDomain)
 ```
+
+The upcaster turns the older event into a `BookBorrowed` event, so the book is borrowed already, and `borrowBook` rejects the command.
 
 #### Replaying Events Directly
 
@@ -2814,7 +2824,11 @@ func TestCatalogProjection(t *testing.T) {
 
 `Project` hands over the events as they are stored, so a projection that uses upcasters runs them, just as it does with a database. To test that a projection handles an older event type, hand over an event of that type.
 
-The `ExpectItems` function expects the view to hold exactly the given items, in the given order. It requires an item type that is comparable. To get the items as a slice instead, call the `ItemsOf` function:
+The `ExpectItems` function expects the view to hold exactly the given items, in the given order. It compares the items by value, so that items with slices or maps work too.
+
+*Note that `ExpectItems` compares with `reflect.DeepEqual`, so a `nil` slice or map is not equal to an empty one.*
+
+To get the items as a slice instead, call the `ItemsOf` function:
 
 ```go
 items := architecturekittest.ItemsOf(t, catalog)

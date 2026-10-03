@@ -3,6 +3,7 @@ package architecturekittest_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -240,6 +241,84 @@ func TestExpectItems(t *testing.T) {
 
 		recorder.expectFailure(t, "someone-else")
 	})
+
+	t.Run("accepts items that are not comparable, but equal by value", func(t *testing.T) {
+		recorder := &spy{}
+
+		// The expected items are built anew, so they share no slice and no map
+		// with the ones in the view.
+		architecturekittest.ExpectItems(recorder, shelfView(t, golosShelf(), janesShelf()),
+			golosShelf(), janesShelf())
+
+		recorder.expectNoFailure(t)
+	})
+
+	t.Run("reports an item that differs only inside a slice", func(t *testing.T) {
+		recorder := &spy{}
+		other := janesShelf()
+		other.Books[1] = "Ubik"
+
+		architecturekittest.ExpectItems(recorder, shelfView(t, golosShelf(), janesShelf()),
+			golosShelf(), other)
+
+		require.Len(t, recorder.failures, 1)
+		recorder.expectFailure(t, "item 1: got")
+		recorder.expectFailure(t, "want {Name:jane Books:[Solaris Ubik]")
+	})
+
+	t.Run("reports an item that differs only inside a map", func(t *testing.T) {
+		recorder := &spy{}
+		other := golosShelf()
+		other.Labels["genre"] = "fantasy"
+
+		architecturekittest.ExpectItems(recorder, shelfView(t, golosShelf(), janesShelf()),
+			other, janesShelf())
+
+		require.Len(t, recorder.failures, 1)
+		recorder.expectFailure(t, "item 0: got")
+		recorder.expectFailure(t, "want {Name:golo Books:[Dune] Labels:map[genre:fantasy]}")
+	})
+
+	t.Run("reports the wrong count of items that are not comparable", func(t *testing.T) {
+		recorder := &spy{}
+
+		// Fewer items are expected than the view holds, so that the count is
+		// what tells them apart, not an item.
+		architecturekittest.ExpectItems(recorder, shelfView(t, golosShelf(), janesShelf()),
+			golosShelf())
+
+		require.Len(t, recorder.failures, 1)
+		recorder.expectFailure(t, "expected 1 item(s), got 2")
+	})
+}
+
+// shelf holds a slice and a map, so it is not comparable, and only a
+// comparison by value tells two shelves apart.
+type shelf struct {
+	Name   string
+	Books  []string
+	Labels map[string]string
+}
+
+func golosShelf() shelf {
+	return shelf{Name: "golo", Books: []string{"Dune"}, Labels: map[string]string{"genre": "science fiction"}}
+}
+
+func janesShelf() shelf {
+	return shelf{Name: "jane", Books: []string{"Solaris", "Neuromancer"}, Labels: map[string]string{}}
+}
+
+// shelfView holds the given shelves, in the given order.
+func shelfView(t *testing.T, shelves ...shelf) *architecturekit.InMemoryView[string, shelf] {
+	t.Helper()
+
+	view := architecturekit.NewInMemoryView(func(item shelf) string { return item.Name })
+	for i, item := range shelves {
+		_, err := view.Insert(context.Background(), strconv.Itoa(i), item)
+		require.NoError(t, err, "failed to insert %q", item.Name)
+	}
+
+	return view
 }
 
 // ownerTable is a transactional projection: it applies events only within a
