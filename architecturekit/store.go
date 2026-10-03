@@ -579,6 +579,10 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // OnStateRead is filled in with the last event Execute has read, so that the
 // events are only written if the state they were decided on still holds.
 //
+// If one of the events the decider returns is nil, Execute writes none of
+// them and fails with an error of the category ErrPermanent that names the
+// index of the event, since an event that is nil has neither a type nor data.
+//
 // Every event the decider returns needs a rule on the state of the decider,
 // an Evolve rule or Ignore, since Execute writes it to the subject that the
 // same state reads for the next command. If one of them has none, Execute
@@ -590,6 +594,9 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // example because it holds a float NaN: Execute writes none of the events and
 // fails with an error of the category ErrPermanent that names the event type
 // and the reason, since trying again would fail the same way.
+//
+// Execute checks all events for nil first, then all of them for a rule, and
+// encodes them last.
 //
 // If the context ends before the events are written, Execute writes nothing
 // and fails with the context's error, also if it ends while the decider
@@ -642,6 +649,12 @@ func executeOnce[TCommand Command, TState any](
 		return nil, nil
 	}
 
+	// An event that is nil can neither be checked nor written, so then none of
+	// the events is written, and nothing else about them is checked.
+	if err := checkNotNil(subject, events); err != nil {
+		return nil, err
+	}
+
 	// An event the state has no rule for would leave a subject the state can
 	// not read any more, so then none of the events is written.
 	if err := decider.State.checkRules(subject, events); err != nil {
@@ -664,4 +677,21 @@ func executeOnce[TCommand Command, TState any](
 	}
 
 	return store.write(subject, candidates, resolvePreconditions(subject, declared, lastEventID))
+}
+
+// checkNotNil fails permanently if one of the events a decider returned for a
+// subject is nil, naming its index, since such an event has neither a type
+// nor data.
+//
+// The test fixture of architecturekittest refuses such an event with the same
+// error, which it words itself, so a test compares the two.
+func checkNotNil(subject string, events []Event) error {
+	for i, event := range events {
+		if event == nil {
+			return fmt.Errorf("%w: refusing to write to %q, since event %d that the decider returned is nil",
+				ErrPermanent, subject, i)
+		}
+	}
+
+	return nil
 }
