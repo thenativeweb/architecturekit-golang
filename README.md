@@ -10,6 +10,8 @@ architecturekit includes a test package to test deciders, projections, and queri
 
 ## Getting Started
 
+architecturekit needs Go 1.27.1 or later, and a running EventSourcingDB. To start one on your machine, see the [quickstart of EventSourcingDB](https://www.eventfoundation.io/docs/eventsourcingdb/quickstart).
+
 Install the packages:
 
 ```shell
@@ -138,7 +140,7 @@ The struct becomes the event's data. The subject is taken from the command, and 
 Every event type has a JSON schema, which the database checks every event of the type against, once the schema is registered (see [Registering Event Schemas](#registering-event-schemas)). The kit derives it from the struct, so that it describes exactly what `encoding/json` writes for the event:
 
 - A struct is an object with the fields `encoding/json` writes: named by their `json` tags, without fields tagged `-` and unexported ones, and with the fields of embedded structs in place of the embedded struct. Fields with `omitempty` or `omitzero`, and fields of an embedded pointer, are optional, all others are required, and no other fields are allowed.
-- A `string` is a string, a `bool` a boolean, an integer an integer, and a floating-point number a number. The `string` option of a `json` tag turns such a field into a string.
+- A `string` is a string, a `bool` a boolean, an `int` or any other integer type an integer, and a `float64` or a `float32` a number. The `string` option of a `json` tag turns such a field into a string.
 - A slice is an array, a `[]byte` a string, and an array an array of exactly its length. A map is an object whose values all have the same schema.
 - A pointer, a slice and a map may also be `null`, since `encoding/json` writes `null` for `nil`, unless a field of such a type is optional and therefore left out instead.
 - A `time.Time` is a string in the `date-time` format, a `json.Number` a number, unless the `string` option makes it a string, and a type with a `MarshalText` or an `AppendText` function a string. An interface allows any value, even if it declares a `Schema` function. So does a `json.RawMessage`, which is the same type as `jsontext.Value` of `encoding/json/v2`, since `encoding/json` writes the JSON it holds, or `null` if it is `nil`.
@@ -158,6 +160,8 @@ For `BookBorrowed`, this yields the following schema:
 ```
 
 These rules do not change, since a registered schema can not change either.
+
+*Note that EventSourcingDB currently reads every number in the data of an event as a 64-bit floating-point number, which holds an integer exactly only if its magnitude is at most 2^53 - 1, which is 9007199254740991. A larger integer is stored changed, without an error: 9007199254740993 comes back as 9007199254740992, and a time in nanoseconds, as `UnixNano` returns it, loses its last digits. Close to the largest `int64` or `uint64`, the stored number may even lie beyond the range of the type, so that the event can not be read back any more, and `Load`, `Execute`, and a projection fail with an error of the category `ErrPermanent`. To keep a 64-bit integer exact, give its field the `string` option of the `json` tag, as in `json:"atNanos,string"`, which writes it as a string.*
 
 To constrain a value further than its Go type does, declare a type for it with a `Schema` function, which returns the JSON schema of the type. Wherever a field has that type, the derived schema takes it over. For example, `borrowedUntil` accepts any string so far. To make sure that it is a date, `BookBorrowed` could use a `Date` type for the field:
 
@@ -504,6 +508,25 @@ func (c AcquireBook) Preconditions() []architecturekit.Precondition {
 
 *Note that the query must return a single row with a single value, which is interpreted as a boolean.*
 
+The ISBN comes from outside, but becomes part of the query as text, so check it first. `Execute` sends the query to the database only together with the events, once the decider has decided, so a check in the decider keeps every value that is not an ISBN out of the query. Here, an ISBN consists of digits and hyphens, and may end with an `X`:
+
+```go
+var isbnPattern = regexp.MustCompile(`^[0-9][0-9-]*[0-9X]$`)
+
+var acquireBook = architecturekit.Decider[AcquireBook, Book]{
+  State: bookState,
+  Decide: func(ctx context.Context, cmd AcquireBook, book Book) ([]architecturekit.Event, error) {
+    if !isbnPattern.MatchString(cmd.ISBN) {
+      return nil, architecturekit.NewDomainError("%q is not an ISBN", cmd.ISBN)
+    }
+
+    // ...
+  },
+}
+```
+
+*Note that a value must never go into an EventQL query unchecked. A quote, as in `it's`, breaks the query, so that the write fails, and a value made up for that purpose changes what the query checks.*
+
 #### Writing Unconditionally
 
 If a command may write its events whatever has been written to its subject in the meantime, for example `CommentOnBook`, which only records a comment that does not depend on the state, use the `Unconditionally` function:
@@ -708,7 +731,7 @@ Like a command, a write declares at least one precondition, made with `Require`,
 
 ### Handling Errors
 
-Every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
+Apart from the end of the context, which belongs to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
 
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
@@ -1096,7 +1119,7 @@ The revision of an item fits such a precondition only if the item stands for exa
 
 Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing, as long as the item is still there. The view forgets the revision of an item it removes, so an event that adds the item, applied again after a later event has removed it, adds it again. A projection that is rebuilt applies every event once, in order, so with a view in memory, that does not happen.
 
-All functions take a context and report an error, as a view in a database would need: `All` and `Lookup` hand it out along with the items, and every other function returns it. So a view in a database can offer functions of the same shape, which the handlers of a projection call the same way. The kit has no interface for the functions that change a view, though: a projection takes its view by its type, such as `*InMemoryView`, so moving it to a view in a database changes that type.
+The functions that read and change items take a context and report an error, as a view in a database would need: `All` and `Lookup` hand it out along with the items, and every other one returns it. So a view in a database can offer functions of the same shape, which the handlers of a projection call the same way. The kit has no interface for the functions that change a view, though: a projection takes its view by its type, such as `*InMemoryView`, so moving it to a view in a database changes that type.
 
 If an upcaster splits a stored event into several events, they all carry the ID of the stored event (see [Versioning Events](#versioning-events)). A projection created with `NewProjection` hands each of them to its handler with a context that holds its position among them, and the view reads it from the context it gets. For the same ID, the view counts a later event as newer than an earlier one, so every one of them is applied, in order, also if several of them change the same item. Applying the stored event again still changes nothing, and the revision of the item stays the ID of the stored event. That is why a handler always hands the context it gets on to the view, rather than one of its own, such as `context.Background()`.
 
@@ -1432,7 +1455,12 @@ case <-run.CaughtUp():
   // The view holds every event that was stored when the run started.
 case <-run.Done():
   // The run ended before it caught up.
-  return run.Err()
+  if err := run.Err(); err != nil {
+    return err
+  }
+
+  // The context ended first.
+  return ctx.Err()
 }
 
 // Start to answer queries.
@@ -1443,6 +1471,8 @@ The options after the projection are optional. `Named` gives the projection a na
 *Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic.*
 
 `CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did, since canceling the context is how a projection is stopped. If `Apply` returns an error that trying again will not fix, the run ends, and `Err` returns it.
+
+That is why the `select` above returns the error of the context if `Err` returns `nil`: a run whose context ends before it has caught up, for example on a timeout while the database can not be reached, ends without a failure, but has not caught up either. Returning `Err` alone would then return `nil`, which looks like success.
 
 If the projection panics, for example because `Apply` writes into a map that was never made, the run ends as well, rather than the whole process. `Err` then returns an error of the category `ErrPermanent`, since a panic is a mistake in the code that trying again will not fix. Its message holds the value and the stack of the panic, so log it to find out where the panic happened. This holds for every function of the projection that the run calls, and for the observer of reconnects (see below). Once the run has ended, `Liveness` answers `503`, so that the orchestrator restarts the application (see [Checking Health over HTTP](#checking-health-over-http)).
 
@@ -1926,7 +1956,7 @@ revision := architecturekit.RevisionOf(writtenEvents)
 
 #### Waiting for Revisions
 
-To wait until a view has reached a revision, call the `WaitFor` function with a context and the revision. It returns immediately if the view has already reached the revision, and otherwise once it does, or when the context ends:
+To wait until a view has reached a revision, call the `WaitFor` function with a context and the revision. It returns `nil` once the view has reached the revision, at once if it has already. If the context ends first, it returns the error of the context, such as `context.DeadlineExceeded`, and for a value that is not a revision, it returns an error that wraps `ErrNotARevision` (see [Comparing Revisions](#comparing-revisions)):
 
 ```go
 ctx, cancel := context.WithTimeout(context.TODO(), 5*time.Second)
@@ -1937,6 +1967,8 @@ if err != nil {
   // ...
 }
 ```
+
+*Note that running out of time is an error here. The `Await` function of the `httpapi` package, which waits for the revision an HTTP request asks for, takes it for none instead, and returns `nil`, so that the handler answers with what the view holds (see [Waiting for a Revision in a Handler of Your Own](#waiting-for-a-revision-in-a-handler-of-your-own)).*
 
 To get the current revision of a view, call the `Revision` function. It returns an empty string as long as the view has not seen any event:
 
@@ -2495,6 +2527,8 @@ httpapi.Query(api, mux, "GET /api/books-due-today", toListBooksDueToday, answerB
 ```
 
 Here, `listBooksDueToday` answers like `listOverdueBooks`, but takes the current day from `time.Now` itself, rather than from its query, and `toListBooksDueToday` returns that query.
+
+*Note that such a value, whether it is part of the query or comes from `Varying`, holds the time only as precisely as the answer depends on it, such as the day or the hour, never as an instant. An instant, such as `time.Now()` itself, differs on every request, and so does every `ETag`, so the answer is never `304 Not Modified`.*
 
 *Note that `Varying` panics for `nil`, and so does giving it twice, or without `Revisioned`.*
 

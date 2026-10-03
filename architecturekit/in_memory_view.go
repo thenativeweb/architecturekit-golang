@@ -47,14 +47,14 @@ import (
 // view clones every item before a change (see CloneWith). A time.Time counts
 // as a value.
 //
-// All operations take a context and report an error, as a view in a database
-// would need to: All and Lookup hand it out along with the items, and every
-// other function returns it. The view in memory reads nothing but the part of
-// an event from the context, and mostly reports no error, but so a view in a
-// database can offer functions of the same shape, which the handlers of a
-// projection call the same way. There is no interface for the functions that
-// change a view, though, so a projection takes its view by its type, and
-// moving it to a view in a database changes that type.
+// The functions that read and change items take a context and report an
+// error, as a view in a database would need to: All and Lookup hand it out
+// along with the items, and every other one returns it. The view in memory
+// reads nothing but the part of an event from the context, and mostly reports
+// no error, but so a view in a database can offer functions of the same shape,
+// which the handlers of a projection call the same way. There is no interface
+// for the functions that change a view, though, so a projection takes its view
+// by its type, and moving it to a view in a database changes that type.
 //
 // Note that this is the stored shape, not the answer to a query. Use the query
 // package to filter, order and project it into whatever an answer needs.
@@ -216,8 +216,10 @@ func (v *InMemoryView[TKey, TItem]) Seen(eventID string) {
 	v.changed = make(chan struct{})
 }
 
-// WaitFor returns once the view has reached the revision, or when the context
-// ends.
+// WaitFor returns nil once the view has reached the revision, at once if it
+// has already. If the context ends first, it returns the error of the
+// context, and for a revision that is not one, an error that wraps
+// ErrNotARevision.
 func (v *InMemoryView[TKey, TItem]) WaitFor(ctx context.Context, revision string) error {
 	for {
 		v.mutex.RLock()
