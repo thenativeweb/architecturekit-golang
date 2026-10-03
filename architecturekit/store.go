@@ -218,27 +218,46 @@ func Load[TState any](
 	return current, err
 }
 
-// Read hands out the events of a subject as they are stored, for a read that
-// neither Load nor a projection fits: one page of a long stream, the events up
-// to a certain one, or a single event. Every event is verified like everything
-// else the store reads, before the caller sees it, and a failure is sorted
-// into a category like with Load. Neither upcasters nor rules apply, since
-// there is no state; to get at the data of an event, use Decode.
+// Read hands out the events of the given subjects as they are stored, for a
+// read that neither Load nor a projection fits: one page of a long stream, the
+// events up to a certain one, or a single event. Every event is verified like
+// everything else the store reads, before the caller sees it, and a failure is
+// sorted into a category like with Load. Neither upcasters nor rules apply,
+// since there is no state; to get at the data of an event, use Decode.
 //
-// The options are those of the client SDK, so bounds, recursion and order are
-// set there. The iteration ends with the first error, and stops reading as
-// soon as the caller stops iterating. If the context ends first, it ends with
-// the context's error, so that a read that was cut short never looks complete.
+// The subjects come from SubjectTree or ExactSubject, as for a projection, and
+// their zero value panics. Without options, Read hands out every event of the
+// subjects, oldest first. FromEvent, AfterEvent, UpToEvent, and BeforeEvent
+// bound the IDs, which the database hands out as one ascending sequence
+// across all subjects, NewestFirst turns the order around, and FromLatestEvent
+// starts from the latest event of a type. Options that contradict each other
+// panic (see ReadOption). For anything else, use ReadEvents of the client SDK.
+//
+// A bound whose ID is not the ID of an event, such as an empty one, ends the
+// iteration with an error that wraps ErrNotARevision, before the database is
+// asked. Otherwise, the iteration ends with the first error, and stops reading
+// as soon as the caller stops iterating. If the context ends first, it ends
+// with the context's error, so that a read that was cut short never looks
+// complete.
 func Read(
 	ctx context.Context,
 	store *Store,
-	subject string,
-	options eventsourcingdb.ReadEventsOptions,
+	subjects Subjects,
+	options ...ReadOption,
 ) iter.Seq2[eventsourcingdb.Event, error] {
-	return func(yield func(eventsourcingdb.Event, error) bool) {
-		doing := fmt.Sprintf("reading %q", subject)
+	requireSubjects(subjects)
+	settings := readSettingsOf(subjects, options)
 
-		for event, err := range store.client.ReadEvents(ctx, subject, options) {
+	return func(yield func(eventsourcingdb.Event, error) bool) {
+		doing := fmt.Sprintf("reading %q", subjects.subject)
+
+		if option := settings.invalidBound(); option != "" {
+			yield(eventsourcingdb.Event{}, fmt.Errorf("%w: %s: %s needs the ID of an event",
+				ErrNotARevision, doing, option))
+			return
+		}
+
+		for event, err := range store.client.ReadEvents(ctx, subjects.subject, settings.database) {
 			if err != nil {
 				yield(eventsourcingdb.Event{}, readFailure(ctx, err, doing))
 				return
