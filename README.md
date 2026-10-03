@@ -1871,7 +1871,7 @@ Then run `trackedProjection` instead of `catalogProjection` (see [Running Projec
 
 `Tracking` accepts every view that implements the `RevisionSink` interface, which consists of the `Seen` function. `InMemoryView` implements it.
 
-*Note that calling `Tracking` without any view panics.*
+*Note that calling `Tracking` with `nil` as the projection, without any view, or with `nil` as one of the views panics.*
 
 The tracked projection keeps the mode and the batch size of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
 
@@ -2051,7 +2051,7 @@ To answer this way in a handler of your own, call the `Respond` function with th
 
 *Note that the function has the type `httpapi.ToCommand`. The request type only describes the body, so it may come from another package, for example one that the application shares with its clients.*
 
-*Note that calling `Route` with `nil` as the function panics.*
+*Note that calling `Route` with `nil` as the API or as the function, or with a decider whose `State` or `Decide` is `nil`, panics, rather than failing every request.*
 
 #### Adding to the Answer
 
@@ -2119,7 +2119,7 @@ mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Req
 
 *Note that `Handle` returns a panic as an error, which `StatusFor` maps to `500`, and which `Respond` logs with the value and the stack of the panic.*
 
-*Note that calling `Handle` with `nil` as the function panics, as with `Route`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
+*Note that calling `Handle` with `nil` as the API or as the function, or with a decider whose `State` or `Decide` is `nil`, panics, as with `Route`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
 #### Authorizing Commands
 
@@ -2224,7 +2224,7 @@ To answer this way in a handler of your own, call the `RespondResult` function w
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 
-*Note that calling `Query` with `nil` for either function panics.*
+*Note that calling `Query` with `nil` as the API, or for either function, panics, rather than failing every request.*
 
 #### Answering Queries in Your Own Format
 
@@ -2243,7 +2243,7 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
 
 *Note that `Ask` returns a panic as an error, as `Handle` does (see [Answering Commands in Your Own Format](#answering-commands-in-your-own-format)).*
 
-*Note that calling `Ask` with `nil` for either function panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
+*Note that calling `Ask` with `nil` as the API, or for either function, panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
 #### Reading Queries from the Body
 

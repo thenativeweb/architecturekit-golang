@@ -39,10 +39,10 @@ type Answer[TQuery any, TResult any] func(ctx context.Context, query TQuery) (TR
 // http.ErrAbortHandler panics on, since net/http expects it to abort the
 // response.
 //
-// A nil toQuery or answer is a programming error, so Ask panics, and does so
-// first, on every request, also one whose caller is unknown. Like any other
-// panic, that comes back as an error, which names the mistake rather than a
-// nil pointer.
+// A nil API, toQuery, or answer is a programming error, so Ask panics, and
+// does so first, on every request, also one whose caller is unknown. Like any
+// other panic, that comes back as an error, which names the mistake rather
+// than a nil pointer.
 func Ask[TUser any, TQuery any, TResult any](
 	r *http.Request,
 	api *API[TUser],
@@ -51,6 +51,9 @@ func Ask[TUser any, TQuery any, TResult any](
 ) (result TResult, err error) {
 	defer recoverInto(&err)
 
+	if api == nil {
+		panic("architecturekit/httpapi: Ask needs the API, not nil")
+	}
 	if toQuery == nil {
 		panic("architecturekit/httpapi: Ask needs a function that turns the request into a query, not nil")
 	}
@@ -160,8 +163,9 @@ func Varying(varies Volatile) QueryOption {
 // So is a result that can not be encoded, such as one that holds NaN, which
 // JSON has no number for.
 //
-// A nil toQuery or answer is a programming error, so Query panics, rather
-// than answering every request with 500, as Route does for its function.
+// A nil API, toQuery, or answer is a programming error, so Query panics, as
+// Route does, rather than failing every request, with 500, or for a nil API,
+// with no answer at all.
 func Query[TUser any, TQuery any, TResult any](
 	api *API[TUser],
 	mux *http.ServeMux,
@@ -170,6 +174,9 @@ func Query[TUser any, TQuery any, TResult any](
 	answer Answer[TQuery, TResult],
 	options ...QueryOption,
 ) {
+	if api == nil {
+		panic("architecturekit/httpapi: Query needs the API, not nil")
+	}
 	if toQuery == nil {
 		panic("architecturekit/httpapi: Query needs a function that turns the request into a query, not nil")
 	}

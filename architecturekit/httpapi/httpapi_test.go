@@ -440,6 +440,34 @@ func TestRoute(t *testing.T) {
 			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNothing, noteDecider())
 		})
 	})
+
+	t.Run("panics for a nil API", func(t *testing.T) {
+		// Without the panic, every request panics again while the panic is
+		// answered, and net/http closes the connection without an answer.
+		var noAPI *httpapi.API[user]
+
+		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs the API, not nil", func() {
+			httpapi.Route(noAPI, http.NewServeMux(), "POST /note", toNote, noteDecider())
+		})
+	})
+
+	t.Run("panics for a decider without a state", func(t *testing.T) {
+		decider := noteDecider()
+		decider.State = nil
+
+		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a decider with a state, not one whose State is nil", func() {
+			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNote, decider)
+		})
+	})
+
+	t.Run("panics for a decider without a function that decides", func(t *testing.T) {
+		decider := noteDecider()
+		decider.Decide = nil
+
+		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a decider with a function that decides, not one whose Decide is nil", func() {
+			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNote, decider)
+		})
+	})
 }
 
 // errBrokenBody is what failingReader fails with.
