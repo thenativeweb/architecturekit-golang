@@ -62,11 +62,22 @@ func (p *resumingProjection) SaveCheckpoint(_ context.Context, eventID string) e
 	return nil
 }
 
-// brokenView cannot be read, which an in-memory view never fails at.
-type brokenView struct{}
+// brokenView hands out its items and then fails, like a cursor of a database
+// whose connection breaks, which an in-memory view never does.
+type brokenView struct {
+	items []owner
+}
 
-func (brokenView) All(context.Context) (iterSeq[owner], error) {
-	return nil, errors.New("the view is unavailable")
+func (v brokenView) All(context.Context) iterSeq2[owner] {
+	return func(yield func(owner, error) bool) {
+		for _, item := range v.items {
+			if !yield(item, nil) {
+				return
+			}
+		}
+
+		yield(owner{}, errors.New("the view is unavailable"))
+	}
 }
 
 func TestStoredEvent(t *testing.T) {
@@ -195,8 +206,18 @@ func TestItemsOf(t *testing.T) {
 
 		items := architecturekittest.ItemsOf(recorder, brokenView{})
 
-		recorder.expectFailure(t, "reading the view")
+		recorder.expectFailure(t, "reading the view failed after 0 item(s): the view is unavailable")
 		assert.Nil(t, items)
+	})
+
+	t.Run("reports a view that fails after some items", func(t *testing.T) {
+		recorder := &spy{}
+
+		items := architecturekittest.ItemsOf(recorder, brokenView{items: []owner{{Name: "golo"}, {Name: "jane"}}})
+
+		recorder.expectFailure(t, "reading the view failed after 2 item(s): the view is unavailable")
+		assert.Len(t, recorder.failures, 1)
+		assert.Nil(t, items, "the items before the failure are not all there are")
 	})
 }
 
@@ -289,6 +310,14 @@ func TestExpectItems(t *testing.T) {
 
 		require.Len(t, recorder.failures, 1)
 		recorder.expectFailure(t, "expected 1 item(s), got 2")
+	})
+
+	t.Run("reports a view that fails after the expected items", func(t *testing.T) {
+		recorder := &spy{}
+
+		architecturekittest.ExpectItems(recorder, brokenView{items: []owner{{Name: "golo"}}}, owner{Name: "golo"})
+
+		recorder.expectFailure(t, "reading the view failed after 1 item(s): the view is unavailable")
 	})
 }
 

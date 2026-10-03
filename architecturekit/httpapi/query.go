@@ -286,7 +286,7 @@ func respondResultAt[TResult any](
 }
 
 // listOf turns a nil slice into an empty one, so that a query that finds
-// nothing answers with [] rather than null. slices.Collect, which the kit
+// nothing answers with [] rather than null. query.Collect, which the kit
 // suggests for turning items into a slice, returns nil when there are none.
 func listOf(result any) any {
 	value := reflect.ValueOf(result)

@@ -7,6 +7,6 @@ import (
 
 // Small aliases so that the test files stay readable.
 
-type iterSeq[T any] = iter.Seq[T]
+type iterSeq2[T any] = iter.Seq2[T, error]
 
 func jsonUnmarshal(data []byte, target any) error { return json.Unmarshal(data, target) }

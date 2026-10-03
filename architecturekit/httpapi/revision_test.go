@@ -37,13 +37,11 @@ func insertNote(t *testing.T, view *architecturekit.InMemoryView[string, noteIte
 
 func countNotesIn(view *architecturekit.InMemoryView[string, noteItem]) httpapi.Answer[countNotes, int] {
 	return func(ctx context.Context, _ countNotes) (int, error) {
-		items, err := view.All(ctx)
-		if err != nil {
-			return 0, err
-		}
-
 		count := 0
-		for range items {
+		for _, err := range view.All(ctx) {
+			if err != nil {
+				return 0, err
+			}
 			count++
 		}
 
@@ -583,13 +581,11 @@ func askOwnNotes(_ *http.Request, caller user) (ownNotes, error) {
 
 func answerOwnNotes(view *architecturekit.InMemoryView[string, ownedNote]) httpapi.Answer[ownNotes, []string] {
 	return func(ctx context.Context, query ownNotes) ([]string, error) {
-		items, err := view.All(ctx)
-		if err != nil {
-			return nil, err
-		}
-
 		texts := []string{}
-		for item := range items {
+		for item, err := range view.All(ctx) {
+			if err != nil {
+				return nil, err
+			}
 			if item.Owner == query.Owner {
 				texts = append(texts, item.Text)
 			}

@@ -9,7 +9,6 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -295,9 +294,13 @@ func TestRespondResult(t *testing.T) {
 		request, api := inAHandler(&logs)
 		recorder := httptest.NewRecorder()
 
-		// slices.Collect, which the kit suggests for turning items into a slice,
+		// query.Collect, which the kit suggests for turning items into a slice,
 		// returns nil when there are no items.
-		httpapi.RespondResult(recorder, request, api, slices.Collect(slices.Values([]noteResponse{})), nil)
+		notes, err := query.Collect(noteView().All(context.Background()))
+		require.NoError(t, err)
+		require.Nil(t, notes)
+
+		httpapi.RespondResult(recorder, request, api, notes, nil)
 
 		assert.Equal(t, "[]", strings.TrimSpace(recorder.Body.String()))
 	})

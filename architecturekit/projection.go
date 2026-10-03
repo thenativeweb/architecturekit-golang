@@ -564,9 +564,15 @@ func (f ProjectionFunc) Apply(ctx context.Context, event eventsourcingdb.Event) 
 // live, in memory or in a database, is the implementation's business.
 //
 // All hands out a sequence rather than a slice, so that the steps of a query
-// compose without materialising anything in between.
+// compose without materialising anything in between. Every element is an item
+// and an error, since a view in a database fails not only before it reads the
+// items, but also while it reads them, for example when its connection breaks
+// halfway. Such a view hands out the error as an element of its own, with the
+// zero value of the item, and stops. It also stops reading as soon as the
+// caller does, which the query package relies on to read no further than it
+// must.
 type View[TItem any] interface {
-	All(ctx context.Context) (iter.Seq[TItem], error)
+	All(ctx context.Context) iter.Seq2[TItem, error]
 }
 
 // KeyedView is a view that finds a single item by its key, without running

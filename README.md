@@ -1096,7 +1096,7 @@ The revision of an item fits such a precondition only if the item stands for exa
 
 Every function that changes the view takes the ID of the event it applies. An event that is not newer than the item it is about is skipped, so applying the same event twice changes nothing, as long as the item is still there. The view forgets the revision of an item it removes, so an event that adds the item, applied again after a later event has removed it, adds it again. A projection that is rebuilt applies every event once, in order, so with a view in memory, that does not happen.
 
-All functions take a context and return an error, as a view in a database would need. So a view in a database can offer functions of the same shape, which the handlers of a projection call the same way. The kit has no interface for the functions that change a view, though: a projection takes its view by its type, such as `*InMemoryView`, so moving it to a view in a database changes that type.
+All functions take a context and report an error, as a view in a database would need: `All` and `Lookup` hand it out along with the items, and every other function returns it. So a view in a database can offer functions of the same shape, which the handlers of a projection call the same way. The kit has no interface for the functions that change a view, though: a projection takes its view by its type, such as `*InMemoryView`, so moving it to a view in a database changes that type.
 
 If an upcaster splits a stored event into several events, they all carry the ID of the stored event (see [Versioning Events](#versioning-events)). A projection created with `NewProjection` hands each of them to its handler with a context that holds its position among them, and the view reads it from the context it gets. For the same ID, the view counts a later event as newer than an earlier one, so every one of them is applied, in order, also if several of them change the same item. Applying the stored event again still changes nothing, and the revision of the item stays the ID of the stored event. That is why a handler always hands the context it gets on to the view, rather than one of its own, such as `context.Background()`.
 
@@ -1143,18 +1143,19 @@ if err != nil {
 }
 ```
 
-To read all items, call the `All` function. It returns an iterator over a copy of the items, in the order in which they were added, which you can use e.g. inside a `for range` loop:
+To read all items, call the `All` function. It returns an iterator over a copy of the items, in the order in which they were added, which hands out each item together with an error. Use it e.g. inside a `for range` loop:
 
 ```go
-items, err := catalog.All(ctx)
-if err != nil {
-  // ...
-}
+for item, err := range catalog.All(ctx) {
+  if err != nil {
+    // ...
+  }
 
-for item := range items {
   // ...
 }
 ```
+
+The view in memory never fails while it hands out its items, so the error is always `nil`. A view in a database, however, may fail halfway, which is why every view hands out an error, and every loop checks it.
 
 *Note that the items you get share their slices, maps, and pointees with the view, so never change them (see [Sharing Items with Readers](#sharing-items-with-readers)).*
 
@@ -1259,7 +1260,7 @@ Selecting items with a function reads every item. To find items by a value direc
 ```go
 byAuthor := catalog.Index(func(item BookItem) string { return item.Author })
 
-books, err := byAuthor.Lookup(ctx, "Arthur C. Clarke")
+books := byAuthor.Lookup(ctx, "Arthur C. Clarke")
 
 changed, err := byAuthor.Update(ctx, "Arthur C. Clarke", event.ID, func(item *BookItem) {
   item.IsBorrowed = false
@@ -1268,21 +1269,47 @@ changed, err := byAuthor.Update(ctx, "Arthur C. Clarke", event.ID, func(item *Bo
 removed, err := byAuthor.Delete(ctx, "Arthur C. Clarke", event.ID)
 ```
 
-Several items may share a value. The index follows every change to the view, also when the value of an item changes, and hands out items in the order in which they were added.
+Several items may share a value. The index follows every change to the view, also when the value of an item changes, and `Lookup` hands out the items in the order in which they were added, together with an error, as `All` does.
 
 *Note that adding an index reads every item, so add indexes before the view is used.*
 
-To keep items somewhere else, for example in a database, implement the `View` interface, which consists of the `All` function:
+To keep items somewhere else, for example in a database, implement the `View` interface, which consists of the `All` function. It returns an iterator over the items and errors. A database fails not only before it reads the rows, but also while it reads them, for example when the connection breaks halfway. So hand out such an error with an empty item, and stop. Stop as well, and close the rows, as soon as the iterator is told to stop, which happens when the caller has seen enough, for example with `Take` or `First` (see [Defining Queries](#defining-queries)):
 
 ```go
 type BookTable struct {
-  // ...
+  db *sql.DB
 }
 
-func (t *BookTable) All(ctx context.Context) (iter.Seq[BookItem], error) {
-  // ...
+func (t *BookTable) All(ctx context.Context) iter.Seq2[BookItem, error] {
+  return func(yield func(BookItem, error) bool) {
+    rows, err := t.db.QueryContext(ctx, "SELECT id, title, author, is_borrowed, borrowed_until, event_id FROM books")
+    if err != nil {
+      yield(BookItem{}, err)
+      return
+    }
+    defer rows.Close()
+
+    for rows.Next() {
+      var item BookItem
+      err := rows.Scan(&item.ID, &item.Title, &item.Author, &item.IsBorrowed, &item.BorrowedUntil, &item.EventID)
+      if err != nil {
+        yield(BookItem{}, err)
+        return
+      }
+
+      if !yield(item, nil) {
+        return
+      }
+    }
+
+    if err := rows.Err(); err != nil {
+      yield(BookItem{}, err)
+    }
+  }
 }
 ```
+
+The error reaches the caller unchanged, through every function of the `query` package, so a category it belongs to, such as `ErrTransient`, still decides which status code an HTTP route answers with (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
 If the view can find a single item by its key, also implement the `Get` function, which makes it a `KeyedView`:
 
@@ -1731,7 +1758,13 @@ A transient failure is tried again without a limit. So if the mail server stays 
 
 ### Defining Queries
 
-A query describes what someone wants to know. Define it as a struct, and answer it with a function that reads a view. To turn the items into a slice, use `slices.Collect`:
+A query describes what someone wants to know. Define it as a struct, and answer it with a function that reads a view. To filter, order, page, and transform the items, use the `query` package:
+
+```go
+import "github.com/thenativeweb/architecturekit-golang/architecturekit/query"
+```
+
+To turn the items into a slice, call the `Collect` function. If the view fails while it is read, `Collect` returns its error instead:
 
 ```go
 type ListBooks struct {
@@ -1741,25 +1774,18 @@ type ListBooks struct {
 
 func listBooks(catalog architecturekit.View[BookItem]) func(context.Context, ListBooks) ([]BookItem, error) {
   return func(ctx context.Context, q ListBooks) ([]BookItem, error) {
-    items, err := catalog.All(ctx)
-    if err != nil {
-      return nil, err
-    }
+    items := catalog.All(ctx)
 
     // ...
 
-    return slices.Collect(items), nil
+    return query.Collect(items)
   }
 }
 ```
 
-To filter, order, page, and transform the items, use the `query` package:
+All functions of the `query` package take an iterator over items and errors, as `All` returns it, and those that return items return such an iterator again, so they can be combined without collecting anything in between. An error of the view ends the iterator. Every function hands it on unchanged, without calling the function you hand over for it, up to the function that returns the result, such as `Collect`, which returns it.
 
-```go
-import "github.com/thenativeweb/architecturekit-golang/architecturekit/query"
-```
-
-All of its functions take an iterator, and those that return items return an iterator again, so they can be combined without collecting anything in between.
+*Note that `Collect` returns no items along with an error, not even the ones it read before, so that a part of the result is never taken for all of it.*
 
 #### Filtering and Transforming Items
 
@@ -1802,7 +1828,7 @@ items = query.OrderByFunc(items, func(left, right BookItem) int {
 })
 ```
 
-*Note that ordering reads all items, and that it is stable, so items that compare as equal keep their order.*
+*Note that ordering reads all items before it hands out the first one, so if the view fails, it hands out the error alone. Ordering is stable, so items that compare as equal keep their order.*
 
 #### Paging Items
 
@@ -1825,7 +1851,7 @@ items = query.Take(query.Skip(items, 20), 10)
 To get the first item, call the `First` function. It returns `false` if there is none:
 
 ```go
-first, ok := query.First(items)
+first, ok, err := query.First(items)
 ```
 
 To get the only item, call the `Single` function. It returns `query.ErrNoItems` if there is none, and `query.ErrTooManyItems` if there are several:
@@ -1837,31 +1863,30 @@ type GetBook struct {
 
 func getBook(catalog architecturekit.View[BookItem]) func(context.Context, GetBook) (BookItem, error) {
   return func(ctx context.Context, q GetBook) (BookItem, error) {
-    items, err := catalog.All(ctx)
-    if err != nil {
-      return BookItem{}, err
-    }
-
-    return query.Single(query.Where(items, func(item BookItem) bool {
+    return query.Single(query.Where(catalog.All(ctx), func(item BookItem) bool {
       return item.ID == q.BookID
     }))
   }
 }
 ```
 
-*Note that the query package reads every item it is handed. To get an item by its key, call the `Get` function of a `KeyedView` instead, and to get items by the value of a secondary index, call the `Lookup` function of the index (see [Defining Views](#defining-views)).*
+Both stop reading as soon as they know the answer, and return an error of the view only if it comes before that. `First` reads no further than the first item, so it never sees an error that comes later. `Single` reads up to the second item, and only knows that an item is the only one once the view has ended, so it also returns an error that comes after the first item. With an error, the item is empty.
+
+*Note that `Where` asks about every item it is handed. To get an item by its key, call the `Get` function of a `KeyedView` instead, and to get items by the value of a secondary index, call the `Lookup` function of the index (see [Defining Views](#defining-views)).*
 
 #### Counting Items
 
 To count items, call the `Count` function. To check whether at least one item matches, call the `Any` function, which stops at the first match:
 
 ```go
-count := query.Count(items)
+count, err := query.Count(items)
 
-hasBorrowedBooks := query.Any(items, func(item BookItem) bool {
+hasBorrowedBooks, err := query.Any(items, func(item BookItem) bool {
   return item.IsBorrowed
 })
 ```
+
+`Count` reads all items, and if the view fails, it returns the error with `0`. `Any` returns an error only if the view fails before the first match.
 
 ### Reading Your Own Writes
 
@@ -2267,7 +2292,7 @@ Then call the `Query` function with the API, the mux, a pattern, the function th
 httpapi.Query(api, mux, "GET /api/books", toListBooks, answerBooks(listBooks(catalog)))
 ```
 
-The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `slices.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
+The route answers with `200 OK` and the result as JSON. A result without items is answered with an empty list, `[]`, even as the `nil` slice that `query.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
 
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error. As with `Respond`, an error without a status code of its own is answered with `500 Internal Server Error`, so wrap a mistake in the request that the handler finds itself with `httpapi.ErrMalformed` (see [Handling Commands over HTTP](#handling-commands-over-http)).
 
@@ -2441,14 +2466,9 @@ type ListOverdueBooks struct {
 
 func listOverdueBooks(catalog architecturekit.View[BookItem]) func(context.Context, ListOverdueBooks) ([]BookItem, error) {
   return func(ctx context.Context, q ListOverdueBooks) ([]BookItem, error) {
-    items, err := catalog.All(ctx)
-    if err != nil {
-      return nil, err
-    }
-
-    return slices.Collect(query.Where(items, func(item BookItem) bool {
+    return query.Collect(query.Where(catalog.All(ctx), func(item BookItem) bool {
       return item.IsBorrowed && item.BorrowedUntil < q.Today
-    })), nil
+    }))
   }
 }
 
@@ -2833,6 +2853,8 @@ To get the items as a slice instead, call the `ItemsOf` function:
 ```go
 items := architecturekittest.ItemsOf(t, catalog)
 ```
+
+Both fail the test if the view fails while it is read, also after some of the items.
 
 If a projection reads the time of an event, or the events of several subjects have to follow one another, call the `StoredEventsAt` function instead of `StoredEvents`. It numbers the events from the given ID on, and times them one minute apart from the given time on:
 
