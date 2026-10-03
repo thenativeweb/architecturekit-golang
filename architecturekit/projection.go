@@ -190,12 +190,18 @@ func run(
 		progress.disrupted(err)
 
 		// A session that got somewhere was healthy until it ended, and so was
-		// one that followed the stream for longer than the projection would
-		// wait now, even if no event arrived, as when a load balancer ends
-		// long-lived connections regularly. The next failure is then retried
-		// quickly again. A database that fails before the projection has caught
-		// up, or right after, is still given ever more time.
-		if checkpointAfter, _ := writer.checkpoint(ctx); checkpointAfter != checkpointBefore || liveFor > delay {
+		// one that followed the stream for longer than the initial delay, even
+		// if no event arrived, as when a load balancer ends long-lived
+		// connections regularly. The next failure is then retried quickly
+		// again. Comparing with the delay the projection has grown to instead
+		// would, once it has reached the maximum, keep a quiet projection
+		// waiting that long after every cut that comes sooner. So a database
+		// that ends every stream a few seconds after the projection has caught
+		// up is tried again after the initial delay each time, which is
+		// acceptable, since catching up, the expensive part, succeeded each
+		// time. A database that fails before the projection has caught up, or
+		// within the initial delay after, is still given ever more time.
+		if checkpointAfter, _ := writer.checkpoint(ctx); checkpointAfter != checkpointBefore || liveFor > store.reconnectInitialDelay {
 			delay = store.reconnectInitialDelay
 			attempt = 0
 		}
