@@ -279,18 +279,19 @@ func (v *InMemoryView[TKey, TItem]) All(context.Context) (iter.Seq[TItem], error
 	return slices.Values(items), nil
 }
 
-// Insert adds an item for the given event. An item whose key is already taken
-// is skipped if the event is not newer than that item, since the event has
-// been applied before. If the event is newer, a second item with the same key
-// points to a mistake in the events or the key, and Insert fails with an error
-// of the category ErrPermanent. To add an item or change an existing one, use
-// Upsert.
+// Insert adds an item for the given event, and reports what it did: Added if
+// it added the item, and AlreadyApplied if it skipped the event, since an item
+// with the same key has seen it, or a newer one. The latter is not an error,
+// since it happens when events are applied a second time. If the event is
+// newer than that item, a second item with the same key points to a mistake in
+// the events or the key, and Insert fails with an error of the category
+// ErrPermanent. To add an item or change an existing one, use Upsert.
 //
 // A later part of the same event counts as newer (see InMemoryView), so two
 // parts of a split event that insert an item with the same key fail as well.
-func (v *InMemoryView[TKey, TItem]) Insert(ctx context.Context, eventID string, item TItem) error {
+func (v *InMemoryView[TKey, TItem]) Insert(ctx context.Context, eventID string, item TItem) (Outcome, error) {
 	if err := requireEventID(eventID); err != nil {
-		return err
+		return 0, err
 	}
 
 	part := partOf(ctx)
@@ -302,23 +303,28 @@ func (v *InMemoryView[TKey, TItem]) Insert(ctx context.Context, eventID string, 
 
 	if entry, isFound := v.entries[key]; isFound {
 		isNewer, err := isNewerThan(eventID, part, entry)
-		if err != nil || !isNewer {
-			return err
+		if err != nil {
+			return 0, err
+		}
+		if !isNewer {
+			return AlreadyApplied, nil
 		}
 
-		return fmt.Errorf("%w: event %s inserts an item with the key %v, which is already taken",
+		return 0, fmt.Errorf("%w: event %s inserts an item with the key %v, which is already taken",
 			ErrPermanent, eventID, key)
 	}
 
 	v.add(key, item, eventID, part)
 
-	return nil
+	return Added, nil
 }
 
-// Upsert changes the item with the given key, or adds one if there is none.
-// The change starts from the existing item, or from the zero value of TItem,
-// so a single function describes both, and it has to set the fields that make
-// up the key. An existing item is skipped if the event is not newer than it.
+// Upsert changes the item with the given key, or adds one if there is none,
+// and reports what it did: Added if it added the item, Applied if it changed
+// the existing one, and AlreadyApplied if it skipped the event, since the
+// existing item has seen it, or a newer one. The change starts from the
+// existing item, or from the zero value of TItem, so a single function
+// describes both, and it has to set the fields that make up the key.
 //
 // Like with Update, the change of an existing item replaces the fields that
 // hold slices, maps, or pointers rather than writing into them, since every
@@ -336,9 +342,9 @@ func (v *InMemoryView[TKey, TItem]) Upsert(
 	key TKey,
 	eventID string,
 	change func(item *TItem),
-) error {
+) (Outcome, error) {
 	if err := requireEventID(eventID); err != nil {
-		return err
+		return 0, err
 	}
 
 	part := partOf(ctx)
@@ -347,21 +353,20 @@ func (v *InMemoryView[TKey, TItem]) Upsert(
 	defer v.mutex.Unlock()
 
 	if _, isFound := v.entries[key]; isFound {
-		_, err := v.change(key, eventID, part, change)
-		return err
+		return v.change(key, eventID, part, change)
 	}
 
 	var item TItem
 	change(&item)
 
 	if itemKey := v.keyOf(item); itemKey != key {
-		return fmt.Errorf("%w: event %s upserts an item with the key %v under the key %v",
+		return 0, fmt.Errorf("%w: event %s upserts an item with the key %v under the key %v",
 			ErrPermanent, eventID, itemKey, key)
 	}
 
 	v.add(key, item, eventID, part)
 
-	return nil
+	return Added, nil
 }
 
 // Update changes the item with the given key, and reports what it did: Applied

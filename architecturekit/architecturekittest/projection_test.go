@@ -26,7 +26,8 @@ func ownerView() *architecturekit.InMemoryView[string, owner] {
 func insertOwner(t *testing.T, view *architecturekit.InMemoryView[string, owner], eventID string, name string) {
 	t.Helper()
 
-	require.NoError(t, view.Insert(context.Background(), eventID, owner{Name: name}), "failed to insert %q", name)
+	_, err := view.Insert(context.Background(), eventID, owner{Name: name})
+	require.NoError(t, err, "failed to insert %q", name)
 }
 
 func ownerProjection(view *architecturekit.InMemoryView[string, owner]) architecturekit.Projection {
@@ -40,7 +41,8 @@ func ownerProjection(view *architecturekit.InMemoryView[string, owner]) architec
 			return err
 		}
 
-		return view.Insert(ctx, event.ID, owner{Name: payload.Owner})
+		_, err := view.Insert(ctx, event.ID, owner{Name: payload.Owner})
+		return err
 	})
 }
 
@@ -165,7 +167,8 @@ func TestProject(t *testing.T) {
 
 		projection := architecturekit.NewProjection().
 			On(func(ctx context.Context, event architecturekit.Envelope[opened]) error {
-				return view.Insert(ctx, event.ID, owner{Name: event.Data.Owner})
+				_, err := view.Insert(ctx, event.ID, owner{Name: event.Data.Owner})
+				return err
 			})
 
 		architecturekittest.Project(t, projection,

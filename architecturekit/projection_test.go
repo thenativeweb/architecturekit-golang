@@ -244,6 +244,29 @@ func TestProjection(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("refuses a nil projection", func(t *testing.T) {
+		// Otherwise a run would only fail once it calls the projection, in the
+		// background, so every entry point refuses it before it starts.
+		for name, run := range map[string]func(){
+			"StartProjection": func() {
+				_ = architecturekit.StartProjection(t.Context(), nil, architecturekit.SubjectTree("/"), nil)
+			},
+			"StartTransactionalProjection": func() {
+				_ = architecturekit.StartTransactionalProjection(t.Context(), nil, architecturekit.SubjectTree("/"), nil)
+			},
+			"CatchUpProjection": func() {
+				_ = architecturekit.CatchUpProjection(t.Context(), nil, architecturekit.SubjectTree("/"), nil)
+			},
+			"CatchUpTransactionalProjection": func() {
+				_ = architecturekit.CatchUpTransactionalProjection(t.Context(), nil, architecturekit.SubjectTree("/"), nil)
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				assert.PanicsWithValue(t, "architecturekit: "+name+" needs a projection, not nil", run)
+			})
+		}
+	})
 }
 
 type refusingCollector struct{}

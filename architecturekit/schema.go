@@ -26,6 +26,7 @@ var (
 	textMarshalerType   = reflect.TypeFor[encoding.TextMarshaler]()
 	textAppenderType    = reflect.TypeFor[encoding.TextAppender]()
 	numberType          = reflect.TypeFor[json.Number]()
+	rawMessageType      = reflect.TypeFor[json.RawMessage]()
 )
 
 // encodesAsJSON reports whether a type writes its JSON itself, with
@@ -86,7 +87,9 @@ type derivedSchema struct {
 //   - A time.Time is a string in the date-time format, a json.Number a number,
 //     unless the string option makes it a string, and a type with a
 //     MarshalText or an AppendText function a string. An interface allows any
-//     value, even if it declares a Schema function.
+//     value, even if it declares a Schema function. So does a json.RawMessage,
+//     which is the same type as jsontext.Value of encoding/json/v2, since
+//     encoding/json writes the JSON it holds, or null if it is nil.
 //   - The type of a field that has a Schema function is described by it, like
 //     an event is, unless the type is an interface. encoding/json writes the
 //     value an interface holds, or null, so there is no value whose Schema
@@ -98,12 +101,13 @@ type derivedSchema struct {
 // has the shape encoding/json decodes JSON into: objects are map[string]any,
 // arrays []any, and numbers float64.
 //
-// A type that encodes itself with MarshalJSON, or with MarshalJSONTo of
-// encoding/json/v2, can not be derived, and neither can one with MarshalText or
-// AppendText on a pointer receiver only, since encoding/json calls those only
-// for a value it can take the address of. Nor can a recursive type, a channel,
-// a function or a complex number. That is a programming error, so DeriveSchema
-// panics, naming the type.
+// Apart from time.Time, json.Number and json.RawMessage, a type that encodes
+// itself with MarshalJSON, or with MarshalJSONTo of encoding/json/v2, can not
+// be derived, and neither can one with MarshalText or AppendText on a pointer
+// receiver only, since encoding/json calls those only for a value it can take
+// the address of. Nor can a recursive type, a channel, a function or a complex
+// number. That is a programming error, so DeriveSchema panics, naming the
+// type.
 //
 // DeriveSchema also refuses a type that has its Schema function only from an
 // embedded field, as Evolve does for an event and for the type of a field: Go
@@ -352,6 +356,12 @@ func (d *deriver) structure(valueType reflect.Type) (map[string]any, error) {
 	// literal it holds, or 0 if it is empty.
 	if valueType == numberType {
 		return map[string]any{"type": "number"}, nil
+	}
+
+	// A json.RawMessage encodes itself, too, but what it writes is the JSON it
+	// holds, or null if it is nil, which, as for an interface, can be any value.
+	if valueType == rawMessageType {
+		return map[string]any{}, nil
 	}
 
 	if encodesAsJSON(valueType) {
