@@ -786,10 +786,12 @@ func TestNilEvent(t *testing.T) {
 	refusal := nilRefusal(1, "/account/1")
 
 	t.Run("is a permanent failure that names the subject and the index", func(t *testing.T) {
+		withOnlyNil := emit{subject: "/account/2", events: []architecturekit.Event{nil}}
+
 		architecturekittest.Given(t, emitDecider()).
-			When(emit{subject: "/account/2", events: []architecturekit.Event{nil}}).
-			ThenFailed(architecturekit.ErrPermanent).
-			ThenRejected(nilRefusal(0, "/account/2"))
+			When(withOnlyNil).
+			ThenFailed(architecturekit.ErrPermanent)
+		assert.Equal(t, nilRefusal(0, "/account/2"), refusalOf(t, emitDecider(), withOnlyNil))
 	})
 
 	t.Run("fails every assertion that expects events or nothing, naming the cause", func(t *testing.T) {
@@ -812,17 +814,15 @@ func TestNilEvent(t *testing.T) {
 	})
 
 	t.Run("names the first event that is nil", func(t *testing.T) {
-		architecturekittest.Given(t, emitDecider()).
-			When(emit{events: []architecturekit.Event{opened{Owner: "golo"}, nil, opened{Owner: "jane"}, nil}}).
-			ThenRejected(refusal)
+		assert.Equal(t, refusal, refusalOf(t, emitDecider(),
+			emit{events: []architecturekit.Event{opened{Owner: "golo"}, nil, opened{Owner: "jane"}, nil}}))
 	})
 
 	t.Run("comes before an event without a rule and one that can not be encoded, as with Execute", func(t *testing.T) {
 		// The event that is nil comes last, so it is reported only because all
 		// events are checked for nil first.
-		architecturekittest.Given(t, measuringDecider()).
-			When(emit{events: []architecturekit.Event{measured{Value: math.NaN()}, unheardOf{}, nil}}).
-			ThenRejected(nilRefusal(2, "/account/1"))
+		assert.Equal(t, nilRefusal(2, "/account/1"), refusalOf(t, measuringDecider(),
+			emit{events: []architecturekit.Event{measured{Value: math.NaN()}, unheardOf{}, nil}}))
 	})
 }
 

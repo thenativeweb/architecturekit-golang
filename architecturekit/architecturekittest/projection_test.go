@@ -314,7 +314,8 @@ func shelfView(t *testing.T, shelves ...shelf) *architecturekit.InMemoryView[str
 
 	view := architecturekit.NewInMemoryView(func(item shelf) string { return item.Name })
 	for i, item := range shelves {
-		require.NoError(t, view.Insert(context.Background(), strconv.Itoa(i), item), "failed to insert %q", item.Name)
+		_, err := view.Insert(context.Background(), strconv.Itoa(i), item)
+		require.NoError(t, err, "failed to insert %q", item.Name)
 	}
 
 	return view

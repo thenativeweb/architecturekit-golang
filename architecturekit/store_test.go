@@ -290,7 +290,7 @@ func TestExecute(t *testing.T) {
 
 		// The fixture checks for nil events itself, as Execute does, so both
 		// have to word the refusal alike.
-		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+		assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
 	})
 
 	t.Run("checks for nil events before the rules and the encoding like the test fixture", func(t *testing.T) {
@@ -302,7 +302,7 @@ func TestExecute(t *testing.T) {
 		require.ErrorContains(t, err, "event 2 that the decider returned is nil",
 			"Execute has to check all events for nil first")
 
-		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+		assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
 	})
 
 	t.Run("writes an event its state ignores", func(t *testing.T) {
