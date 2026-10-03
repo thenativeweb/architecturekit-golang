@@ -77,7 +77,10 @@ type ProjectionRun struct {
 //	select {
 //	case <-run.CaughtUp():
 //	case <-run.Done():
-//	  return run.Err()
+//	  if err := run.Err(); err != nil {
+//	    return err
+//	  }
+//	  return ctx.Err()
 //	}
 //
 // If reading fails, or if the database ends the stream, for example on a
@@ -87,7 +90,10 @@ type ProjectionRun struct {
 // handled the same way, so the event is tried again. Only a failure that
 // trying again will not fix, such as any other error of Apply, ends the run,
 // and Err returns it. Ending the context is how a projection is stopped, so
-// Err returns nil then.
+// Err returns nil then. That is why the example returns the error of the
+// context if Err returns nil: a run whose context ends before it has caught
+// up, for example on a timeout while the database can not be reached, has not
+// caught up, and returning Err alone would look like success.
 //
 // A panic in the projection, such as one in Apply that writes into a nil map,
 // ends the run as well, rather than the whole process. Err then returns an
@@ -177,7 +183,8 @@ func (r *ProjectionRun) Done() <-chan struct{} {
 }
 
 // Err returns why the run has ended, once Done is closed, and nil before. It is
-// nil as well if the run ended because its context did.
+// nil as well if the run ended because its context did, so a caller that waits
+// for CaughtUp takes the error of the context then (see StartProjection).
 func (r *ProjectionRun) Err() error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()

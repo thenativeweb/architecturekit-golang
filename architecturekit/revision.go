@@ -31,9 +31,10 @@ type Revisioned interface {
 	// it has seen none.
 	Revision() string
 
-	// WaitFor returns once the view has reached the revision, or when the
-	// context ends. Waiting for a revision the view already passed returns
-	// immediately.
+	// WaitFor returns nil once the view has reached the revision, at once if
+	// it has already. If the context ends first, it returns the error of the
+	// context, and for a revision that is not one, an error that wraps
+	// ErrNotARevision.
 	WaitFor(ctx context.Context, revision string) error
 }
 

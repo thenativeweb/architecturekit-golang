@@ -76,9 +76,9 @@ type derivedSchema struct {
 //     function. Fields with omitempty or omitzero, and fields of an embedded
 //     pointer, are optional, all others are required, and no other fields are
 //     allowed.
-//   - A string is a string, a bool a boolean, an integer an integer, and a
-//     floating-point number a number. The string option of a json tag turns
-//     such a field into a string.
+//   - A string is a string, a bool a boolean, an int or any other integer type
+//     an integer, and a float64 or a float32 a number. The string option of a
+//     json tag turns such a field into a string.
 //   - A slice is an array, a []byte a string, and an array an array of exactly
 //     its length. A map is an object whose values all have the same schema.
 //   - A pointer, a slice and a map may also be null, since encoding/json writes
@@ -95,6 +95,13 @@ type derivedSchema struct {
 //     value an interface holds, or null, so there is no value whose Schema
 //     function could be asked, and the interface is described as if it had
 //     none.
+//
+// EventSourcingDB currently reads every number in the data of an event as a
+// float64, which holds an integer exactly only if its magnitude is at most
+// 2^53-1. A larger integer is stored changed, without an error, and one close
+// to the largest int64 or uint64 may end up beyond the range of its type, so
+// that the event can not be read back any more. To keep a 64-bit integer
+// exact, give its field the string option of the json tag.
 //
 // T's own Schema function, if it has one, is not called, so that it can start
 // from the derived schema. The returned schema belongs to the caller, and it

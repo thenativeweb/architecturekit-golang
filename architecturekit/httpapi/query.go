@@ -106,7 +106,9 @@ type querySettings struct {
 //
 //   - The clock: an answer that depends on the time, such as everything due
 //     today, puts the time into the query or adds Varying, or callers are told
-//     that nothing has changed when it has.
+//     that nothing has changed when it has. Either holds the time only as
+//     precisely as the answer depends on it, such as the day: an instant
+//     makes every tag unique, so that nothing is ever answered with 304.
 //   - Another view: the revision is that of the view handed over, so an answer
 //     that also reads from another view does not notice when that one
 //     changes.
