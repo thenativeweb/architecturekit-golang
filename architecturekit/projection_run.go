@@ -89,13 +89,19 @@ type ProjectionRun struct {
 // and Err returns it. Ending the context is how a projection is stopped, so
 // Err returns nil then.
 //
+// A panic in the projection, such as one in Apply that writes into a nil map,
+// ends the run as well, rather than the whole process. Err then returns an
+// error of the category ErrPermanent, since a panic is a mistake in the code
+// that trying again will not fix. Its message holds the value and the stack of
+// the panic.
+//
 // To wait for the run to end, as a process does that does nothing else:
 //
 //	<-run.Done()
 //	return run.Err()
 //
-// A projection that is transactional as well is a programming error and
-// panics; use StartTransactionalProjection for it.
+// A nil projection, or one that is transactional as well, is a programming
+// error and panics; use StartTransactionalProjection for the latter.
 func StartProjection(
 	ctx context.Context,
 	store *Store,
@@ -104,6 +110,7 @@ func StartProjection(
 	options ...ProjectionOption,
 ) *ProjectionRun {
 	requireSubjects(subjects)
+	requireProjection("StartProjection", projection)
 	refuseTransactional(projection)
 
 	return start(projectionSettingsOf(options), func(progress *ProjectionRun) error {
@@ -113,7 +120,10 @@ func StartProjection(
 
 // StartTransactionalProjection is StartProjection for a transactional
 // projection. Every batch is applied within one transaction, which is
-// committed together with the ID of its last event.
+// committed together with the ID of its last event. A panic in the Apply of a
+// transaction rolls the transaction back before the run ends.
+//
+// A nil projection is a programming error and panics.
 func StartTransactionalProjection(
 	ctx context.Context,
 	store *Store,
@@ -122,6 +132,7 @@ func StartTransactionalProjection(
 	options ...ProjectionOption,
 ) *ProjectionRun {
 	requireSubjects(subjects)
+	requireProjection("StartTransactionalProjection", projection)
 
 	return start(projectionSettingsOf(options), func(progress *ProjectionRun) error {
 		return run(ctx, store, subjects,

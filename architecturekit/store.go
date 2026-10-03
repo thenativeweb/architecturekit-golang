@@ -134,7 +134,8 @@ func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
 // reading again. It learns which projection, why, how long it waits, and the
 // how-manyth attempt in a row this is (see Reconnect). Use it to log, since the
 // kit itself does not; give the projections names with Named, so that the log
-// tells them apart.
+// tells them apart. A panic in observe ends the run, as a panic in the
+// projection does (see StartProjection).
 func WithReconnectObserver(observe func(Reconnect)) StoreOption {
 	return func(store *Store) {
 		store.reconnectObserver = observe

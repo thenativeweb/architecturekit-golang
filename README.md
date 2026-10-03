@@ -737,7 +737,7 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 *Note that `ErrConflict` is a special case of `ErrTransient`, so check for it first.*
 
-An error that your own code returns, for example from a decider or a projection, passes through unchanged, so it belongs to a category only if you wrap it with one, as `NewDomainError` does. The `httpapi` and `query` packages have errors of their own, which `StatusFor` maps to status codes (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes) and [Getting a Single Item](#getting-a-single-item)).
+An error that your own code returns, for example from a decider or a projection, passes through unchanged, so it belongs to a category only if you wrap it with one, as `NewDomainError` does. A panic in a projection, on the other hand, comes back as an error of the category `ErrPermanent` (see [Running Projections](#running-projections)). The `httpapi` and `query` packages have errors of their own, which `StatusFor` maps to status codes (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes) and [Getting a Single Item](#getting-a-single-item)).
 
 If the context ends, reading and writing stop, and the error is the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides.
 
@@ -1384,7 +1384,7 @@ logProjection := architecturekit.ProjectionFunc(func(ctx context.Context, event 
 
 To run a projection, call the `StartProjection` function with a context, the store, the subjects to read, and the projection. Say which subjects with the `SubjectTree` function, which stands for the given subject together with every subject below it, or with the `ExactSubject` function, which stands for the given subject alone. A projection usually reads a tree, such as every book below `/books`. There is no default, so that every projection says which one it means, since the client SDK reads a single subject unless told otherwise.
 
-*Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection` and the other functions that run a projection panic.*
+*Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection` and the other functions that run a projection panic, as does a `nil` projection.*
 
 The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that:
 
@@ -1412,6 +1412,8 @@ The options after the projection are optional. `Named` gives the projection a na
 *Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic.*
 
 `CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did, since canceling the context is how a projection is stopped. If `Apply` returns an error that trying again will not fix, the run ends, and `Err` returns it.
+
+If the projection panics, for example because `Apply` writes into a map that was never made, the run ends as well, rather than the whole process. `Err` then returns an error of the category `ErrPermanent`, since a panic is a mistake in the code that trying again will not fix. Its message holds the value and the stack of the panic, so log it to find out where the panic happened. This holds for every function of the projection that the run calls, and for the observer of reconnects (see below). Once the run has ended, `Liveness` answers `503`, so that the orchestrator restarts the application (see [Checking Health over HTTP](#checking-health-over-http)).
 
 *Note that canceling the context stops the projection, so `defer cancel()` stops it as soon as the surrounding function returns. That is too early for a function that only sets up the application (see [Putting It Together](#putting-it-together)).*
 
@@ -1470,7 +1472,7 @@ if status.Phase == architecturekit.PhaseReconnecting && time.Since(status.Since)
 }
 ```
 
-To only apply the events that are already stored, for example for a batch job or in a test, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied. If the context ends before that, it returns the error of the context, so that a read model that is only partly built does not look complete:
+To only apply the events that are already stored, for example for a batch job or in a test, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied. If the context ends before that, it returns the error of the context, so that a read model that is only partly built does not look complete. If the projection panics, it returns the same error a run ends with, rather than panicking:
 
 ```go
 err := architecturekit.CatchUpProjection(context.TODO(), store, architecturekit.SubjectTree("/books"), catalogProjection)
@@ -1604,7 +1606,7 @@ func (tx *bookTableTx) Rollback(ctx context.Context) error {
 }
 ```
 
-*Note that `Rollback` is not called after `Commit` fails, so `Commit` has to roll back itself if it can not finish, as above.*
+*Note that `Rollback` is not called after `Commit` fails, or panics, so `Commit` has to roll back itself if it can not finish, as above.*
 
 To run a transactional projection, call the `StartTransactionalProjection` or the `CatchUpTransactionalProjection` function instead of `StartProjection` or `CatchUpProjection`. They take the same arguments:
 
@@ -1616,7 +1618,7 @@ run := architecturekit.StartTransactionalProjection(ctx, store, architecturekit.
 
 *Note that `StartProjection`, `CatchUpProjection`, and `Tracking` panic for a projection that implements `Transactional` in addition to `Apply`, since calling `Apply` would bypass the transactions.*
 
-The place where a view keeps its data can fail as well, and such a failure counts like an error of `Apply`, whether it comes from `Checkpoint`, `SaveCheckpoint`, `Begin`, `Commit`, or the `Apply` function of a `Tx`. An error that does not belong to `ErrTransient` ends the run, so `Liveness` answers `503`, and the orchestrator restarts the application (see [Checking Health over HTTP](#checking-health-over-http)). That fits a mistake, such as a statement that the database refuses, but not a failure that may pass, such as a lost connection or a deadlock. Report such a failure as an error of the category `ErrTransient`, as `Begin` does above. The run then waits and tries again from where it stopped, with the same growing delay as when reading from EventSourcingDB fails (see [Running Projections](#running-projections)).
+The place where a view keeps its data can fail as well, and such a failure counts like an error of `Apply`, whether it comes from `Checkpoint`, `SaveCheckpoint`, `Begin`, `Commit`, or the `Apply` function of a `Tx`. An error that does not belong to `ErrTransient` ends the run, so `Liveness` answers `503`, and the orchestrator restarts the application (see [Checking Health over HTTP](#checking-health-over-http)). That fits a mistake, such as a statement that the database refuses, but not a failure that may pass, such as a lost connection or a deadlock. Report such a failure as an error of the category `ErrTransient`, as `Begin` does above. The run then waits and tries again from where it stopped, with the same growing delay as when reading from EventSourcingDB fails (see [Running Projections](#running-projections)). A panic in any of these functions, on the other hand, always ends the run, since it is a mistake in the code, even if it panics with an error of the category `ErrTransient`. A panic in the `Apply` function of a `Tx` rolls the transaction back first, as an error does.
 
 *Note that which failures may pass depends on the database and its driver, so mark only those. A failure that is marked as transient but never passes keeps the run trying forever, while `Liveness` keeps answering `200`.*
 
@@ -1883,7 +1885,7 @@ Then run `trackedProjection` instead of `catalogProjection` (see [Running Projec
 
 `Tracking` accepts every view that implements the `RevisionSink` interface, which consists of the `Seen` function. `InMemoryView` implements it.
 
-*Note that calling `Tracking` without any view panics.*
+*Note that calling `Tracking` with `nil` as the projection, without any view, or with `nil` as one of the views panics.*
 
 The tracked projection keeps the mode and the batch size of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
 
@@ -2063,7 +2065,7 @@ To answer this way in a handler of your own, call the `Respond` function with th
 
 *Note that the function has the type `httpapi.ToCommand`. The request type only describes the body, so it may come from another package, for example one that the application shares with its clients.*
 
-*Note that calling `Route` with `nil` as the function panics.*
+*Note that calling `Route` with `nil` as the API or as the function, or with a decider whose `State` or `Decide` is `nil`, panics, rather than failing every request.*
 
 #### Adding to the Answer
 
@@ -2131,7 +2133,7 @@ mux.HandleFunc("POST /api/acquire-book", func(w http.ResponseWriter, r *http.Req
 
 *Note that `Handle` returns a panic as an error, which `StatusFor` maps to `500`, and which `Respond` logs with the value and the stack of the panic.*
 
-*Note that calling `Handle` with `nil` as the function panics, as with `Route`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
+*Note that calling `Handle` with `nil` as the API or as the function, or with a decider whose `State` or `Decide` is `nil`, panics, as with `Route`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
 #### Authorizing Commands
 
@@ -2236,7 +2238,7 @@ To answer this way in a handler of your own, call the `RespondResult` function w
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 
-*Note that calling `Query` with `nil` for either function panics.*
+*Note that calling `Query` with `nil` as the API, or for either function, panics, rather than failing every request.*
 
 #### Answering Queries in Your Own Format
 
@@ -2255,7 +2257,7 @@ mux.HandleFunc("GET /api/books", func(w http.ResponseWriter, r *http.Request) {
 
 *Note that `Ask` returns a panic as an error, as `Handle` does (see [Answering Commands in Your Own Format](#answering-commands-in-your-own-format)).*
 
-*Note that calling `Ask` with `nil` for either function panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
+*Note that calling `Ask` with `nil` as the API, or for either function, panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
 #### Reading Queries from the Body
 
