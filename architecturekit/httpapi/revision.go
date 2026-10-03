@@ -101,9 +101,9 @@ const methodQuery = "QUERY"
 //
 // HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, which it
 // treats like GET, and 412 for every other method, such as POST, which a
-// query whose input does not fit into the query string is sent with. Both carry the tag and the revision of the
-// current answer, and only 412 has a body, which is a message, as with any
-// other answer that is not a success.
+// query whose input does not fit into the query string is sent with. Both
+// carry the tag and the revision of the current answer, and only 412 has a
+// body, which is a message, as with any other answer that is not a success.
 func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string) bool {
 	if tag == "" || !holdsTag(r, tag) {
 		return false
