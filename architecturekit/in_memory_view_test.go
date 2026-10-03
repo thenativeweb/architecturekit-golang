@@ -3,6 +3,7 @@ package architecturekit_test
 import (
 	"context"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
@@ -52,11 +54,15 @@ func mustGet(t *testing.T, view *architecturekit.InMemoryView[string, book], id 
 func idsIn(t *testing.T, view architecturekit.View[book]) []string {
 	t.Helper()
 
-	items, err := view.All(context.Background())
-	require.NoError(t, err)
+	return bookIDsOf(t, view.All(context.Background()))
+}
+
+func bookIDsOf(t *testing.T, items iter.Seq2[book, error]) []string {
+	t.Helper()
 
 	var ids []string
-	for item := range items {
+	for item, err := range items {
+		require.NoError(t, err)
 		ids = append(ids, item.ID)
 	}
 
@@ -98,11 +104,30 @@ func TestInMemoryView(t *testing.T) {
 		view := bookView()
 		mustInsert(t, view, "1", book{ID: "a"})
 
-		items, _ := view.All(context.Background())
+		items := view.All(context.Background())
 		mustInsert(t, view, "2", book{ID: "b"})
 
 		// Writing while a query holds its result must not change what it holds.
-		assert.Len(t, slices.Collect(items), 1, "a query result must not change underneath")
+		assert.Equal(t, []string{"a"}, bookIDsOf(t, items), "a query result must not change underneath")
+		assert.Equal(t, []string{"a"}, bookIDsOf(t, items), "reading the result again must hand out the same items")
+	})
+
+	t.Run("stops handing out items when the caller does", func(t *testing.T) {
+		view := bookView()
+		mustInsert(t, view, "1", book{ID: "a"})
+		mustInsert(t, view, "2", book{ID: "b"})
+
+		// A view that went on after the caller stopped would make the loop panic.
+		var ids []string
+		for item, err := range view.All(context.Background()) {
+			require.NoError(t, err)
+			ids = append(ids, item.ID)
+			if len(ids) == 1 {
+				break
+			}
+		}
+
+		assert.Equal(t, []string{"a"}, ids)
 	})
 
 	t.Run("skips an insert that is not newer", func(t *testing.T) {
@@ -395,15 +420,7 @@ func TestInMemoryView(t *testing.T) {
 func lookedUp(t *testing.T, index *architecturekit.InMemoryIndex[string, book, string], shelf string) []string {
 	t.Helper()
 
-	items, err := index.Lookup(context.Background(), shelf)
-	require.NoError(t, err)
-
-	var ids []string
-	for item := range items {
-		ids = append(ids, item.ID)
-	}
-
-	return ids
+	return bookIDsOf(t, index.Lookup(context.Background(), shelf))
 }
 
 func TestInMemoryIndex(t *testing.T) {
@@ -431,6 +448,37 @@ func TestInMemoryIndex(t *testing.T) {
 
 		assert.Empty(t, lookedUp(t, byShelf, "left"))
 		assert.Equal(t, []string{"a"}, lookedUp(t, byShelf, "right"))
+	})
+
+	t.Run("hands out a copy", func(t *testing.T) {
+		view := bookView()
+		byShelf := view.Index(func(item book) string { return item.Shelf })
+		mustInsert(t, view, "1", book{ID: "a", Shelf: "left"})
+
+		items := byShelf.Lookup(context.Background(), "left")
+		mustInsert(t, view, "2", book{ID: "b", Shelf: "left"})
+
+		assert.Equal(t, []string{"a"}, bookIDsOf(t, items), "a query result must not change underneath")
+		assert.Equal(t, []string{"a"}, bookIDsOf(t, items), "reading the result again must hand out the same items")
+	})
+
+	t.Run("stops handing out items when the caller does", func(t *testing.T) {
+		view := bookView()
+		byShelf := view.Index(func(item book) string { return item.Shelf })
+		mustInsert(t, view, "1", book{ID: "a", Shelf: "left"})
+		mustInsert(t, view, "2", book{ID: "b", Shelf: "left"})
+
+		// An index that went on after the caller stopped would make the loop panic.
+		var ids []string
+		for item, err := range byShelf.Lookup(context.Background(), "left") {
+			require.NoError(t, err)
+			ids = append(ids, item.ID)
+			if len(ids) == 1 {
+				break
+			}
+		}
+
+		assert.Equal(t, []string{"a"}, ids)
 	})
 
 	t.Run("updates and deletes by value", func(t *testing.T) {
@@ -563,15 +611,15 @@ func TestCloneWith(t *testing.T) {
 				mustInsert(t, view, "1", newShelfItem("a"))
 
 				got := mustGetShelf(t, view, "a")
-				items, err := view.All(ctx)
-				require.NoError(t, err)
+				items := view.All(ctx)
 
 				require.NoError(t, change(view))
 
 				// What the readers got before the change must stay as it was.
 				assert.Equal(t, []string{"42"}, got.BookIDs, "a change must not reach the slice of an item that was read")
 				assert.Equal(t, map[string]string{"genre": "fiction"}, got.Labels, "a change must not reach the map of an item that was read")
-				for item := range items {
+				for item, err := range items {
+					require.NoError(t, err)
 					assert.Equal(t, []string{"42"}, item.BookIDs, "a change must not reach the slice of an item that was listed")
 					assert.Equal(t, map[string]string{"genre": "fiction"}, item.Labels, "a change must not reach the map of an item that was listed")
 				}
@@ -642,12 +690,12 @@ func TestCloneWith(t *testing.T) {
 		_, err := view.Update(ctx, "a", "2", rearrange)
 		require.NoError(t, err)
 
-		fiction, err := byGenre.Lookup(ctx, "fiction")
+		fiction, err := query.Count(byGenre.Lookup(ctx, "fiction"))
 		require.NoError(t, err)
-		assert.Empty(t, slices.Collect(fiction), "the index must not find the shelf under its old value")
-		poetry, err := byGenre.Lookup(ctx, "poetry")
+		assert.Zero(t, fiction, "the index must not find the shelf under its old value")
+		poetry, err := query.Count(byGenre.Lookup(ctx, "poetry"))
 		require.NoError(t, err)
-		assert.Len(t, slices.Collect(poetry), 1, "the index has to find the shelf under its new value")
+		assert.Equal(t, 1, poetry, "the index has to find the shelf under its new value")
 	})
 
 	t.Run("lets readers read while a change writes into an item", func(t *testing.T) {
@@ -676,8 +724,7 @@ func TestCloneWith(t *testing.T) {
 				got, _, _ := view.Get(ctx, "a")
 				_ = got.BookIDs[0] + got.Labels["genre"]
 
-				items, _ := view.All(ctx)
-				for item := range items {
+				for item := range view.All(ctx) {
 					for range item.Labels {
 					}
 				}
