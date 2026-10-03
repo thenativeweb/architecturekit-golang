@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -219,6 +220,35 @@ func TestExecute(t *testing.T) {
 
 		// The fixture of architecturekittest repeats the check of Execute, since
 		// it lives in another package, so both have to word the refusal alike.
+		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+	})
+
+	t.Run("refuses data that can not be encoded with the same error as the test fixture", func(t *testing.T) {
+		for _, test := range unencodableEvents() {
+			t.Run(test.name, func(t *testing.T) {
+				decider := emittingDecider(encodingState(), incremented{By: 1}, test.event)
+				cmd := increment{subject: subjectFor(t)}
+
+				_, err := architecturekit.Execute(context.Background(), requireStore(t), decider, cmd)
+				require.ErrorIs(t, err, architecturekit.ErrPermanent, "Execute has to refuse the event")
+				require.ErrorContains(t, err, "can not be encoded as JSON", "Execute has to refuse the data")
+
+				// The fixture encodes the events itself, as Execute does, so both
+				// have to word the refusal alike.
+				architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+			})
+		}
+	})
+
+	t.Run("checks the rules before the encoding like the test fixture", func(t *testing.T) {
+		decider := emittingDecider(encodingState(), measured{Value: math.NaN()}, labelled{Label: "no rule"})
+		cmd := increment{subject: subjectFor(t)}
+
+		_, err := architecturekit.Execute(context.Background(), requireStore(t), decider, cmd)
+		require.ErrorIs(t, err, architecturekit.ErrPermanent, "Execute has to refuse the events")
+		require.ErrorContains(t, err, `event of type "io.thenativeweb.test.labelled"`,
+			"Execute has to check the rules of all events first")
+
 		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
 	})
 

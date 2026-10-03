@@ -368,7 +368,7 @@ if err != nil {
 
 Every event the decider returns needs a rule on the state of the decider, an `Evolve` function or `Ignore`. `Execute` writes the events to the subject that the same state reads for the next command, and the database keeps every event, so an event without a rule would leave a subject that the state can not read any more. If the state has no rule for one of the events, `Execute` writes none of them, and fails with an error of the category `ErrPermanent` that names the event type (see [Handling Errors](#handling-errors)). The test fixture reports such an event the same way (see [Testing Deciders](#testing-deciders)).
 
-Nor does `Execute` write any of the events if the data of one of them can not be encoded as JSON, for example because it holds a float `NaN`. It then fails with an error of the category `ErrPermanent` that names the event type and the reason, since trying again would fail the same way.
+Nor does `Execute` write any of the events if the data of one of them can not be encoded as JSON, for example because it holds a float `NaN`. It then fails with an error of the category `ErrPermanent` that names the event type and the reason, since trying again would fail the same way. `Execute` checks the rules of all events before it encodes any of them. The test fixture checks both in the same order, and reports such an event the same way (see [Testing Deciders](#testing-deciders)).
 
 The written events come as they are stored, with their data as JSON. To read the data of one of them, call the `Decode` function with the type of the event. It returns an `Envelope`, the same a projection gets (see [Defining Projections](#defining-projections)), with the data in its `Data` field:
 
@@ -2609,7 +2609,7 @@ func TestBorrowBook(t *testing.T) {
 
 `Given` returns a `*Fixture`, and `When` returns an `*Outcome`. The functions that check the outcome return the outcome again, so they can be chained.
 
-Like `Execute`, `When` refuses an event that the state of the decider has no rule for (see [Executing Commands](#executing-commands)), and it checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
+Like `Execute`, `When` refuses an event that the state of the decider has no rule for, and, once every event has a rule, an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
 
 *Note that `Given` accepts any value that provides the `Helper` and `Fatalf` functions, as described by the `TestingT` interface.*
 
