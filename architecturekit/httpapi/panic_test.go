@@ -364,3 +364,108 @@ func TestPanicsInHandleAndAsk(t *testing.T) {
 		})
 	})
 }
+
+// A nil function given to Handle or Ask is a mistake in the code, as it is for
+// Route and Query. Handle and Ask are called on every request, so they report
+// it there, before they determine the caller, and name it, rather than fail
+// with a nil pointer.
+
+func TestNilFunctionsInHandleAndAsk(t *testing.T) {
+	const handleWithoutCommand = "architecturekit/httpapi: Handle needs a function that turns the request into a command, not nil"
+
+	var (
+		toNoCommand httpapi.ToCommand[user, noteRequest, note]
+		toNoQuery   httpapi.ToQuery[user, listNotes]
+		noAnswer    httpapi.Answer[listNotes, []noteResponse]
+	)
+
+	// askWithout lists the ways to give Ask a nil function, with the message
+	// it fails with.
+	askWithout := map[string]struct {
+		toQuery httpapi.ToQuery[user, listNotes]
+		answer  httpapi.Answer[listNotes, []noteResponse]
+		message string
+	}{
+		"a function that turns the request into a query": {
+			toNoQuery, answerListNotes,
+			"architecturekit/httpapi: Ask needs a function that turns the request into a query, not nil",
+		},
+		"a function that answers the query": {
+			toListNotes, noAnswer,
+			"architecturekit/httpapi: Ask needs a function that answers the query, not nil",
+		},
+	}
+
+	for caller, id := range map[string]string{"a known caller": "golo", "an unknown caller": ""} {
+		t.Run("Handle without a function returns an internal failure that names the mistake, for "+caller, func(t *testing.T) {
+			api := httpapi.NewAPI(deadStore(t), userFrom)
+
+			request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"id":"1","text":"hello"}`))
+			request.Header.Set("X-User", id)
+			request.Header.Set("Content-Type", "application/json")
+
+			var err error
+			require.NotPanics(t, func() {
+				_, err = httpapi.Handle(request, api, toNoCommand, noteDecider())
+			})
+
+			require.Error(t, err)
+			assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(err))
+			assert.ErrorContains(t, err, handleWithoutCommand)
+		})
+
+		for without, test := range askWithout {
+			t.Run("Ask without "+without+" returns an internal failure that names the mistake, for "+caller, func(t *testing.T) {
+				api := httpapi.NewAPI(deadStore(t), userFrom)
+
+				request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+				request.Header.Set("X-User", id)
+
+				var err error
+				require.NotPanics(t, func() {
+					_, err = httpapi.Ask(request, api, test.toQuery, test.answer)
+				})
+
+				require.Error(t, err)
+				assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(err))
+				assert.ErrorContains(t, err, test.message)
+			})
+		}
+	}
+
+	t.Run("Respond answers Handle without a function with 500, and logs the mistake", func(t *testing.T) {
+		var logs bytes.Buffer
+		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /note", func(w http.ResponseWriter, r *http.Request) {
+			_, err := httpapi.Handle(r, api, toNoCommand, noteDecider())
+			httpapi.Respond(w, r, api, nil, err)
+		})
+
+		request := httptest.NewRequest(http.MethodPost, "/note", strings.NewReader(`{"id":"1","text":"hello"}`))
+		request.Header.Set("X-User", "golo")
+		request.Header.Set("Content-Type", "application/json")
+
+		response := serve(t, mux, request)
+
+		assertPanicAnswered(t, response, logs.String(), "POST", "POST /note", handleWithoutCommand, "architecturekit/httpapi.Handle[")
+		assert.NotContains(t, logs.String(), "nil pointer dereference")
+	})
+
+	for without, test := range askWithout {
+		t.Run("RespondResult answers Ask without "+without+" with 500, and logs the mistake", func(t *testing.T) {
+			var logs bytes.Buffer
+			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /notes", func(w http.ResponseWriter, r *http.Request) {
+				result, err := httpapi.Ask(r, api, test.toQuery, test.answer)
+				httpapi.RespondResult(w, r, api, result, err)
+			})
+
+			response := askAsGolo(t, mux, "/notes")
+
+			assertPanicAnswered(t, response, logs.String(), "GET", "GET /notes", test.message, "architecturekit/httpapi.Ask[")
+			assert.NotContains(t, logs.String(), "nil pointer dereference")
+		})
+	}
+}
