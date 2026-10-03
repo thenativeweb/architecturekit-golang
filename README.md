@@ -2053,6 +2053,33 @@ To answer this way in a handler of your own, call the `Respond` function with th
 
 *Note that calling `Route` with `nil` as the function panics.*
 
+#### Handling Commands Without a Body
+
+Some commands take everything they need from the path, such as `ReturnBook`, which only needs the ID of the book. Such a command takes no body, so its function has the request type `httpapi.NoBody`:
+
+```go
+func toReturnBook(r *http.Request, _ httpapi.NoBody, user User) (ReturnBook, error) {
+  bookID := r.PathValue("id")
+  if err := bookSubject.Check(bookID); err != nil {
+    return ReturnBook{}, err
+  }
+
+  return ReturnBook{BookID: bookID}, nil
+}
+
+httpapi.Route(api, mux, "POST /api/books/{id}/return", toReturnBook, returnBook)
+```
+
+The route then expects no body, so the caller sends neither a `Content-Type` header nor a body:
+
+```shell
+curl -X POST http://localhost:8080/api/books/42/return
+```
+
+A body of `{}` is accepted as well, whatever the `Content-Type` header says, so that a caller that sends one out of habit keeps working. Any other body is answered with `400 Bad Request`, and the message says that the route takes no body.
+
+*Note that requiring `application/json` also keeps a browser from sending a command from another site without asking the server first, since a form can not send JSON. A route that takes no body does not require it, so if the application authenticates with cookies, protect such a route in another way, for example with cookies that are `SameSite`.*
+
 #### Adding to the Answer
 
 To answer with more than the revision, for example with the ID that `toAcquireBook` below makes up for a new book, hand over the `Adding` option. It takes a function that receives a `Handled` value with the command and the written events, and returns the fields to add, usually as a struct with JSON annotations, and an error:
@@ -2154,7 +2181,9 @@ Before the function that returns the command receives the body, the request is v
 
 *Note that parsers disagree on what a name that occurs twice means, and on data after the value: one takes the first value, another the last, and one stops after the value, while another reads on. A filter or a proxy in front of the application might then check another value than the one the application uses, which is why both are refused.*
 
-To read a body by the same rules elsewhere, call the `BodyOf` function (see [Reading Queries from the Body](#reading-queries-from-the-body)).
+If the request type is `httpapi.NoBody`, the request is validated differently (see [Handling Commands Without a Body](#handling-commands-without-a-body)): the `Content-Type` header is not required, and the body must be empty or `{}`, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. A body larger than `httpapi.MaxRequestBody` is still answered with `413 Request Entity Too Large`.
+
+To read a body by the same rules elsewhere, call the `BodyOf` function (see [Reading Queries from the Body](#reading-queries-from-the-body)). With `httpapi.NoBody`, it checks that a request has no body, as the route does.
 
 ### Handling Queries over HTTP
 

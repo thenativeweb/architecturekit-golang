@@ -58,7 +58,8 @@ var (
 // It is the single place where transport data and the user turn into a
 // command, which keeps the command itself free of JSON tags and of HTTP.
 // TRequest only describes the body, so it may come from another package than
-// the function, such as one that is shared with a client.
+// the function, such as one that is shared with a client. For a command that
+// takes no body, it is NoBody.
 //
 // An error that StatusFor maps to a status of its own keeps it, such as
 // ErrForbidden, an error of the category architecturekit.ErrDomain, or one of
@@ -240,6 +241,20 @@ func UserOf[TUser any](r *http.Request, api *API[TUser]) (TUser, error) {
 // the same as one whose users are unknown.
 type NoUser struct{}
 
+// NoBody is the request type of a command that takes no body, since everything
+// it needs comes from the path, a header, or the user, such as
+// POST /api/books/{id}/return. Its route requires no Content-Type, and accepts
+// a body that is empty, or {}, which a caller may send out of habit. Any other
+// body is ErrMalformed (see BodyOf). Unlike http.NoBody, which is an empty
+// body to send, it is a type to hand to Route, Handle, and BodyOf.
+//
+// Requiring JSON keeps a browser from sending a command from another site
+// without asking the server first, since a form can not send JSON. A route
+// that takes no body does not require it, so if the application authenticates
+// with cookies, it has to protect such a route in another way, for example
+// with cookies that are SameSite.
+type NoBody struct{}
+
 // NewPublicAPI creates an API for an application without authentication.
 // Every request is served, and commands and queries receive NoUser.
 func NewPublicAPI(store *architecturekit.Store, options ...APIOption) *API[NoUser] {
@@ -363,6 +378,10 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 // command wrote (see Respond), plus the fields of Adding, if given. No type
 // has to be given: TUser comes from the API, TRequest and TCommand come from
 // toCommand, and TState comes from the decider.
+//
+// A command that takes no body, such as one that needs nothing but a value of
+// the path, has the request type NoBody. Its route then requires neither a
+// Content-Type nor a body (see BodyOf).
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack. Left to
@@ -630,8 +649,19 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // and an object in which a name occurs twice. Names match fields regardless of
 // case, as with encoding/json, so two names that match the same field count
 // as the same name, even if they differ in case.
+//
+// If TBody is NoBody, the request is read without a body instead. The
+// Content-Type does not matter then, since there is no body for it to
+// describe, and the body has to be empty, or {}, the object without fields,
+// whatever the Content-Type says. Any other body is ErrMalformed, which says
+// that the route takes no body, and one of more than MaxRequestBody bytes is
+// still ErrTooLarge.
 func BodyOf[TBody any](r *http.Request) (TBody, error) {
 	var value TBody
+
+	if _, takesNoBody := any(value).(NoBody); takesNoBody {
+		return value, requireNoBody(r)
+	}
 
 	if err := requireJSON(r); err != nil {
 		return value, err
@@ -714,6 +744,32 @@ func requireJSON(r *http.Request) error {
 	}
 
 	return nil
+}
+
+// requireNoBody reads the body of a request that takes none, and accepts it
+// only if it is empty, or {}.
+func requireNoBody(r *http.Request) error {
+	// A request that a server receives always has a body, which is empty if
+	// the caller sent none, but one that is made with http.NewRequest without
+	// a body, as in a test of a handler, has nil instead.
+	if r.Body == nil {
+		return nil
+	}
+
+	body, err := readBody(r)
+	if err != nil {
+		return err
+	}
+	if len(body) == 0 {
+		return nil
+	}
+
+	// null decodes into a nil pointer, so only {} gives one that is not nil.
+	if empty, err := decodeStrictly[*NoBody](body); err == nil && empty != nil {
+		return nil
+	}
+
+	return fmt.Errorf("%w: this route takes no body, so the body has to be empty, or {}", ErrMalformed)
 }
 
 // readBody reads at most MaxRequestBody bytes and tells a body that is too
