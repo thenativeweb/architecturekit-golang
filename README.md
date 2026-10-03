@@ -2367,7 +2367,9 @@ Once the view has seen at least one event, the response contains the revision it
 
 The header is read as HTTP has it: it may hold a list of tags, separated by commas, or `*`, which stands for any tag. A tag also counts if it is marked as weak, as `W/"…"`, which a proxy does when it compresses the answer.
 
-The `ETag` holds the query that was asked, with every field. So two callers get the same `ETag` only if their queries are equal: a query that holds the user, or anything else that tells callers apart, gets an `ETag` of its own for each of them. That matters as soon as callers share a browser one after the other, since the browser asks with the `ETag` it kept for the one before. The query is built before the route waits or answers `304 Not Modified`, so a caller who may not ask is refused first.
+HTTP has `304 Not Modified` for `GET` and `HEAD` requests only. A query that is read with any other method, such as one that is sent as `POST` since its input does not fit into the query string (see [Reading Queries from the Body](#reading-queries-from-the-body)), is answered with `412 Precondition Failed` instead. It carries the same headers as `304 Not Modified`, and a message, as for an error.
+
+The `ETag` holds the query that was asked, with every field. So two callers get the same `ETag` only if their queries are equal: a query that holds the user, or anything else that tells callers apart, gets an `ETag` of its own for each of them. That matters as soon as callers share a browser one after the other, since the browser asks with the `ETag` it kept for the one before. The query is built before the route waits or tells the caller that nothing has changed, so a caller who may not ask is refused first.
 
 This holds as long as the answer depends on nothing but the query and the view, which is why the answer sees neither the request nor the user. Three things get past it:
 
