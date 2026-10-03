@@ -177,34 +177,21 @@ func (o *Outcome[TCommand, TState]) ThenNothing() *Outcome[TCommand, TState] {
 	return o
 }
 
-// ThenRejected expects the command to have been rejected with exactly this
-// message. Prefer ThenFailed where the wording is not the point, because a
-// message is easier to reword than a category.
-func (o *Outcome[TCommand, TState]) ThenRejected(message string) *Outcome[TCommand, TState] {
+// ThenFailed expects the command to have failed with an error that matches
+// target, as errors.Is reports it, so target may be the error itself or any
+// error it wraps. That covers a category, for instance
+// architecturekit.ErrDomain or architecturekit.ErrPermanent, as well as a
+// sentinel error of the domain, such as an ErrBookAlreadyAcquired that the
+// decider returns as it is, or wraps to add details.
+func (o *Outcome[TCommand, TState]) ThenFailed(target error) *Outcome[TCommand, TState] {
 	o.t.Helper()
 
 	if o.err == nil {
-		o.t.Fatalf("expected rejection %q, got %s", message, describe(o.events))
+		o.t.Fatalf("expected an error matching %v, got %s", target, describe(o.events))
 		return o
 	}
-	if o.err.Error() != message {
-		o.t.Fatalf("expected rejection %q, got %q", message, o.err.Error())
-	}
-
-	return o
-}
-
-// ThenFailed expects a failure of that category, for instance
-// architecturekit.ErrDomain or architecturekit.ErrPermanent.
-func (o *Outcome[TCommand, TState]) ThenFailed(category error) *Outcome[TCommand, TState] {
-	o.t.Helper()
-
-	if o.err == nil {
-		o.t.Fatalf("expected a failure of category %v, got %s", category, describe(o.events))
-		return o
-	}
-	if !errors.Is(o.err, category) {
-		o.t.Fatalf("expected a failure of category %v, got %v", category, o.err)
+	if !errors.Is(o.err, target) {
+		o.t.Fatalf("expected an error matching %v, got %v", target, o.err)
 	}
 
 	return o

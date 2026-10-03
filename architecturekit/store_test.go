@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -220,7 +221,7 @@ func TestExecute(t *testing.T) {
 
 		// The fixture of architecturekittest repeats the check of Execute, since
 		// it lives in another package, so both have to word the refusal alike.
-		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+		assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
 	})
 
 	t.Run("refuses data that can not be encoded with the same error as the test fixture", func(t *testing.T) {
@@ -235,7 +236,7 @@ func TestExecute(t *testing.T) {
 
 				// The fixture encodes the events itself, as Execute does, so both
 				// have to word the refusal alike.
-				architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+				assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
 			})
 		}
 	})
@@ -249,7 +250,7 @@ func TestExecute(t *testing.T) {
 		require.ErrorContains(t, err, `event of type "io.thenativeweb.test.labelled"`,
 			"Execute has to check the rules of all events first")
 
-		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+		assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
 	})
 
 	t.Run("refuses a nil event and writes nothing", func(t *testing.T) {
@@ -289,7 +290,7 @@ func TestExecute(t *testing.T) {
 
 		// The fixture checks for nil events itself, as Execute does, so both
 		// have to word the refusal alike.
-		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+		assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
 	})
 
 	t.Run("checks for nil events before the rules and the encoding like the test fixture", func(t *testing.T) {
@@ -301,7 +302,7 @@ func TestExecute(t *testing.T) {
 		require.ErrorContains(t, err, "event 2 that the decider returned is nil",
 			"Execute has to check all events for nil first")
 
-		architecturekittest.Given(t, decider).When(cmd).ThenRejected(err.Error())
+		assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
 	})
 
 	t.Run("writes an event its state ignores", func(t *testing.T) {
@@ -424,6 +425,37 @@ func emittingDecider(
 			return events, nil
 		},
 	}
+}
+
+// fixtureRefusal returns the error with which the test fixture of
+// architecturekittest refuses the command, as it reports the error to an
+// assertion that expects nothing to happen. ThenFailed only tells whether
+// that error matches another one, so this is how the tests compare its
+// wording with the one of Execute.
+func fixtureRefusal(t *testing.T, decider architecturekit.Decider[increment, counter], cmd increment) string {
+	t.Helper()
+
+	recorder := &failureRecorder{}
+	architecturekittest.Given(recorder, decider).When(cmd).ThenNothing()
+
+	require.Len(t, recorder.failures, 1, "the fixture has to refuse the command")
+
+	refusal, found := strings.CutPrefix(recorder.failures[0], "expected nothing to happen, got error: ")
+	require.True(t, found, "the fixture has to refuse the command, but reported: %s", recorder.failures[0])
+
+	return refusal
+}
+
+// failureRecorder takes the failures of the test fixture in place of a
+// *testing.T, so that a test can read them.
+type failureRecorder struct {
+	failures []string
+}
+
+func (r *failureRecorder) Helper() {}
+
+func (r *failureRecorder) Fatalf(format string, args ...any) {
+	r.failures = append(r.failures, fmt.Sprintf(format, args...))
 }
 
 // eventTypesIn reads the types of the events in a subject straight from the
