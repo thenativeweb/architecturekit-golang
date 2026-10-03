@@ -373,6 +373,187 @@ func TestIfNoneMatch(t *testing.T) {
 	})
 }
 
+// The read side for a query whose input does not fit into the query string,
+// so that it is sent as the body of a POST request: it counts how many of the
+// given notes there are.
+
+type findNotes struct {
+	Texts []string `json:"texts"`
+}
+
+func toFindNotes(r *http.Request, _ user) (findNotes, error) {
+	return httpapi.BodyOf[findNotes](r)
+}
+
+func answerFindNotes(view *architecturekit.InMemoryView[string, noteItem]) httpapi.Answer[findNotes, int] {
+	return func(ctx context.Context, query findNotes) (int, error) {
+		count := 0
+		for _, text := range query.Texts {
+			_, isFound, err := view.Get(ctx, text)
+			if err != nil {
+				return 0, err
+			}
+			if isFound {
+				count++
+			}
+		}
+
+		return count, nil
+	}
+}
+
+// askWith sends a request as a known user, with the given method and body,
+// and with each of the lines as an If-None-Match header of its own.
+func askWith(mux *http.ServeMux, method, target, body string, lines ...string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, target, strings.NewReader(body))
+	request.Header.Set("X-User", "someone")
+	request.Header.Set("Content-Type", "application/json")
+	for _, line := range lines {
+		request.Header.Add("If-None-Match", line)
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	return recorder
+}
+
+// TestIfNoneMatchByMethod covers queries that are not read with GET or HEAD,
+// such as one that is sent as POST, since its input does not fit into the
+// query string. HTTP has 304 for GET and HEAD only, and 412 for every other
+// method (RFC 9110, 13.1.2).
+func TestIfNoneMatchByMethod(t *testing.T) {
+	const found = `{"texts":["one","two"]}`
+
+	view := noteView()
+	insertNote(t, view, "1", noteItem{Text: "one"})
+	view.Seen("4")
+
+	mux := http.NewServeMux()
+	api := httpapi.NewAPI(deadStore(t), userFrom)
+
+	httpapi.Query(api, mux, "GET /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
+	httpapi.Query(api, mux, "POST /notes/found", toFindNotes, answerFindNotes(view), httpapi.Revisioned(view, time.Second))
+
+	// A pattern without a method takes every method.
+	httpapi.Query(api, mux, "/notes/any", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
+
+	tagOf := func(t *testing.T, method, target, body string) string {
+		t.Helper()
+
+		response := askWith(mux, method, target, body)
+		require.Equal(t, http.StatusOK, response.Code)
+
+		tag := response.Header().Get("ETag")
+		require.NotEmpty(t, tag, "the answer carries no entity tag")
+
+		return tag
+	}
+
+	t.Run("a GET with the tag is answered with 304", func(t *testing.T) {
+		tag := tagOf(t, http.MethodGet, "/notes", "")
+
+		response := askWith(mux, http.MethodGet, "/notes", "", tag)
+
+		require.Equal(t, http.StatusNotModified, response.Code)
+		assert.Empty(t, response.Body.String(), "304 carried a body")
+	})
+
+	t.Run("a HEAD with the tag is answered with 304", func(t *testing.T) {
+		tag := tagOf(t, http.MethodGet, "/notes", "")
+
+		response := askWith(mux, http.MethodHead, "/notes", "", tag)
+
+		require.Equal(t, http.StatusNotModified, response.Code)
+		assert.Empty(t, response.Body.String(), "304 carried a body")
+	})
+
+	t.Run("a POST with the tag is answered with 412", func(t *testing.T) {
+		tag := tagOf(t, http.MethodPost, "/notes/found", found)
+
+		response := askWith(mux, http.MethodPost, "/notes/found", found, tag)
+
+		require.Equal(t, http.StatusPreconditionFailed, response.Code)
+
+		assert.Equal(t, tag, response.Header().Get("ETag"), "412 says which answer is current, as 304 does")
+		assert.Equal(t, "4", response.Header().Get(httpapi.HeaderRevision))
+		assert.Equal(t, "private, no-cache", response.Header().Get("Cache-Control"))
+
+		assert.Equal(t, "application/json", response.Header().Get("Content-Type"))
+		assert.JSONEq(t, `{"message":"precondition failed: the current answer matches If-None-Match"}`, response.Body.String())
+	})
+
+	t.Run("a POST without the tag is answered in full", func(t *testing.T) {
+		tag := tagOf(t, http.MethodPost, "/notes/found", found)
+
+		for _, lines := range [][]string{nil, {`"other"`}, {`W/"other", "third"`}} {
+			response := askWith(mux, http.MethodPost, "/notes/found", found, lines...)
+
+			require.Equal(t, http.StatusOK, response.Code, "with %q", lines)
+			assert.Equal(t, "1\n", response.Body.String(), "with %q", lines)
+			assert.Equal(t, tag, response.Header().Get("ETag"), "with %q", lines)
+		}
+	})
+
+	t.Run("a POST that asks something else is answered in full", func(t *testing.T) {
+		tag := tagOf(t, http.MethodPost, "/notes/found", found)
+
+		response := askWith(mux, http.MethodPost, "/notes/found", `{"texts":["one"]}`, tag)
+
+		require.Equal(t, http.StatusOK, response.Code, "the tag of another body matched")
+		assert.Equal(t, "1\n", response.Body.String())
+	})
+
+	for _, test := range []struct {
+		label string
+		lines func(tag string) []string
+	}{
+		{"the tag, marked as weak", func(tag string) []string { return []string{"W/" + tag} }},
+		{"a list that holds the tag", func(tag string) []string { return []string{`"other", ` + tag} }},
+		{"a list over several lines that holds the tag", func(tag string) []string { return []string{`"other"`, tag} }},
+		{"*", func(string) []string { return []string{"*"} }},
+	} {
+		t.Run("a POST with "+test.label+" is answered with 412", func(t *testing.T) {
+			tag := tagOf(t, http.MethodPost, "/notes/found", found)
+
+			response := askWith(mux, http.MethodPost, "/notes/found", found, test.lines(tag)...)
+
+			require.Equal(t, http.StatusPreconditionFailed, response.Code)
+			assert.Equal(t, tag, response.Header().Get("ETag"))
+		})
+	}
+
+	t.Run("a POST with * is answered in full if the answer has no tag", func(t *testing.T) {
+		empty := http.NewServeMux()
+		nothing := noteView()
+
+		httpapi.Query(api, empty, "POST /notes/found", toFindNotes, answerFindNotes(nothing), httpapi.Revisioned(nothing, time.Second))
+
+		response := askWith(empty, http.MethodPost, "/notes/found", found, "*")
+
+		assert.Equal(t, http.StatusOK, response.Code, "an answer without a tag was taken for unchanged")
+	})
+
+	for method, status := range map[string]int{
+		http.MethodGet:     http.StatusNotModified,
+		http.MethodHead:    http.StatusNotModified,
+		http.MethodPost:    http.StatusPreconditionFailed,
+		http.MethodPut:     http.StatusPreconditionFailed,
+		http.MethodPatch:   http.StatusPreconditionFailed,
+		http.MethodDelete:  http.StatusPreconditionFailed,
+		http.MethodOptions: http.StatusPreconditionFailed,
+	} {
+		t.Run(method+" with the tag, on a route for every method, is answered with "+strconv.Itoa(status), func(t *testing.T) {
+			tag := tagOf(t, method, "/notes/any", "")
+
+			response := askWith(mux, method, "/notes/any", "", tag)
+
+			require.Equal(t, status, response.Code)
+			assert.Equal(t, tag, response.Header().Get("ETag"))
+		})
+	}
+}
+
 // The read side for callers who are told apart: everybody owns notes, and
 // asks for their own. This is how an application with users usually reads,
 // and why a tag must not be shared between them.

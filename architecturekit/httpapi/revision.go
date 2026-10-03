@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -90,14 +91,30 @@ func Await(
 type Volatile func(*http.Request) string
 
 // serveUnchanged answers 304 when the caller already holds the answer with
-// the given tag, and reports whether it did.
+// the given tag, or 412 for a method other than GET and HEAD, and reports
+// whether it did.
+//
+// HTTP has 304 for GET and HEAD only, and 412 for every other method (RFC
+// 9110, 13.1.2), such as POST, which a query whose input does not fit into
+// the query string is sent with. Both carry the tag and the revision of the
+// current answer, and only 412 has a body, which is a message, as with any
+// other answer that is not a success.
 func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string) bool {
 	if tag == "" || !holdsTag(r, tag) {
 		return false
 	}
 
 	writeRevision(w, revision, tag)
-	w.WriteHeader(http.StatusNotModified)
+
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusNotModified)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"message": "precondition failed: the current answer matches If-None-Match",
+		})
+	}
 
 	return true
 }
