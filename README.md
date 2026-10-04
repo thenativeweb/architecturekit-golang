@@ -1844,6 +1844,8 @@ All functions of the `query` package take an iterator over items and errors, as 
 
 *Note that `Collect` returns no items along with an error, not even the ones it read before, so that a part of the result is never taken for all of it.*
 
+*Note that the `query` package is for reading a view. Once the items are in a slice, for example because an answer groups the same snapshot of a view in several ways, work on the slice with the `slices` package and a loop, such as `slices.SortStableFunc` to order it. A slice can not fail, so handing it to the `query` package would only add errors that never occur.*
+
 #### Filtering and Transforming Items
 
 To keep only some items, call the `Where` function with a function that selects them:
