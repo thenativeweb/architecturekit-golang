@@ -114,6 +114,11 @@ func TestWrite(t *testing.T) {
 			{"a precondition made by hand", event, []architecturekit.Precondition{{}}, "not made with Require or Unconditionally"},
 			{"an event without a subject", []architecturekit.EventOn{{Event: incremented{By: 1}}}, []architecturekit.Precondition{architecturekit.Unconditionally()}, "needs a subject and an event"},
 			{"a subject without an event", []architecturekit.EventOn{{Subject: subject}}, []architecturekit.Precondition{architecturekit.Unconditionally()}, "needs a subject and an event"},
+			{"a nil pointer as the event", []architecturekit.EventOn{{Subject: subject, Event: (*incremented)(nil)}}, []architecturekit.Precondition{architecturekit.Unconditionally()}, "event 0 of a write needs a subject and an event"},
+			{"a nil pointer after another event", []architecturekit.EventOn{
+				{Subject: subject, Event: incremented{By: 1}},
+				{Subject: subject, Event: (*incremented)(nil)},
+			}, []architecturekit.Precondition{architecturekit.Unconditionally()}, "event 1 of a write needs a subject and an event"},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				_, err := architecturekit.Write(context.Background(), requireStore(t), test.events, test.preconditions...)
