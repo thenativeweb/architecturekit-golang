@@ -893,7 +893,7 @@ Once the cache is full, the least recently used subject makes room. Such a subje
 
 The cache only holds what was read, never what a command has written. Every command reads all events after the ones its state was built from, including those written by other processes, so the cache stays correct if several processes write to the same subjects.
 
-The cache tells states apart by their type, not by the object. A state that is built anew for every command, for example by a function that returns it, is cached as well. This is why two different states that read the same subject need two different types: if one of them counts the loans of a book and the other one its returns, declare types such as `LoanCount` and `ReturnCount` rather than using `int` for both. If two states of the same type meet on the same subject, but differ in their initial value, in the event types they have `Evolve` rules or upcasters for, or in `FromLatest`, `Execute` and `Load` return an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)).
+The cache tells states apart by their type, not by the object. A state that is built anew for every command, for example by a function that returns it, is cached as well. This is why two different states that read the same subject need two different types: if one of them counts the loans of a book and the other one its returns, declare types such as `LoanCount` and `ReturnCount` rather than using `int` for both. If two states of the same type meet on the same subject, but differ in their initial value, in the event types they have `Evolve` rules for, ignore, or have upcasters for, or in `FromLatest`, `Execute` and `Load` return an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)).
 
 *Note that the cache can not compare the `Evolve` functions themselves. Two states of the same type that are built alike, but compute something else, are not told apart.*
 
@@ -920,7 +920,7 @@ Without a `Clone` function, such a state is read as without a cache. The same fu
 
 *Note that a `time.Time` counts as a value, since its location never changes.*
 
-*Note that values below `1` count as `1`, and that calling `Clone` twice panics.*
+*Note that a number of `0` keeps no states, the same as leaving out the option, so that a configuration can turn the cache off. A negative number makes `WithStateCache` panic, and calling `Clone` twice panics as well.*
 
 ### Loading States
 
