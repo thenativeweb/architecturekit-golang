@@ -813,6 +813,17 @@ func TestNilEvent(t *testing.T) {
 		}
 	})
 
+	t.Run("counts a nil pointer of a concrete type as nil, as with Execute", func(t *testing.T) {
+		// The pointer is not equal to nil, since the interface knows its type,
+		// but calling EventType on it panics.
+		withNilPointer := emit{events: []architecturekit.Event{opened{Owner: "golo"}, (*opened)(nil)}}
+
+		architecturekittest.Given(t, emitDecider()).
+			When(withNilPointer).
+			ThenFailed(architecturekit.ErrPermanent)
+		assert.Equal(t, refusal, refusalOf(t, emitDecider(), withNilPointer))
+	})
+
 	t.Run("names the first event that is nil", func(t *testing.T) {
 		assert.Equal(t, refusal, refusalOf(t, emitDecider(),
 			emit{events: []architecturekit.Event{opened{Owner: "golo"}, nil, opened{Owner: "jane"}, nil}}))

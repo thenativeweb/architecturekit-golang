@@ -252,6 +252,75 @@ func TestStatusFor(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("maps a failure of the database by its category, although it wraps the error of the client", func(t *testing.T) {
+		// The kit wraps the error of the client after the category, so that
+		// errors.As reaches the answer of the database. The category decides
+		// all the same, so the status is the one of the category.
+		write := func(store *architecturekit.Store) error {
+			_, err := architecturekit.Write(context.Background(), store,
+				[]architecturekit.EventOn{{Subject: "/notes/1", Event: noted{Text: "hello"}}}, architecturekit.Unconditionally())
+
+			return err
+		}
+		read := func(store *architecturekit.Store) error {
+			for _, err := range architecturekit.Read(context.Background(), store, architecturekit.ExactSubject("/notes/1")) {
+				if err != nil {
+					return err
+				}
+			}
+
+			return nil
+		}
+
+		cases := []struct {
+			label  string
+			path   string
+			call   func(store *architecturekit.Store) error
+			status int
+			reason string
+			want   int
+		}{
+			{"a bad request", "/api/v1/write-events", write, http.StatusBadRequest, "bad request", http.StatusInternalServerError},
+			{"a rejected API token", "/api/v1/write-events", write, http.StatusUnauthorized, "unauthorized", http.StatusInternalServerError},
+			{"a request that is too large", "/api/v1/write-events", write, http.StatusRequestEntityTooLarge, "too large", http.StatusInternalServerError},
+			{"a failed precondition", "/api/v1/write-events", write, http.StatusConflict, "state conflict: precondition failed", http.StatusConflict},
+			{"a schema violation", "/api/v1/write-events", write, http.StatusConflict, "schema conflict: event does not match", http.StatusInternalServerError},
+			{"too many requests", "/api/v1/write-events", write, http.StatusTooManyRequests, "slow down", http.StatusServiceUnavailable},
+			{"an internal error", "/api/v1/write-events", write, http.StatusInternalServerError, "failed", http.StatusServiceUnavailable},
+			{"an unavailable database", "/api/v1/write-events", write, http.StatusServiceUnavailable, "shutting down", http.StatusServiceUnavailable},
+			{"a 409 when reading", "/api/v1/read-events", read, http.StatusConflict, "state conflict: beyond the upper bound", http.StatusInternalServerError},
+		}
+
+		for _, c := range cases {
+			t.Run(c.label, func(t *testing.T) {
+				err := c.call(refusingStore(t, c.path, c.status, c.reason))
+				assert.Equal(t, c.want, httpapi.StatusFor(err))
+
+				answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
+				require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", err)
+				assert.Equal(t, c.status, answer.StatusCode)
+				assert.Equal(t, c.reason, answer.Reason)
+			})
+		}
+
+		t.Run("an answer that does not come from an EventSourcingDB", func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadGateway)
+			}))
+			t.Cleanup(server.Close)
+
+			serverURL, err := url.Parse(server.URL)
+			require.NoError(t, err)
+			client, err := eventsourcingdb.NewClient(serverURL, "secret")
+			require.NoError(t, err)
+
+			err = write(architecturekit.NewStore(client, "https://thenativeweb.io"))
+
+			assert.Equal(t, http.StatusServiceUnavailable, httpapi.StatusFor(err))
+			assert.ErrorIs(t, err, eventsourcingdb.ErrInvalidServerHeader, "errors.Is has to reach the error of the client")
+		})
+	})
 }
 
 func TestRespond(t *testing.T) {
@@ -530,6 +599,72 @@ func TestRoute(t *testing.T) {
 		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a decider with a function that decides, not one whose Decide is nil", func() {
 			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNote, decider)
 		})
+	})
+
+	t.Run("panics for a pattern without a method, which accepts every method", func(t *testing.T) {
+		// A space in front of the path leaves the method empty, as the mux
+		// reads it.
+		for _, pattern := range []string{"/note", "example.com/note", " /note"} {
+			t.Run(pattern, func(t *testing.T) {
+				assert.PanicsWithValue(t,
+					fmt.Sprintf("architecturekit/httpapi: Route needs a pattern that names a method, such as POST, not %q, "+
+						"which accepts every method, GET included", pattern),
+					func() {
+						httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), pattern, toNote, noteDecider())
+					})
+			})
+		}
+	})
+
+	t.Run("panics for a pattern whose method must not change anything", func(t *testing.T) {
+		for _, test := range []struct {
+			pattern, method string
+		}{
+			{pattern: "GET /note", method: http.MethodGet},
+			{pattern: "HEAD /note", method: http.MethodHead},
+			{pattern: "OPTIONS /note", method: http.MethodOptions},
+			// QUERY asks with a body and changes nothing, like GET, which is how
+			// Revisioned treats it as well.
+			{pattern: "QUERY /note", method: "QUERY"},
+			{pattern: "GET example.com/note", method: http.MethodGet},
+			// The mux takes a tab for a space.
+			{pattern: "GET\t/note", method: http.MethodGet},
+		} {
+			t.Run(test.pattern, func(t *testing.T) {
+				assert.PanicsWithValue(t,
+					fmt.Sprintf("architecturekit/httpapi: Route needs a pattern whose method may change something, such as POST, not %q, "+
+						"since %s must not change anything", test.pattern, test.method),
+					func() {
+						httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), test.pattern, toNote, noteDecider())
+					})
+			})
+		}
+	})
+
+	t.Run("executes a command on a pattern whose method may change something", func(t *testing.T) {
+		for _, test := range []struct {
+			pattern, method string
+		}{
+			{pattern: "POST /note", method: http.MethodPost},
+			{pattern: "PUT /note", method: http.MethodPut},
+			{pattern: "PATCH /note", method: http.MethodPatch},
+			{pattern: "DELETE /note", method: http.MethodDelete},
+			{pattern: "ARCHIVE /note", method: "ARCHIVE"},
+			{pattern: "POST example.com/note", method: http.MethodPost},
+			{pattern: "POST\t/note", method: http.MethodPost},
+		} {
+			t.Run(test.pattern, func(t *testing.T) {
+				mux := http.NewServeMux()
+				httpapi.Route(httpapi.NewAPI(writingStore(t), userFrom), mux, test.pattern, toNote, noteDecider())
+
+				httpRequest := postingTo("/note", `{"id":"1","text":"hello"}`)
+				httpRequest.Method = test.method
+				response := serve(t, mux, httpRequest)
+
+				assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+				assert.JSONEq(t, `{"revision": "0"}`, response.Body.String())
+			})
+		}
 	})
 }
 

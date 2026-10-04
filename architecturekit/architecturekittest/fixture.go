@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -69,15 +70,16 @@ func GivenStored[TCommand architecturekit.Command, TState any](
 //
 // Like Execute, it first checks the preconditions the command declares (see
 // architecturekit.CheckPreconditions), and the decider does not decide on a
-// command they refuse. It also refuses an event that is nil, an event that
-// the state of the decider has no rule for, since the state could not read
-// the subject any more, and an event whose data can not be encoded as JSON,
-// for example because it holds a float NaN. As Execute does, it checks all
-// events for nil first, then all of them for a rule, and encodes them last.
-// In each case, the outcome is then the error of the category
-// architecturekit.ErrPermanent that Execute returns, so that ThenEvents and
-// the other assertions that expect events fail, naming the cause, and
-// ThenFailed(architecturekit.ErrPermanent) matches it.
+// command they refuse. It also refuses an event that is nil, a nil pointer of
+// a concrete type included, an event that the state of the decider has no
+// rule for, since the state could not read the subject any more, and an
+// event whose data can not be encoded as JSON, for example because it holds
+// a float NaN. As Execute does, it checks all events for nil first, then all
+// of them for a rule, and encodes them last. In each case, the outcome is
+// then the error of the category architecturekit.ErrPermanent that Execute
+// returns, so that ThenEvents and the other assertions that expect events
+// fail, naming the cause, and ThenFailed(architecturekit.ErrPermanent)
+// matches it.
 func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState] {
 	f.t.Helper()
 
@@ -304,19 +306,41 @@ func (o *Outcome[TCommand, TState]) ThenPreconditions(
 	return o
 }
 
-// checkNotNil fails if one of the events is nil, with the same error as
-// Execute, which refuses to write them then. Execute checks with a function
-// of its own, which is not exported, so the wording here has to stay the same
-// as there, and a test compares the two.
+// checkNotNil fails if one of the events is nil, also a nil pointer of a
+// concrete type (see isNil), with the same error as Execute, which refuses to
+// write them then. Execute checks with a function of its own, which is not
+// exported, so the wording here has to stay the same as there, and a test
+// compares the two.
 func checkNotNil(subject string, events []architecturekit.Event) error {
 	for i, event := range events {
-		if event == nil {
+		if isNil(event) {
 			return fmt.Errorf("%w: refusing to write to %q, since event %d that the decider returned is nil",
 				architecturekit.ErrPermanent, subject, i)
 		}
 	}
 
 	return nil
+}
+
+// isNil reports whether a value that is handed over as an interface is nil,
+// also when it is a nil pointer, map, slice, function, or channel of a
+// concrete type. Such a value is not equal to nil, since the interface knows
+// its type, but it fails as soon as it is used.
+//
+// An interface never shows up as the kind, since reflect.ValueOf unpacks it.
+// The package architecturekit has the same function, which it does not export,
+// so that it does not become part of what the kit offers.
+func isNil(value any) bool {
+	if value == nil {
+		return true
+	}
+
+	switch reflected := reflect.ValueOf(value); reflected.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 // checkRules fails if the state has no rule for one of the events, with the
