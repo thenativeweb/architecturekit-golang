@@ -11,6 +11,11 @@ import (
 // matching concrete errors, so that new failures do not break existing code.
 // An error of the application's own code, such as one a decider returns,
 // passes through unchanged, unless it is wrapped with a category.
+//
+// A failure of the database wraps the error of the client after its category,
+// so that errors.As finds an *eventsourcingdb.DBAPIError with the status code
+// and the reason the database gave. It is the category, though, that tells
+// what the failure means.
 var (
 	// ErrDomain means a business rule rejected the command. The caller has to
 	// change what it asks for; asking again will not help.
