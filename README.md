@@ -2221,9 +2221,11 @@ The route then answers with both:
 { "id": "…", "revision": "1" }
 ```
 
-The function is only called if the command has succeeded. If it returns an error, the events are written all the same, so the route still answers with `200 OK` and the revision, which the caller needs to read its own writes, and must not take for a reason to send the command again. The answer then holds whatever fields the function returned along with the error, or none, and the error is logged through the logger of the API, with the route.
+The function is only called if the command has succeeded. A value that encodes to `null` adds no fields. That is `nil`, and also a `nil` pointer of a concrete type, which an interface does not count as `nil`, such as the one that `return findShelf(handled)` hands back if `findShelf` returns a `*Shelf` and an error, and fails.
 
-The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object, so they must not hold `NaN`, for example, which JSON has no number for. Otherwise, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
+If the function returns an error, the events are written all the same, so the route still answers with `200 OK` and the revision, which the caller needs to read its own writes, and must not take for a reason to send the command again, whatever is wrong with the fields the function returned along with the error. The answer then holds these fields if they can be used, and none otherwise. The error is logged through the logger of the API, with the route, and so is why the fields were dropped, if they were.
+
+The kit adds the revision itself, so the fields must not contain one, and they must encode to a JSON object, so they must not hold `NaN`, for example, which JSON has no number for. Otherwise, unless the function has returned an error, the route answers with `500 Internal Server Error` and logs why, although the events have been written, since that is a mistake in the code rather than something that happens at runtime.
 
 *Note that the written events are available in `Handled` as well. Add them only deliberately: they are the inner model of the application, every caller that reads them depends on their shape, and they may contain data that is not meant for the caller.*
 
