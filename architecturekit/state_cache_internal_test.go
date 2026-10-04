@@ -82,16 +82,6 @@ func TestStateCache(t *testing.T) {
 		assert.Equal(t, 1, entry.state, "the cached state must stay")
 		assert.Equal(t, []string{"borrowed"}, entry.shape.evolved)
 	})
-
-	t.Run("holds at least one subject", func(t *testing.T) {
-		cache := newStateCache(0)
-		key := stateCacheKey{stateType: reflect.TypeFor[int](), subject: "/books/42"}
-
-		cache.put(key, stateShape{}, 7, "3")
-
-		_, isFound := cache.get(key)
-		assert.True(t, isFound, "expected a cache for at least one subject")
-	})
 }
 
 func TestStateShape(t *testing.T) {

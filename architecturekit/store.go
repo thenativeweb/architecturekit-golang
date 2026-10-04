@@ -21,8 +21,30 @@ type Store struct {
 	client *eventsourcingdb.Client
 	source string
 
+	// settings are what the options of NewStore set. They never change once
+	// the store exists.
+	settings storeSettings
+
 	// states is nil unless the store was created with WithStateCache.
 	states *stateCache
+}
+
+// The default delays of a projection run before it observes again, for a store
+// without WithReconnectDelays.
+const (
+	defaultReconnectInitialDelay = 1 * time.Second
+	defaultReconnectMaxDelay     = 1 * time.Minute
+)
+
+// StoreOption configures a store that NewStore creates. It sets the settings
+// of the new store, before the store exists, so it can not change a store that
+// is in use.
+type StoreOption func(*storeSettings)
+
+type storeSettings struct {
+	// maxCachedSubjects is how many subjects the state cache holds, set by
+	// WithStateCache. Without it, it is 0, and the store has no cache.
+	maxCachedSubjects int
 
 	// The reconnect settings apply to the projections started with
 	// StartProjection and StartTransactionalProjection.
@@ -40,16 +62,6 @@ type Store struct {
 	conflictRetries int
 }
 
-// The default delays of a projection run before it observes again, for a store
-// without WithReconnectDelays.
-const (
-	defaultReconnectInitialDelay = 1 * time.Second
-	defaultReconnectMaxDelay     = 1 * time.Minute
-)
-
-// StoreOption configures a store.
-type StoreOption func(*Store)
-
 // WithStateCache keeps the states of the most recently used subjects in
 // memory, up to the given number, so that the next command on one of them
 // reads only the events written since. Values below 1 count as 1.
@@ -64,8 +76,8 @@ type StoreOption func(*Store)
 // same subject need two different types: if two states of the same type
 // differ in how they are built, reading fails with ErrPermanent.
 func WithStateCache(maxSubjects int) StoreOption {
-	return func(store *Store) {
-		store.states = newStateCache(maxSubjects)
+	return func(settings *storeSettings) {
+		settings.maxCachedSubjects = max(maxSubjects, 1)
 	}
 }
 
@@ -94,8 +106,8 @@ func WithConflictRetries(retries int) StoreOption {
 		panic(fmt.Sprintf("architecturekit: WithConflictRetries needs a number of retries that is not negative, not %d", retries))
 	}
 
-	return func(store *Store) {
-		store.conflictRetries = retries
+	return func(settings *storeSettings) {
+		settings.conflictRetries = retries
 	}
 }
 
@@ -123,9 +135,9 @@ func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
 			initialDelay, maxDelay))
 	}
 
-	return func(store *Store) {
-		store.reconnectInitialDelay = initialDelay
-		store.reconnectMaxDelay = maxDelay
+	return func(settings *storeSettings) {
+		settings.reconnectInitialDelay = initialDelay
+		settings.reconnectMaxDelay = maxDelay
 	}
 }
 
@@ -137,8 +149,8 @@ func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
 // tells them apart. A panic in observe ends the run, as a panic in the
 // projection does (see StartProjection).
 func WithReconnectObserver(observe func(Reconnect)) StoreOption {
-	return func(store *Store) {
-		store.reconnectObserver = observe
+	return func(settings *storeSettings) {
+		settings.reconnectObserver = observe
 	}
 }
 
@@ -150,8 +162,8 @@ func WithReconnectObserver(observe func(Reconnect)) StoreOption {
 // It contradicts WithSignatureVerification, since checking a signature
 // includes checking the hash, so a store with both panics.
 func WithoutHashVerification() StoreOption {
-	return func(store *Store) {
-		store.skipsHashes = true
+	return func(settings *storeSettings) {
+		settings.skipsHashes = true
 	}
 }
 
@@ -171,8 +183,8 @@ func WithSignatureVerification(verificationKey ed25519.PublicKey) StoreOption {
 			ed25519.PublicKeySize, len(verificationKey)))
 	}
 
-	return func(store *Store) {
-		store.verificationKey = verificationKey
+	return func(settings *storeSettings) {
+		settings.verificationKey = verificationKey
 	}
 }
 
@@ -185,18 +197,21 @@ func WithSignatureVerification(verificationKey ed25519.PublicKey) StoreOption {
 // written are not checked, since they are not read. To turn this off, hand
 // over WithoutHashVerification.
 func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOption) *Store {
-	store := &Store{
-		client:                client,
-		source:                source,
+	settings := storeSettings{
 		reconnectInitialDelay: defaultReconnectInitialDelay,
 		reconnectMaxDelay:     defaultReconnectMaxDelay,
 	}
 	for _, option := range options {
-		option(store)
+		option(&settings)
 	}
 
-	if store.skipsHashes && store.verificationKey != nil {
+	if settings.skipsHashes && settings.verificationKey != nil {
 		panic("architecturekit: WithoutHashVerification contradicts WithSignatureVerification, which checks the hash as well")
+	}
+
+	store := &Store{client: client, source: source, settings: settings}
+	if settings.maxCachedSubjects > 0 {
+		store.states = newStateCache(settings.maxCachedSubjects)
 	}
 
 	return store
@@ -374,9 +389,9 @@ func (s *Store) verify(event eventsourcingdb.Event) error {
 	var err error
 
 	switch {
-	case s.verificationKey != nil:
-		err = event.VerifySignature(s.verificationKey)
-	case !s.skipsHashes:
+	case s.settings.verificationKey != nil:
+		err = event.VerifySignature(s.settings.verificationKey)
+	case !s.settings.skipsHashes:
 		err = event.VerifyHash()
 	}
 
@@ -620,7 +635,7 @@ func Execute[TCommand Command, TState any](
 
 	retries := 0
 	if slices.ContainsFunc(declared, Precondition.IsOnStateRead) {
-		retries = store.conflictRetries
+		retries = store.settings.conflictRetries
 	}
 
 	for attempt := 0; ; attempt++ {

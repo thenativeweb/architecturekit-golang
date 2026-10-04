@@ -2,6 +2,7 @@ package dbtest_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
 	"runtime"
@@ -69,6 +70,31 @@ func writeAndRead(t *testing.T, store *architecturekit.Store, text string) (stri
 	require.NoError(t, err)
 
 	return name, current
+}
+
+// refusingToRead is an option whose effect a test can see: it has the store
+// check signatures with a key the database does not sign with, so the store
+// writes, but fails to read what it wrote.
+func refusingToRead(t *testing.T) architecturekit.StoreOption {
+	t.Helper()
+
+	verificationKey, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	return architecturekit.WithSignatureVerification(verificationKey)
+}
+
+// requireRefusesToRead checks that the store writes, and that it got the
+// option of refusingToRead.
+func requireRefusesToRead(t *testing.T, store *architecturekit.Store) {
+	t.Helper()
+
+	name := rand.Text()
+	_, err := architecturekit.Execute(context.Background(), store, enterDecider, enter{journal: name, Text: "unread entry"})
+	require.NoError(t, err)
+
+	_, err = architecturekit.Load(context.Background(), store, journalState, "/journals/"+name)
+	require.ErrorIs(t, err, architecturekit.ErrUnverified, "the options were not handed to the store")
 }
 
 // fatalSpy is a testing.TB that records what would end a test, and ends only
@@ -153,13 +179,10 @@ func TestSharedDatabase(t *testing.T) {
 	})
 
 	t.Run("hands its options to the store", func(t *testing.T) {
-		applied := 0
-		option := architecturekit.StoreOption(func(*architecturekit.Store) { applied++ })
+		option := refusingToRead(t)
 
-		dbtest.SharedDatabase(t).Store(t, journalSource, journalState.Schemas(), option)
-		dbtest.Store(t, journalSource, journalState.Schemas(), option)
-
-		assert.Equal(t, 2, applied, "the options were not handed to the store")
+		requireRefusesToRead(t, dbtest.SharedDatabase(t).Store(t, journalSource, journalState.Schemas(), option))
+		requireRefusesToRead(t, dbtest.Store(t, journalSource, journalState.Schemas(), option))
 	})
 
 	t.Run("is what Store uses", func(t *testing.T) {
@@ -201,13 +224,6 @@ func TestIsolatedDatabase(t *testing.T) {
 	})
 
 	t.Run("is what IsolatedStore uses with the options it is given", func(t *testing.T) {
-		applied := 0
-		option := architecturekit.StoreOption(func(*architecturekit.Store) { applied++ })
-
-		store := dbtest.IsolatedStore(t, journalSource, journalState.Schemas(), option)
-
-		_, current := writeAndRead(t, store, "through IsolatedStore")
-		assert.Equal(t, []string{"through IsolatedStore"}, current.Entries)
-		assert.Equal(t, 1, applied, "the options were not handed to the store")
+		requireRefusesToRead(t, dbtest.IsolatedStore(t, journalSource, journalState.Schemas(), refusingToRead(t)))
 	})
 }
