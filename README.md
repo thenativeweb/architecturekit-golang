@@ -765,9 +765,13 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 *Note that `ErrConflict` is a special case of `ErrTransient`, so check for it first.*
 
+A failure of the database wraps the error of the client after its category. So `errors.As` finds the `*eventsourcingdb.DBAPIError` with the status code and the reason the database gave, for example to log them, and `errors.Is` finds `eventsourcingdb.ErrInvalidServerHeader` and `eventsourcingdb.ErrHeartbeatTimeout`. It is the category, though, that tells what the failure means, so check for it first.
+
 An error that your own code returns, for example from a decider or a projection, passes through unchanged, so it belongs to a category only if you wrap it with one, as `NewDomainError` does. A panic in a projection, on the other hand, comes back as an error of the category `ErrPermanent` (see [Running Projections](#running-projections)). The `httpapi` and `query` packages have errors of their own, which `StatusFor` maps to status codes (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes) and [Getting a Single Item](#getting-a-single-item)).
 
 If the context ends, reading and writing stop, and the error is the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides.
+
+*Note that only the end of the context matches `context.Canceled` or `context.DeadlineExceeded`. If an error of the client matches one of them all the same, for example because connecting to the database timed out, which the standard library reports as `context.DeadlineExceeded`, the failure of the database keeps that error in its message only, so that it does not look like the end of the context.*
 
 *Note that `ErrUnverified` is a special case of `ErrPermanent`, which means that an event failed its verification (see [Verifying Events](#verifying-events)). Since that may point to a security incident rather than a mistake, check for it before `ErrPermanent` if you want to treat it differently, for example to raise an alarm.*
 

@@ -2,6 +2,7 @@ package architecturekit_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
 func TestDatabaseFailures(t *testing.T) {
@@ -191,6 +193,85 @@ func TestDatabaseFailures(t *testing.T) {
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a rejected API token is permanent")
 		assert.NotErrorIs(t, err, architecturekit.ErrTransient)
+	})
+
+	t.Run("wrap the error of the client, so that errors.As reaches the answer of the database", func(t *testing.T) {
+		paths := []struct {
+			name   string
+			path   string
+			status int
+			reason string
+			call   func(t *testing.T, store *architecturekit.Store) error
+		}{
+			{"Execute", "/api/v1/write-events", http.StatusTooManyRequests, "slow down",
+				func(_ *testing.T, store *architecturekit.Store) error {
+					_, err := architecturekit.Execute(context.Background(), store, counterDecider(), increment{subject: "/test", By: 1})
+
+					return err
+				}},
+			{"Write", "/api/v1/write-events", http.StatusBadRequest, "bad request",
+				func(_ *testing.T, store *architecturekit.Store) error {
+					_, err := architecturekit.Write(context.Background(), store,
+						[]architecturekit.EventOn{{Subject: "/test", Event: incremented{By: 1}}}, architecturekit.Unconditionally())
+
+					return err
+				}},
+			{"Read, with a 409", "/api/v1/read-events", http.StatusConflict, "state conflict: beyond the upper bound",
+				func(t *testing.T, store *architecturekit.Store) error {
+					_, errs := readAll(t, store, architecturekit.ExactSubject("/test"))
+					require.Len(t, errs, 1)
+
+					return errs[0]
+				}},
+			{"StartProjection, when observing", "/api/v1/observe-events", http.StatusUnauthorized, "unauthorized",
+				func(_ *testing.T, store *architecturekit.Store) error {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+
+					return runUntilDone(ctx, store, architecturekit.ExactSubject("/test"), &collector{})
+				}},
+			{"RegisterSchemas, when reading the registered ones", "/api/v1/read-event-types", http.StatusUnauthorized, "unauthorized",
+				func(_ *testing.T, store *architecturekit.Store) error {
+					return architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas())
+				}},
+			{"RegisterSchemas, when registering one", "/api/v1/register-event-schema", http.StatusServiceUnavailable, "shutting down",
+				func(_ *testing.T, store *architecturekit.Store) error {
+					return architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas())
+				}},
+			{"RegisterSchemas, when the database refuses one", "/api/v1/register-event-schema", http.StatusConflict, "schema conflict: stored events do not match",
+				func(_ *testing.T, store *architecturekit.Store) error {
+					return architecturekit.RegisterSchemas(context.Background(), store, counterState().Schemas())
+				}},
+		}
+
+		for _, path := range paths {
+			t.Run(path.name, func(t *testing.T) {
+				store := architecturekit.NewStore(
+					refusingDatabase(t, path.path, path.status, path.reason), "https://thenativeweb.io")
+
+				err := path.call(t, store)
+				require.Error(t, err)
+
+				answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
+				require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", err)
+				assert.Equal(t, path.status, answer.StatusCode)
+				assert.Equal(t, path.reason, answer.Reason)
+			})
+		}
+	})
+
+	t.Run("wrap the error of the client for an answer that does not come from an EventSourcingDB", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.WriteHeader(http.StatusBadGateway)
+		}))
+		t.Cleanup(server.Close)
+		store := architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io")
+
+		_, err := architecturekit.Execute(context.Background(), store, counterDecider(),
+			increment{subject: "/test", By: 1})
+
+		assert.ErrorIs(t, err, eventsourcingdb.ErrInvalidServerHeader, "errors.Is has to reach the error of the client")
+		assert.ErrorIs(t, err, architecturekit.ErrTransient, "the category still decides")
 	})
 
 	t.Run("are sorted by status when registering a schema", func(t *testing.T) {

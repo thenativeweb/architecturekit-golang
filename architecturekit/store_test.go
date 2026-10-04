@@ -724,6 +724,11 @@ func TestRegisterSchemas(t *testing.T) {
 		// The reason from the database names what does not match.
 		assert.ErrorContains(t, err, "additionalProperties 'other' not allowed",
 			"error should carry the reason from the database")
+
+		refusal, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
+		require.True(t, isAnswer, "errors.As has to reach the answer of the database")
+		assert.Equal(t, http.StatusConflict, refusal.StatusCode)
+		assert.Contains(t, refusal.Reason, "additionalProperties 'other' not allowed")
 	})
 
 	t.Run("fails on a missing schema", func(t *testing.T) {

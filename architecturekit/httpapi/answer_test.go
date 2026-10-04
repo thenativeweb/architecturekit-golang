@@ -90,15 +90,23 @@ func writingStore(t *testing.T) *architecturekit.Store {
 func conflictingStore(t *testing.T) *architecturekit.Store {
 	t.Helper()
 
+	return refusingStore(t, "/api/v1/write-events", http.StatusConflict, "state conflict: precondition failed")
+}
+
+// refusingStore is a store on a database without any events that answers
+// every request to the given path with the given status and reason.
+func refusingStore(t *testing.T, path string, status int, reason string) *architecturekit.Store {
+	t.Helper()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "EventSourcingDB/test")
 
-		if r.URL.Path != "/api/v1/write-events" {
+		if r.URL.Path != path {
 			return
 		}
 
-		w.WriteHeader(http.StatusConflict)
-		_, _ = io.WriteString(w, "state conflict: precondition failed")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, reason)
 	}))
 	t.Cleanup(server.Close)
 

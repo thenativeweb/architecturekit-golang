@@ -481,7 +481,8 @@ func RegisterSchemas(ctx context.Context, store *Store, schemas ...[]EventSchema
 
 			current, isRegistered = registered[schema.EventType]
 			if !isRegistered {
-				return fmt.Errorf("%w: the database refused the schema of %q: %v", ErrPermanent, schema.EventType, refusal)
+				return fmt.Errorf("%w: the database refused the schema of %q: %w",
+					ErrPermanent, schema.EventType, causeOf(refusal))
 			}
 		}
 

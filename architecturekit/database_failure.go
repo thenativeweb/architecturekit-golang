@@ -59,14 +59,15 @@ func contextEnded(ctx context.Context, doing string) error {
 // answers a read with it if the latest event of the type that FromLatestEvent
 // names comes after the upper bound, and trying again never helps, since new
 // events only move the latest one further away. Every other answer is sorted
-// as databaseFailure sorts it.
+// as databaseFailure sorts it. Either way, the failure of the client is
+// wrapped after the category (see causeOf).
 func readFailure(ctx context.Context, err error, doing string) error {
 	if ctx.Err() != nil {
 		return contextEnded(ctx, doing)
 	}
 
 	if statusCodeOf(err) == http.StatusConflict {
-		return fmt.Errorf("%w: %s: %v", ErrPermanent, doing, err)
+		return fmt.Errorf("%w: %s: %w", ErrPermanent, doing, causeOf(err))
 	}
 
 	return databaseFailure(err, doing)
@@ -96,29 +97,57 @@ func readFailure(ctx context.Context, err error, doing string) error {
 //   - Every other status, such as 400, 401 or 413, means that the request
 //     itself is wrong, which is permanent. A rejected API token is named, as it
 //     is the one to expect in production, e.g. after the token was rotated.
+//
+// Every category wraps the failure of the client after it (see causeOf).
 func databaseFailure(err error, doing string) error {
 	status := statusCodeOf(err)
 
 	switch {
 	case status == 0:
 		if errors.Is(err, eventsourcingdb.ErrInvalidServerHeader) {
-			return fmt.Errorf("%w: %s: the answer does not come from an EventSourcingDB: %v", ErrTransient, doing, err)
+			return fmt.Errorf("%w: %s: the answer does not come from an EventSourcingDB: %w",
+				ErrTransient, doing, causeOf(err))
 		}
-		return fmt.Errorf("%w: %s: %v", ErrTransient, doing, err)
+		return fmt.Errorf("%w: %s: %w", ErrTransient, doing, causeOf(err))
 
 	case status == http.StatusTooManyRequests, status >= http.StatusInternalServerError:
-		return fmt.Errorf("%w: %s: %v", ErrTransient, doing, err)
+		return fmt.Errorf("%w: %s: %w", ErrTransient, doing, causeOf(err))
 
 	case status == http.StatusConflict:
 		if strings.HasPrefix(answerOf(err).Reason, "schema conflict") {
-			return fmt.Errorf("%w: %s: %v", ErrPermanent, doing, err)
+			return fmt.Errorf("%w: %s: %w", ErrPermanent, doing, causeOf(err))
 		}
-		return fmt.Errorf("%w: %s: %v", ErrConflict, doing, err)
+		return fmt.Errorf("%w: %s: %w", ErrConflict, doing, causeOf(err))
 
 	case status == http.StatusUnauthorized:
-		return fmt.Errorf("%w: %s: the database rejected the API token: %v", ErrPermanent, doing, err)
+		return fmt.Errorf("%w: %s: the database rejected the API token: %w", ErrPermanent, doing, causeOf(err))
 
 	default:
-		return fmt.Errorf("%w: %s: %v", ErrPermanent, doing, err)
+		return fmt.Errorf("%w: %s: %w", ErrPermanent, doing, causeOf(err))
 	}
+}
+
+// causeOf returns what a failure of the database wraps after its category:
+// the failure the client reported, so that errors.As reaches an
+// *eventsourcingdb.DBAPIError with the status code and the reason the
+// database gave, and errors.Is reaches eventsourcingdb.ErrInvalidServerHeader
+// and eventsourcingdb.ErrHeartbeatTimeout. The category comes first, and it is
+// the category that decides what the failure means.
+//
+// A failure of the client that errors.Is takes for context.Canceled or
+// context.DeadlineExceeded is kept as text only, with the same message. Both
+// mean that the context ended (see contextEnded), which a read checks before
+// it gets here, and which a write can not run into, since the client writes
+// without a context. So such a failure comes from the network, as when
+// connecting to the database times out, which the standard library reports as
+// context.DeadlineExceeded. Wrapped, it would make a failure of the database
+// look like the end of the context, and httpapi.StatusFor, which asks for the
+// end of the context before it asks for ErrPermanent, would answer a
+// permanent failure with 499 or 503 rather than 500.
+func causeOf(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errors.New(err.Error())
+	}
+
+	return err
 }
