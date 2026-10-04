@@ -738,12 +738,13 @@ Apart from the end of the context, which belongs to no category (see below), eve
 - `ErrTransient` means that trying again may help, for example if the database can not be reached.
 - `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if the data of an event can not be encoded as JSON, such as a float `NaN`, if an event does not match the schema of its type, if a subject contains an event type the state has no rule for, if a decider returns one, or if it returns an event that is `nil`.
 
-A failure of the database is sorted by what its answer means, the same way for reading and for writing:
+A failure of the database is sorted by what its answer means, the same way for reading and for writing, apart from `409`:
 
 - If the database can not be reached, if the connection breaks, if the database asks to slow down (`429`), or if it is unable to answer for now (`5xx`), for example because it is shutting down, the error belongs to `ErrTransient`.
 - If the answer does not come from an EventSourcingDB, the error belongs to `ErrTransient` as well, since a proxy in front of the database answers on its own while the database restarts. The message says so, so that a wrong address stands out in the log.
 - If the database rejects the API token (`401`), or if it rejects the request itself, for example because it is malformed (`400`) or too large (`413`), the error belongs to `ErrPermanent`. For a rejected API token, the message says so.
-- If a precondition did not hold (`409`), the error belongs to `ErrConflict`. If an event does not match its schema, which the database answers with the same status, it belongs to `ErrPermanent`.
+- If a precondition did not hold when writing (`409`), the error belongs to `ErrConflict`. If an event does not match its schema, which the database answers with the same status, it belongs to `ErrPermanent`.
+- Reading has no preconditions, so when reading, a `409` is a refusal of the request like any other, and the error belongs to `ErrPermanent`. The database answers a read with `409` if the latest event of the type given to `FromLatestEvent` comes after the upper bound, and trying again never helps, since new events only move the latest one further away (see [Reading Events](#reading-events)).
 
 ```go
 writtenEvents, err := architecturekit.Execute(
@@ -978,7 +979,7 @@ The IDs are strings, as everywhere else in the kit. The database hands them out 
 
 *Note that `FromLatestEvent` looks for the event on the given subject alone, not below it, and that this subject does not have to be one of those that are read.*
 
-*Note that the database refuses bounds that leave no room for any event, such as `AfterEvent` and `BeforeEvent` with two neighboring IDs, or an upper bound before the latest event of the type given to `FromLatestEvent`. `Read` then fails with the error of the database.*
+*Note that the database refuses bounds that leave no room for any event, such as `AfterEvent` and `BeforeEvent` with two neighboring IDs, or an upper bound before the latest event of the type given to `FromLatestEvent`. `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the reason the database gives.*
 
 Every event is verified, like everything else the store reads, before the loop sees it (see [Verifying Events](#verifying-events)). A failure belongs to a category, as with `Load` (see [Handling Errors](#handling-errors)), and ends the iteration. The store stops reading as soon as the loop ends, so breaking out of it after a page is fine.
 
