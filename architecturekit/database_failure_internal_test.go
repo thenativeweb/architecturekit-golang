@@ -220,6 +220,18 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 		}
 	})
 
+	t.Run("after the category when the database refuses a schema, with the same message", func(t *testing.T) {
+		refusal := answer(http.StatusConflict, "schema conflict: stored events do not match", nil)
+
+		err := schemaRefusal("io.thenativeweb.test.incremented", refusal)
+
+		assert.ErrorIs(t, err, refusal, "errors.As has to reach the answer")
+		assert.ErrorIs(t, err, ErrPermanent)
+		assert.NotErrorIs(t, err, ErrConflict, "a refused schema is permanent, whatever the reason")
+		assert.EqualError(t, err, fmt.Sprintf("%v: the database refused the schema of %q: %v",
+			ErrPermanent, "io.thenativeweb.test.incremented", refusal))
+	})
+
 	t.Run("lets errors.As reach the answer of the database", func(t *testing.T) {
 		err := databaseFailure(answer(http.StatusTooManyRequests, "slow down", nil), "writing")
 
@@ -302,6 +314,21 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 			assert.ErrorIs(t, err, ErrPermanent)
 			assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context is context.DeadlineExceeded")
 			assert.EqualError(t, err, fmt.Sprintf("%v: reading events: %v", ErrPermanent, refusal))
+		})
+
+		t.Run("when the database refuses a schema", func(t *testing.T) {
+			for _, ended := range []error{context.Canceled, context.DeadlineExceeded} {
+				t.Run(ended.Error(), func(t *testing.T) {
+					refusal := answer(http.StatusConflict, "", ended)
+
+					err := schemaRefusal("io.thenativeweb.test.incremented", refusal)
+
+					assert.ErrorIs(t, err, ErrPermanent)
+					assert.NotErrorIs(t, err, ended, "only the end of the context is %v", ended)
+					assert.EqualError(t, err, fmt.Sprintf("%v: the database refused the schema of %q: %v",
+						ErrPermanent, "io.thenativeweb.test.incremented", refusal))
+				})
+			}
 		})
 	})
 }

@@ -127,6 +127,14 @@ func databaseFailure(err error, doing string) error {
 	}
 }
 
+// schemaRefusal reports that the database refused the schema of an event
+// type, e.g. because stored events of the type do not match it, which is
+// permanent, whatever the reason. Like every other failure of the database,
+// it wraps the refusal of the client after the category (see causeOf).
+func schemaRefusal(eventType string, refusal error) error {
+	return fmt.Errorf("%w: the database refused the schema of %q: %w", ErrPermanent, eventType, causeOf(refusal))
+}
+
 // causeOf returns what a failure of the database wraps after its category:
 // the failure the client reported, so that errors.As reaches an
 // *eventsourcingdb.DBAPIError with the status code and the reason the
