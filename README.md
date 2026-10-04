@@ -378,7 +378,7 @@ if err != nil {
 
 `Execute` reads the events of the command's subject, evolves the state from them, calls the decider, and writes the events it returns. The function returns the written events, including the fields added by the server. If the decider returns no events, nothing is written, and the function returns `nil`.
 
-If one of the events the decider returns is `nil`, `Execute` writes none of them, and fails with an error of the category `ErrPermanent` that names the index of the event, since an event that is `nil` has neither a type nor data. The test fixture reports such an event the same way (see [Testing Deciders](#testing-deciders)).
+If one of the events the decider returns is `nil`, `Execute` writes none of them, and fails with an error of the category `ErrPermanent` that names the index of the event, since an event that is `nil` has neither a type nor data. A `nil` pointer counts as `nil`, too, such as a `*BookBorrowed` that was declared but never set. The test fixture reports such an event the same way (see [Testing Deciders](#testing-deciders)).
 
 Every event the decider returns needs a rule on the state of the decider, an `Evolve` function or `Ignore`. `Execute` writes the events to the subject that the same state reads for the next command, and the database keeps every event, so an event without a rule would leave a subject that the state can not read any more. If the state has no rule for one of the events, `Execute` writes none of them, and fails with an error of the category `ErrPermanent` that names the event type (see [Handling Errors](#handling-errors)). The test fixture reports such an event the same way (see [Testing Deciders](#testing-deciders)).
 
@@ -721,7 +721,7 @@ if errors.Is(err, architecturekit.ErrConflict) {
 }
 ```
 
-`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. If the data of one of the events can not be encoded as JSON, nothing is written either, and the error belongs to the category `ErrPermanent`. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
+`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. If the data of one of the events can not be encoded as JSON, nothing is written either, and the error belongs to the category `ErrPermanent`. So does an event without a subject, or one that is `nil`, a `nil` pointer included. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
 
 Like a command, a write declares at least one precondition, made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state.
 
@@ -2762,7 +2762,7 @@ func TestBorrowBook(t *testing.T) {
 
 `Given` returns a `*Fixture`, and `When` returns an `*Outcome`. The functions that check the outcome return the outcome again, so they can be chained.
 
-Like `Execute`, `When` refuses an event that is `nil`, an event that the state of the decider has no rule for, and an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). As `Execute` does, it checks all events for `nil` first, then all of them for a rule, and encodes them last. It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
+Like `Execute`, `When` refuses an event that is `nil`, a `nil` pointer included, an event that the state of the decider has no rule for, and an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). As `Execute` does, it checks all events for `nil` first, then all of them for a rule, and encodes them last. It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
 
 *Note that `Given` accepts any value that provides the `Helper` and `Fatalf` functions, as described by the `TestingT` interface.*
 

@@ -602,6 +602,7 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // If one of the events the decider returns is nil, Execute writes none of
 // them and fails with an error of the category ErrPermanent that names the
 // index of the event, since an event that is nil has neither a type nor data.
+// A nil pointer of a concrete type counts as nil.
 //
 // Every event the decider returns needs a rule on the state of the decider,
 // an Evolve rule or Ignore, since Execute writes it to the subject that the
@@ -700,14 +701,14 @@ func executeOnce[TCommand Command, TState any](
 }
 
 // checkNotNil fails permanently if one of the events a decider returned for a
-// subject is nil, naming its index, since such an event has neither a type
-// nor data.
+// subject is nil, also a nil pointer of a concrete type (see isNil), naming
+// its index, since such an event has neither a type nor data.
 //
 // The test fixture of architecturekittest refuses such an event with the same
 // error, which it words itself, so a test compares the two.
 func checkNotNil(subject string, events []Event) error {
 	for i, event := range events {
-		if event == nil {
+		if isNil(event) {
 			return fmt.Errorf("%w: refusing to write to %q, since event %d that the decider returned is nil",
 				ErrPermanent, subject, i)
 		}
