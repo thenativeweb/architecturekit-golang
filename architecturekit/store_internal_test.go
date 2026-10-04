@@ -50,13 +50,16 @@ func TestNewStore(t *testing.T) {
 		}
 	})
 
-	t.Run("counts a number of subjects below 1 as 1", func(t *testing.T) {
-		for _, maxSubjects := range []int{0, -1} {
-			store := NewStore(offlineClient(t), "https://thenativeweb.io", WithStateCache(maxSubjects))
+	t.Run("has no state cache for 0 subjects, as without WithStateCache", func(t *testing.T) {
+		store := NewStore(offlineClient(t), "https://thenativeweb.io", WithStateCache(0))
 
-			require.NotNil(t, store.states, "expected a cache for %d subjects", maxSubjects)
-			assert.Equal(t, 1, store.states.maxSubjects)
-		}
+		assert.Nil(t, store.states)
+	})
+
+	t.Run("has no state cache if the last WithStateCache gives 0 subjects", func(t *testing.T) {
+		store := NewStore(offlineClient(t), "https://thenativeweb.io", WithStateCache(10), WithStateCache(0))
+
+		assert.Nil(t, store.states)
 	})
 
 	t.Run("waits 1 second at first and 1 minute at most without WithReconnectDelays", func(t *testing.T) {

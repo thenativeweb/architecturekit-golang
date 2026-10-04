@@ -171,6 +171,24 @@ func TestLoadWithStateCache(t *testing.T) {
 		assert.ErrorContains(t, err, subject, "the error must name the subject")
 	})
 
+	t.Run("hands a state the cached state of another one of the same type that is built alike", func(t *testing.T) {
+		// The cache can not compare the Evolve functions, so it does not tell
+		// these two apart, although one counts and the other one sums up. That
+		// is why two different states need two different types.
+		counting := architecturekit.NewState(0).
+			Evolve(func(count int, _ incremented) int { return count + 1 })
+		summing := architecturekit.NewState(0).
+			Evolve(func(sum int, event incremented) int { return sum + event.By })
+
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
+
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+
+		assert.Equal(t, 2, load(t, store, counting, subject))
+		assert.Equal(t, 2, load(t, store, summing, subject), "the sum is 7, but the cache hands out the count")
+	})
+
 	t.Run("keeps two different states of the same type on different subjects apart", func(t *testing.T) {
 		store := cachedStore(t, 10)
 		counted := subjectFor(t) + "/counted"
@@ -265,6 +283,37 @@ func TestLoadWithStateCache(t *testing.T) {
 
 		assert.Equal(t, 3, current.Total)
 		assert.Equal(t, int64(3), evolved.Load(), "the reset and one increment first, then one more")
+	})
+}
+
+func TestWithStateCache(t *testing.T) {
+	t.Run("panics on a negative number of subjects", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: WithStateCache needs a number of subjects that is not negative, not -1",
+			func() { architecturekit.WithStateCache(-1) })
+	})
+
+	t.Run("turns the cache off with 0 subjects", func(t *testing.T) {
+		var option architecturekit.StoreOption
+		require.NotPanics(t, func() { option = architecturekit.WithStateCache(0) })
+
+		store := architecturekit.NewStore(rawClient(t), "https://thenativeweb.io", option)
+		subject := subjectFor(t)
+
+		var evolved atomic.Int64
+		state := countingState(&evolved)
+
+		writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+
+		load(t, store, state, subject)
+		load(t, store, state, subject)
+
+		assert.Equal(t, int64(4), evolved.Load(), "the state must be read in full every time")
+
+		// Nor does the rule apply that a cache brings, that two different
+		// states of the same type on the same subject fail.
+		assert.Equal(t, 2, load(t, store, countState(), subject))
+		assert.Equal(t, 7, load(t, store, sumState(), subject))
 	})
 }
 

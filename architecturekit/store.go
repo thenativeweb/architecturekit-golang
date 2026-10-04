@@ -64,7 +64,9 @@ type storeSettings struct {
 
 // WithStateCache keeps the states of the most recently used subjects in
 // memory, up to the given number, so that the next command on one of them
-// reads only the events written since. Values below 1 count as 1.
+// reads only the events written since. A number of 0 keeps none, which is the
+// same as leaving out the option, so that a configuration can turn the cache
+// off.
 //
 // Only states that consist of values, or that have a Clone function, are
 // cached (see State.Clone). The cache is correct with several processes
@@ -73,11 +75,23 @@ type storeSettings struct {
 //
 // The cache tells states apart by their type, so a state that is built anew
 // for every command is cached as well. Two different states that read the
-// same subject need two different types: if two states of the same type
-// differ in how they are built, reading fails with ErrPermanent.
+// same subject need two different types. Of two states of the same type, the
+// cache compares what it can see of how they are built: their initial values,
+// the event types they have Evolve rules for, ignore, or have upcasters for,
+// and FromLatest. If any of these differ on the same subject, reading fails
+// with ErrPermanent. The cache can not compare functions, though, such as the
+// Evolve functions themselves, so two states of the same type that are built
+// alike, but compute something else, are not told apart: one of them gets the
+// cached state of the other, without an error.
+//
+// A negative number of subjects is a programming error, so it panics.
 func WithStateCache(maxSubjects int) StoreOption {
+	if maxSubjects < 0 {
+		panic(fmt.Sprintf("architecturekit: WithStateCache needs a number of subjects that is not negative, not %d", maxSubjects))
+	}
+
 	return func(settings *storeSettings) {
-		settings.maxCachedSubjects = max(maxSubjects, 1)
+		settings.maxCachedSubjects = maxSubjects
 	}
 }
 
