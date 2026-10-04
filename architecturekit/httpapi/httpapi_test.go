@@ -818,6 +818,24 @@ func TestToCommand(t *testing.T) {
 	})
 }
 
+func TestNewAPI(t *testing.T) {
+	t.Run("panics on a nil function that determines the user, also one that was declared but never set", func(t *testing.T) {
+		var declared func(*http.Request) (user, error)
+
+		for _, userFrom := range []func(*http.Request) (user, error){nil, declared} {
+			assert.PanicsWithValue(t,
+				"architecturekit/httpapi: NewAPI needs a function that determines the user, not nil",
+				func() { httpapi.NewAPI(deadStore(t), userFrom) })
+		}
+	})
+
+	t.Run("panics on a nil function that determines the user without a store as well", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit/httpapi: NewAPI needs a function that determines the user, not nil",
+			func() { httpapi.NewAPI[user](nil, nil) })
+	})
+}
+
 func TestUserOf(t *testing.T) {
 	t.Run("determines the caller for your own handlers", func(t *testing.T) {
 		api := httpapi.NewAPI(deadStore(t), userFrom)

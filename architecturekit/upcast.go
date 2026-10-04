@@ -44,7 +44,12 @@ func NewUpcasters() *Upcasters {
 //
 // Registering the same event type twice is a programming error, so it panics
 // while the set is being built rather than silently overwriting an upcaster.
+// So does a nil upcaster, which would otherwise only fail once the first event
+// of the type is read.
 func (u *Upcasters) Upcast(from string, upcast Upcaster) *Upcasters {
+	if upcast == nil {
+		panic(fmt.Sprintf("architecturekit: Upcast needs an upcaster for event type %q, not nil", from))
+	}
 	if _, exists := u.byType[from]; exists {
 		panic(fmt.Sprintf("architecturekit: event type %q already has an upcaster", from))
 	}

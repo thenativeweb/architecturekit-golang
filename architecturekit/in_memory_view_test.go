@@ -70,6 +70,16 @@ func bookIDsOf(t *testing.T, items iter.Seq2[book, error]) []string {
 }
 
 func TestInMemoryView(t *testing.T) {
+	t.Run("panics on a nil function for the key, also one that was declared but never set", func(t *testing.T) {
+		var declared func(book) string
+
+		for _, keyOf := range []func(book) string{nil, declared} {
+			assert.PanicsWithValue(t,
+				"architecturekit: NewInMemoryView needs a function that returns the key of an item, not nil",
+				func() { architecturekit.NewInMemoryView(keyOf) })
+		}
+	})
+
 	t.Run("inserts and gets items", func(t *testing.T) {
 		view := bookView()
 
