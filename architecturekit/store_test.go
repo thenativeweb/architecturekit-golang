@@ -263,6 +263,7 @@ func TestExecute(t *testing.T) {
 			{"before another event", []architecturekit.Event{nil, incremented{By: 1}}, 0},
 			{"after another event", []architecturekit.Event{incremented{By: 1}, nil}, 1},
 			{"as the first of several", []architecturekit.Event{incremented{By: 1}, nil, incremented{By: 2}, nil}, 1},
+			{"as a nil pointer of a concrete type", []architecturekit.Event{incremented{By: 1}, (*incremented)(nil)}, 1},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				store := requireStore(t)
@@ -290,6 +291,19 @@ func TestExecute(t *testing.T) {
 
 		// The fixture checks for nil events itself, as Execute does, so both
 		// have to word the refusal alike.
+		assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
+	})
+
+	t.Run("refuses a nil pointer of a concrete type with the same error as the test fixture", func(t *testing.T) {
+		// The pointer is not equal to nil, since the interface knows its type,
+		// but calling EventType on it panics.
+		decider := emittingDecider(counterState(), incremented{By: 1}, (*incremented)(nil))
+		cmd := increment{subject: subjectFor(t)}
+
+		_, err := architecturekit.Execute(context.Background(), requireStore(t), decider, cmd)
+		require.ErrorIs(t, err, architecturekit.ErrPermanent, "Execute has to refuse the event")
+		require.ErrorContains(t, err, "event 1 that the decider returned is nil", "Execute has to refuse the nil pointer")
+
 		assert.Equal(t, err.Error(), fixtureRefusal(t, decider, cmd))
 	})
 
