@@ -972,7 +972,7 @@ events := architecturekit.Read(context.TODO(), store, architecturekit.ExactSubje
 )
 ```
 
-The IDs are strings, as everywhere else in the kit. The database hands them out as one ascending sequence across all subjects, so a bound does not have to be an event of the subjects that are read. An ID that is not the one of an event, such as `abc` or an empty one, ends the iteration with an error that wraps `ErrNotARevision`, before the database is asked. That way, an ID that comes from a request can be told apart from a failure of the database.
+The IDs are strings, as everywhere else in the kit. The database hands them out as one ascending sequence across all subjects, so a bound does not have to be an event of the subjects that are read. An ID that is not the one of an event, such as `abc` or an empty one, ends the iteration with an error that wraps `ErrNotARevision`, before the database is asked. That way, an ID that comes from a request can be told apart from a failure of the database, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
 *Note that a read has at most one lower bound, one upper bound, and one order, and that `FromLatestEvent` counts as a lower bound. Options that contradict each other, such as `FromEvent` together with `AfterEvent`, or `NewestFirst` given twice, make `Read` panic. So does `FromLatestEvent` together with `NewestFirst`, since the database reads from the latest event of a type only oldest first, and so do a subject for `FromLatestEvent` that does not start with a slash, and the zero value of `Subjects`.*
 
@@ -2107,7 +2107,7 @@ func toBorrowBook(r *http.Request, request borrowBookRequest, user User) (Borrow
 }
 ```
 
-The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake. So is an expected event ID that is empty or not an event ID at all (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). `CompareRevisions` refuses a value that is not an event ID with `ErrNotARevision`, but takes an empty one for the revision of a view that has seen nothing, which is why the function checks for an empty one first.
+The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake. So is an expected event ID that is empty or not an event ID at all, which only the database checks (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). `CompareRevisions` refuses a value that is not an event ID with `ErrNotARevision`, but takes an empty one for the revision of a view that has seen nothing, which is why the function checks for an empty one first.
 
 Then call the `Route` function with the API, the mux, a pattern, the function that returns the command, and the decider:
 
@@ -2467,9 +2467,13 @@ It checks the categories in this order:
 | `architecturekit.ErrTransient` | `503 Service Unavailable` |
 | `context.Canceled` | `499 Client Closed Request` |
 | `context.DeadlineExceeded` | `503 Service Unavailable` |
+| `architecturekit.ErrPermanent` | `500 Internal Server Error` |
+| `architecturekit.ErrNotARevision` | `400 Bad Request` |
 | any other error | `500 Internal Server Error` |
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged.*
+
+*Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, a value for `CompareRevisions`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
 
 *Note that an error of the function that returns a command, of the one that returns a query, or of the one that determines the user keeps its status code only if it has one of its own, or belongs to the category `ErrPermanent`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
 
