@@ -436,3 +436,32 @@ func TestProjectionFunc(t *testing.T) {
 		assert.Error(t, projection.Apply(context.Background(), eventsourcingdb.Event{}), "expected the error from the function")
 	})
 }
+
+func TestIsNil(t *testing.T) {
+	// Every kind that can be nil, once nil and once not, and kinds that can not
+	// be nil at all, which reflect would panic on if asked.
+	for _, test := range []struct {
+		name  string
+		value any
+		isNil bool
+	}{
+		{"nil", nil, true},
+		{"a nil pointer", (*recorder)(nil), true},
+		{"a nil map", map[string]int(nil), true},
+		{"a nil slice", []string(nil), true},
+		{"a nil function", ProjectionFunc(nil), true},
+		{"a nil channel", (chan string)(nil), true},
+		{"a pointer", &recorder{}, false},
+		{"a map", map[string]int{}, false},
+		{"a slice", []string{}, false},
+		{"a function", ProjectionFunc(func(context.Context, eventsourcingdb.Event) error { return nil }), false},
+		{"a channel", make(chan string), false},
+		{"a struct", journal{}, false},
+		{"a number", 0, false},
+		{"a string", "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.isNil, isNil(test.value))
+		})
+	}
+}

@@ -66,9 +66,11 @@ type RevisionSink interface {
 // projection cannot be tracked: it has no Apply to wrap, and a projection that
 // is transactional as well is a programming error and panics. So does calling
 // Tracking without any view, or with a nil projection or a nil view, which
-// would otherwise only fail once the first event reaches the projection.
+// would otherwise only fail once the first event reaches the projection. A
+// nil pointer or function counts as nil, such as a view that was declared but
+// never created.
 func Tracking(projection Projection, sinks ...RevisionSink) Projection {
-	if projection == nil {
+	if isNil(projection) {
 		panic("architecturekit: Tracking needs a projection, not nil")
 	}
 
@@ -79,7 +81,7 @@ func Tracking(projection Projection, sinks ...RevisionSink) Projection {
 	}
 
 	for i, sink := range sinks {
-		if sink == nil {
+		if isNil(sink) {
 			panic(fmt.Sprintf("architecturekit: Tracking needs views to record the events in, but view %d is nil", i))
 		}
 	}

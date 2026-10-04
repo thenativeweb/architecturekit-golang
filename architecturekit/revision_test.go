@@ -294,6 +294,55 @@ func TestTracking(t *testing.T) {
 		})
 	})
 
+	// A nil pointer or function of a concrete type is not equal to nil once an
+	// interface holds it, so a check for nil alone lets it through, and it only
+	// fails once the first event arrives.
+
+	t.Run("refuses to track a nil pointer or function as it refuses nil", func(t *testing.T) {
+		for name, projection := range map[string]architecturekit.Projection{
+			"a nil pointer":        (*collector)(nil),
+			"a nil ProjectionFunc": architecturekit.ProjectionFunc(nil),
+		} {
+			t.Run(name, func(t *testing.T) {
+				assert.PanicsWithValue(t, "architecturekit: Tracking needs a projection, not nil", func() {
+					architecturekit.Tracking(projection, intView())
+				})
+			})
+		}
+	})
+
+	t.Run("refuses to track into a view that was never created as into nil", func(t *testing.T) {
+		var catalog *architecturekit.InMemoryView[int, int]
+
+		assert.PanicsWithValue(t, "architecturekit: Tracking needs views to record the events in, but view 0 is nil", func() {
+			architecturekit.Tracking(&collector{}, catalog)
+		})
+		assert.PanicsWithValue(t, "architecturekit: Tracking needs views to record the events in, but view 1 is nil", func() {
+			architecturekit.Tracking(&collector{}, intView(), catalog)
+		})
+	})
+
+	t.Run("refuses to track into a nil function as into nil", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: Tracking needs views to record the events in, but view 0 is nil", func() {
+			architecturekit.Tracking(&collector{}, seenFunc(nil))
+		})
+	})
+
+	t.Run("tracks a projection that is a struct into a view that is a function", func(t *testing.T) {
+		// Neither can be nil, so the check has to let both through.
+		var seen []string
+
+		projection := architecturekit.Tracking(applying{}, seenFunc(func(eventID string) {
+			seen = append(seen, eventID)
+		}))
+
+		architecturekittest.Project(t, projection,
+			architecturekittest.StoredEvent("/counter/a", "5", incremented{By: 1}),
+		)
+
+		assert.Equal(t, []string{"5"}, seen)
+	})
+
 	t.Run("does not record a failed event", func(t *testing.T) {
 		view := intView()
 		failed := errors.New("could not apply")
@@ -400,3 +449,15 @@ func TestRevisionOf(t *testing.T) {
 func intView() *architecturekit.InMemoryView[int, int] {
 	return architecturekit.NewInMemoryView(func(item int) int { return item })
 }
+
+// seenFunc is a view that is a function, so that a nil one can be handed to
+// Tracking.
+type seenFunc func(eventID string)
+
+func (f seenFunc) Seen(eventID string) { f(eventID) }
+
+// applying is a projection that is a struct, which can not be nil, and that
+// accepts every event.
+type applying struct{}
+
+func (applying) Apply(context.Context, eventsourcingdb.Event) error { return nil }

@@ -93,6 +93,19 @@ func TestQueryOptions(t *testing.T) {
 			"architecturekit/httpapi: Revisioned needs a view, not nil",
 			func() { httpapi.Revisioned(nil, time.Second) },
 		},
+		// A nil pointer or function of a concrete type is not equal to nil once
+		// an interface holds it, and would fail every request with 500.
+		"Revisioned with a view that was never created": {
+			"architecturekit/httpapi: Revisioned needs a view, not nil",
+			func() {
+				var catalog *architecturekit.InMemoryView[string, noteItem]
+				httpapi.Revisioned(catalog, time.Second)
+			},
+		},
+		"Revisioned with a nil function as the view": {
+			"architecturekit/httpapi: Revisioned needs a view, not nil",
+			func() { httpapi.Revisioned(revisionFunc(nil), time.Second) },
+		},
 		"Revisioned with a negative wait": {
 			"architecturekit/httpapi: Revisioned needs a wait that is not negative, not -1s",
 			func() { httpapi.Revisioned(noteView(), -time.Second) },
@@ -132,7 +145,27 @@ func TestQueryOptions(t *testing.T) {
 		assert.Empty(t, response.Header().Get("Revision"))
 		assert.Empty(t, response.Header().Get("ETag"))
 	})
+
+	t.Run("a view that is a function is revisioned", func(t *testing.T) {
+		// It is not nil, so the check has to let it through.
+		mux := http.NewServeMux()
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "GET /notes", allNotes, answer,
+			httpapi.Revisioned(revisionFunc(func() string { return "7" }), time.Second))
+
+		response := askNotes(mux, nil)
+
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.Equal(t, "7", response.Header().Get(httpapi.HeaderRevision))
+	})
 }
+
+// revisionFunc is a view that is a function, so that a nil one can be handed
+// to Revisioned. It has reached every revision it is asked for.
+type revisionFunc func() string
+
+func (f revisionFunc) Revision() string { return f() }
+
+func (revisionFunc) WaitFor(context.Context, string) error { return nil }
 
 func TestRevisioned(t *testing.T) {
 	t.Run("a query without a wanted revision answers at once", func(t *testing.T) {
