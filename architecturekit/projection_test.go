@@ -267,7 +267,89 @@ func TestProjection(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("refuses a nil pointer or function as it refuses nil", func(t *testing.T) {
+		// Once an interface holds it, a nil pointer or function of a concrete
+		// type is not equal to nil, and a run would only fail on the first
+		// event, with a nil pointer dereference that names no cause.
+		subjects := architecturekit.SubjectTree("/")
+
+		for _, test := range []struct {
+			function, kind string
+			run            func()
+		}{
+			{"StartProjection", "a nil pointer", func() {
+				_ = architecturekit.StartProjection(t.Context(), nil, subjects, (*collector)(nil))
+			}},
+			{"StartProjection", "a nil ProjectionFunc", func() {
+				_ = architecturekit.StartProjection(t.Context(), nil, subjects, architecturekit.ProjectionFunc(nil))
+			}},
+			{"StartTransactionalProjection", "a nil pointer", func() {
+				_ = architecturekit.StartTransactionalProjection(t.Context(), nil, subjects, (*transactionalCollector)(nil))
+			}},
+			{"StartTransactionalProjection", "a nil function", func() {
+				_ = architecturekit.StartTransactionalProjection(t.Context(), nil, subjects, beginFunc(nil))
+			}},
+			{"CatchUpProjection", "a nil pointer", func() {
+				_ = architecturekit.CatchUpProjection(t.Context(), nil, subjects, (*collector)(nil))
+			}},
+			{"CatchUpProjection", "a nil ProjectionFunc", func() {
+				_ = architecturekit.CatchUpProjection(t.Context(), nil, subjects, architecturekit.ProjectionFunc(nil))
+			}},
+			{"CatchUpTransactionalProjection", "a nil pointer", func() {
+				_ = architecturekit.CatchUpTransactionalProjection(t.Context(), nil, subjects, (*transactionalCollector)(nil))
+			}},
+			{"CatchUpTransactionalProjection", "a nil function", func() {
+				_ = architecturekit.CatchUpTransactionalProjection(t.Context(), nil, subjects, beginFunc(nil))
+			}},
+		} {
+			t.Run(test.function+" with "+test.kind, func(t *testing.T) {
+				assert.PanicsWithValue(t, "architecturekit: "+test.function+" needs a projection, not nil", test.run)
+			})
+		}
+	})
+
+	t.Run("runs a projection that is a struct or a function", func(t *testing.T) {
+		// Neither is nil, so the check has to let both through.
+		store := requireStore(t)
+		subject := subjectFor(t)
+		seed(t, subject, 1)
+
+		var seen []string
+		function := architecturekit.ProjectionFunc(func(_ context.Context, event eventsourcingdb.Event) error {
+			seen = append(seen, event.ID)
+			return nil
+		})
+
+		require.NoError(t, architecturekit.CatchUpProjection(t.Context(), store, architecturekit.ExactSubject(subject), applying{}))
+		require.NoError(t, architecturekit.CatchUpProjection(t.Context(), store, architecturekit.ExactSubject(subject), function))
+		assert.Len(t, seen, 1, "the function has to see the event")
+
+		ctx, stop := context.WithCancel(t.Context())
+		defer stop()
+
+		run := architecturekit.StartProjection(ctx, store, architecturekit.ExactSubject(subject), applying{})
+		select {
+		case <-run.CaughtUp():
+		case <-run.Done():
+			require.Fail(t, "the run ended before it caught up", "%v", run.Err())
+		case <-time.After(5 * time.Second):
+			require.Fail(t, "the run did not catch up")
+		}
+
+		stop()
+		<-run.Done()
+		assert.NoError(t, run.Err(), "ending through the context is not a failure")
+	})
 }
+
+// beginFunc is a transactional projection that is a function, so that a nil
+// one can be handed to the functions that run one.
+type beginFunc func(ctx context.Context) (architecturekit.Tx, error)
+
+func (beginFunc) Checkpoint(context.Context) (string, error) { return "", nil }
+
+func (f beginFunc) Begin(ctx context.Context) (architecturekit.Tx, error) { return f(ctx) }
 
 type refusingCollector struct{}
 

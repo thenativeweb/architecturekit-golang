@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
 	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -101,11 +102,32 @@ func refuseTransactional(projection Projection) {
 	}
 }
 
-// requireProjection panics for a nil projection, which would otherwise only
-// fail once it is called, for a run in the background.
+// requireProjection panics for a nil projection, also one that is a nil
+// pointer or function (see isNil), which would otherwise only fail once it is
+// called, for a run in the background.
 func requireProjection(function string, projection any) {
-	if projection == nil {
+	if isNil(projection) {
 		panic(fmt.Sprintf("architecturekit: %s needs a projection, not nil", function))
+	}
+}
+
+// isNil reports whether a value that is handed over as an interface is nil,
+// also when it is a nil pointer, map, slice, function, or channel of a
+// concrete type, such as a view that was declared but never created. Such a
+// value is not equal to nil, since the interface knows its type, but it fails
+// as soon as it is used. It uses reflection, so call it only while wiring.
+//
+// An interface never shows up as the kind, since reflect.ValueOf unpacks it.
+func isNil(value any) bool {
+	if value == nil {
+		return true
+	}
+
+	switch reflected := reflect.ValueOf(value); reflected.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return reflected.IsNil()
+	default:
+		return false
 	}
 }
 
@@ -132,7 +154,8 @@ func batchSizeOf(projection any) int {
 // StartProjection).
 //
 // A nil projection, or one that is transactional as well, is a programming
-// error and panics; use CatchUpTransactionalProjection for the latter.
+// error and panics; use CatchUpTransactionalProjection for the latter. A nil
+// pointer or a nil ProjectionFunc counts as a nil projection.
 func CatchUpProjection(
 	ctx context.Context,
 	store *Store,
@@ -152,7 +175,8 @@ func CatchUpProjection(
 }
 
 // CatchUpTransactionalProjection is CatchUpProjection for a transactional
-// projection. A nil projection is a programming error and panics.
+// projection. A nil projection, including a nil pointer, is a programming
+// error and panics.
 func CatchUpTransactionalProjection(
 	ctx context.Context,
 	store *Store,

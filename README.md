@@ -1469,7 +1469,7 @@ logProjection := architecturekit.ProjectionFunc(func(ctx context.Context, event 
 
 To run a projection, call the `StartProjection` function with a context, the store, the subjects to read, and the projection. Say which subjects with the `SubjectTree` function, which stands for the given subject together with every subject below it, or with the `ExactSubject` function, which stands for the given subject alone. A projection usually reads a tree, such as every book below `/books`. There is no default, so that every projection says which one it means, since the client SDK reads a single subject unless told otherwise.
 
-*Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection`, the other functions that run a projection, and `Read` panic, as does a `nil` projection.*
+*Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection`, the other functions that run a projection, and `Read` panic, as does a `nil` projection. A `nil` pointer or a `nil` `ProjectionFunc` counts as a `nil` projection.*
 
 The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that:
 
@@ -1974,7 +1974,7 @@ Then run `trackedProjection` instead of `catalogProjection` (see [Running Projec
 
 `Tracking` accepts every view that implements the `RevisionSink` interface, which consists of the `Seen` function. `InMemoryView` implements it.
 
-*Note that calling `Tracking` with `nil` as the projection, without any view, or with `nil` as one of the views panics.*
+*Note that calling `Tracking` with `nil` as the projection, without any view, or with `nil` as one of the views panics. A `nil` pointer or a `nil` `ProjectionFunc` counts as `nil`, too, such as a view that was declared but never created with `NewInMemoryView`.*
 
 The tracked projection keeps the mode and the batch size of the projection it wraps. A transactional projection can not be tracked, since it has no `Apply` function. Record its revision within the transaction instead.
 
@@ -2519,7 +2519,7 @@ A query that holds a function or a channel can not be written into an `ETag`, an
 
 *Note that the constants `httpapi.HeaderWaitFor` and `httpapi.HeaderRevision` contain the names of the two headers.*
 
-*Note that `Revisioned` panics for a `nil` view or a negative wait, and so does giving it twice.*
+*Note that `Revisioned` panics for a `nil` view or a negative wait, and so does giving it twice. A `nil` pointer counts as a `nil` view, such as a view that was declared but never created with `NewInMemoryView`.*
 
 #### Depending on More Than the Read Model
 

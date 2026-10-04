@@ -123,9 +123,10 @@ type querySettings struct {
 // ask. Answers are marked private, so that a shared cache does not keep them.
 //
 // A nil view, a negative wait, or giving Revisioned twice, is a programming
-// error, so it panics.
+// error, so it panics. A nil pointer counts as a nil view, such as a view that
+// was declared but never created.
 func Revisioned(view architecturekit.Revisioned, wait time.Duration) QueryOption {
-	if view == nil {
+	if isNil(view) {
 		panic("architecturekit/httpapi: Revisioned needs a view, not nil")
 	}
 	if wait < 0 {
@@ -139,6 +140,28 @@ func Revisioned(view architecturekit.Revisioned, wait time.Duration) QueryOption
 
 		settings.view = view
 		settings.wait = wait
+	}
+}
+
+// isNil reports whether a value that is handed over as an interface is nil,
+// also when it is a nil pointer, map, slice, function, or channel of a
+// concrete type, such as a view that was declared but never created. Such a
+// value is not equal to nil, since the interface knows its type, but it fails
+// as soon as it is used. It uses reflection, so call it only while wiring.
+//
+// An interface never shows up as the kind, since reflect.ValueOf unpacks it.
+// The package architecturekit has the same function, which it does not export,
+// so that it does not become part of what the kit offers.
+func isNil(value any) bool {
+	if value == nil {
+		return true
+	}
+
+	switch reflected := reflect.ValueOf(value); reflected.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return reflected.IsNil()
+	default:
+		return false
 	}
 }
 

@@ -107,7 +107,8 @@ type ProjectionRun struct {
 //	return run.Err()
 //
 // A nil projection, or one that is transactional as well, is a programming
-// error and panics; use StartTransactionalProjection for the latter.
+// error and panics; use StartTransactionalProjection for the latter. A nil
+// pointer or a nil ProjectionFunc counts as a nil projection.
 func StartProjection(
 	ctx context.Context,
 	store *Store,
@@ -129,7 +130,8 @@ func StartProjection(
 // committed together with the ID of its last event. A panic in the Apply of a
 // transaction rolls the transaction back before the run ends.
 //
-// A nil projection is a programming error and panics.
+// A nil projection, including a nil pointer, is a programming error and
+// panics.
 func StartTransactionalProjection(
 	ctx context.Context,
 	store *Store,
