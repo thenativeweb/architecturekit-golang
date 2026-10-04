@@ -46,8 +46,35 @@ func contextEnded(ctx context.Context, doing string) error {
 	return fmt.Errorf("architecturekit: %s: %w", doing, ctx.Err())
 }
 
+// readFailure is what a read that failed reports: the end of the context if
+// that is what stopped it, and the failure of the database otherwise. Every
+// read of the kit goes through it.
+//
+// A read that the context cut short has seen only some of the events, and the
+// client reports that as a failure, so that it never looks complete: a state
+// built from part of the history would let a command decide on it.
+//
+// Reading has no preconditions, so a 409 is a refusal of the request like any
+// other, which is permanent, whatever reason the database gives. The database
+// answers a read with it if the latest event of the type that FromLatestEvent
+// names comes after the upper bound, and trying again never helps, since new
+// events only move the latest one further away. Every other answer is sorted
+// as databaseFailure sorts it.
+func readFailure(ctx context.Context, err error, doing string) error {
+	if ctx.Err() != nil {
+		return contextEnded(ctx, doing)
+	}
+
+	if statusCodeOf(err) == http.StatusConflict {
+		return fmt.Errorf("%w: %s: %v", ErrPermanent, doing, err)
+	}
+
+	return databaseFailure(err, doing)
+}
+
 // databaseFailure sorts a failure the database reported into a category, by
-// what its answer means. The same rules apply to reading and to writing:
+// what its answer means. The rules apply to writing, and to reading as well,
+// apart from 409, which readFailure sorts before it gets here:
 //
 //   - Without an answer, the database is unreachable or the connection broke,
 //     which is transient. The client reports data it can not encode without an
@@ -61,9 +88,11 @@ func contextEnded(ctx context.Context, doing string) error {
 //     permanent.
 //   - 429 asks to slow down, and 5xx means that the database is unable to
 //     answer for now, e.g. because it is shutting down. Both are transient.
-//   - 409 means that a precondition did not hold, which is a conflict, or that
-//     an event does not match its schema, which is permanent. Only the reason
-//     the database gives tells them apart.
+//   - 409 means, when writing, that a precondition did not hold, which is a
+//     conflict, or that an event does not match its schema, which is
+//     permanent. Only the reason the database gives tells them apart. When
+//     reading, which has no preconditions, a 409 is permanent (see
+//     readFailure).
 //   - Every other status, such as 400, 401 or 413, means that the request
 //     itself is wrong, which is permanent. A rejected API token is named, as it
 //     is the one to expect in production, e.g. after the token was rotated.

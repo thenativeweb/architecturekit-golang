@@ -275,20 +275,6 @@ func Read(
 	}
 }
 
-// readFailure is what a read that failed reports: the end of the context if
-// that is what stopped it, and the failure of the database otherwise.
-//
-// A read that the context cut short has seen only some of the events, and the
-// client reports that as a failure, so that it never looks complete: a state
-// built from part of the history would let a command decide on it.
-func readFailure(ctx context.Context, err error, doing string) error {
-	if ctx.Err() != nil {
-		return contextEnded(ctx, doing)
-	}
-
-	return databaseFailure(err, doing)
-}
-
 // fold reads the stream and folds it into a state as it goes, starting from a
 // copy of the initial value. Events are not collected, so even long streams
 // need constant memory only.
