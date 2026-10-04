@@ -397,17 +397,31 @@ func TestReadFromLatestEvent(t *testing.T) {
 		assert.Equal(t, ids[:3], idsOf(events))
 	})
 
-	t.Run("is refused by the database if the latest event comes after the upper bound", func(t *testing.T) {
+	t.Run("is refused by the database as permanent if the latest event comes after the upper bound", func(t *testing.T) {
 		subject := subjectFor(t)
 		ids := writeIDs(t, subject, incremented{By: 1}, reset{}, incremented{By: 2})
 
-		events, errs := readAll(t, requireStore(t), architecturekit.ExactSubject(subject),
-			architecturekit.FromLatestEvent(subject, resetType, architecturekit.ReadEverything), architecturekit.BeforeEvent(ids[1]))
+		// The database answers with 409, which would be a conflict if it were a
+		// write. A read has no precondition that could hold later, though, and
+		// new events only move the latest one further away.
+		for name, upperBound := range map[string]architecturekit.ReadOption{
+			"UpToEvent":   architecturekit.UpToEvent(ids[0]),
+			"BeforeEvent": architecturekit.BeforeEvent(ids[1]),
+		} {
+			t.Run(name, func(t *testing.T) {
+				events, errs := readAll(t, requireStore(t), architecturekit.ExactSubject(subject),
+					architecturekit.FromLatestEvent(subject, resetType, architecturekit.ReadEverything), upperBound)
 
-		assert.Empty(t, events)
-		require.Len(t, errs, 1)
-		assert.ErrorContains(t, errs[0], "fromLatestEvent results in an event ID greater than upperBound ID")
-		assert.ErrorContains(t, errs[0], `reading "`+subject+`"`)
+				assert.Empty(t, events)
+				require.Len(t, errs, 1)
+				assert.ErrorIs(t, errs[0], architecturekit.ErrPermanent)
+				assert.NotErrorIs(t, errs[0], architecturekit.ErrConflict, "a read has no precondition that did not hold")
+				assert.NotErrorIs(t, errs[0], architecturekit.ErrTransient, "trying again never helps")
+				assert.ErrorContains(t, errs[0], "fromLatestEvent results in an event ID greater than upperBound ID",
+					"the message has to keep the reason of the database")
+				assert.ErrorContains(t, errs[0], `reading "`+subject+`"`)
+			})
+		}
 	})
 }
 
