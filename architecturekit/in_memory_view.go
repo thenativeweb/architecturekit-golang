@@ -177,10 +177,17 @@ func CloneWith[TItem any](clone func(item TItem) TItem) InMemoryViewOption[TItem
 
 // NewInMemoryView creates an empty view, which takes the key of an item from
 // the given function.
+//
+// A nil function is a programming error, so it panics while the view is being
+// built, rather than once the first item arrives.
 func NewInMemoryView[TKey comparable, TItem any](
 	keyOf func(TItem) TKey,
 	options ...InMemoryViewOption[TItem],
 ) *InMemoryView[TKey, TItem] {
+	if keyOf == nil {
+		panic("architecturekit: NewInMemoryView needs a function that returns the key of an item, not nil")
+	}
+
 	configured := inMemoryViewOptions[TItem]{}
 	for _, option := range options {
 		option(&configured)

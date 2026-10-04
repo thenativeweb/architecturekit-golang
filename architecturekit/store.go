@@ -210,7 +210,14 @@ func WithSignatureVerification(verificationKey ed25519.PublicKey) StoreOption {
 // Load, Read, and every kind of projection. The events that Execute has just
 // written are not checked, since they are not read. To turn this off, hand
 // over WithoutHashVerification.
+//
+// A nil client is a programming error, so NewStore panics, rather than the
+// store failing once it first reads or writes.
 func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOption) *Store {
+	if client == nil {
+		panic("architecturekit: NewStore needs a client, not nil")
+	}
+
 	settings := storeSettings{
 		reconnectInitialDelay: defaultReconnectInitialDelay,
 		reconnectMaxDelay:     defaultReconnectMaxDelay,

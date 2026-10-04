@@ -114,11 +114,19 @@ func WithLogger(logger *slog.Logger) APIOption {
 // Queries do not need the store, so an API without one, with nil, answers
 // them, for example in a test of the queries alone. A command on such an API
 // is answered with 500, and the failure says that there is no store.
+//
+// A nil userFrom, on the other hand, is a programming error, so NewAPI panics,
+// rather than failing every request with 500. For an application without
+// authentication, use NewPublicAPI.
 func NewAPI[TUser any](
 	store *architecturekit.Store,
 	userFrom func(*http.Request) (TUser, error),
 	options ...APIOption,
 ) *API[TUser] {
+	if userFrom == nil {
+		panic("architecturekit/httpapi: NewAPI needs a function that determines the user, not nil")
+	}
+
 	var settings apiSettings
 	for _, option := range options {
 		option(&settings)

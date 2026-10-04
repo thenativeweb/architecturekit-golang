@@ -187,6 +187,16 @@ func TestUpcast(t *testing.T) {
 				Upcast("io.thenativeweb.test.same", passThrough)
 		})
 	})
+
+	t.Run("panics on a nil upcaster, also one that was declared but never set", func(t *testing.T) {
+		var declared architecturekit.Upcaster
+
+		for _, upcast := range []architecturekit.Upcaster{nil, declared} {
+			assert.PanicsWithValue(t,
+				`architecturekit: Upcast needs an upcaster for event type "io.thenativeweb.test.old", not nil`,
+				func() { architecturekit.NewUpcasters().Upcast("io.thenativeweb.test.old", upcast) })
+		}
+	})
 }
 
 func TestStateUpcastWith(t *testing.T) {

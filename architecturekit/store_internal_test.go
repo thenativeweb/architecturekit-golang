@@ -35,6 +35,16 @@ func TestStoreOption(t *testing.T) {
 }
 
 func TestNewStore(t *testing.T) {
+	t.Run("panics on a nil client, also one that was declared but never created", func(t *testing.T) {
+		var declared *eventsourcingdb.Client
+
+		for _, client := range []*eventsourcingdb.Client{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: NewStore needs a client, not nil", func() {
+				NewStore(client, "https://thenativeweb.io")
+			})
+		}
+	})
+
 	t.Run("has no state cache without WithStateCache", func(t *testing.T) {
 		store := NewStore(offlineClient(t), "https://thenativeweb.io")
 

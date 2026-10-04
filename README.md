@@ -47,6 +47,8 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io")
 
 The `NewStore` function returns a `*Store`, which reads and writes the events of all commands. For details on the client, see the [client SDK for Go](https://github.com/thenativeweb/eventsourcingdb-client-golang).
 
+*Note that calling `NewStore` with `nil` as the client panics.*
+
 ### Defining Commands
 
 A command describes what someone wants to do. Define it as a struct and implement two functions: `Subject`, which returns the subject the command acts on, and `Preconditions`, which returns the conditions under which its events may be written. This makes the struct a `Command`:
@@ -841,7 +843,7 @@ Upcasting belongs to the event types, not to a single state, so register the upc
 
 The kit decodes the data of an event with `encoding/json`, which matches the names in the data to the fields of the struct regardless of case, and ignores names that match no field. So data that names a field `BorrowedBy` fills the field that `BookBorrowed` tags as `borrowedBy`, without an upcaster. A name that differs by more than case, such as `lentTo`, matches no field, and the field stays empty, so a field whose name changes by more than case still needs an upcaster, as above.
 
-*Note that calling `Upcast` twice for the same event type panics, as does calling `UpcastWith` twice, or with `nil`.*
+*Note that calling `Upcast` with `nil` as the function, or twice for the same event type, panics, as does calling `UpcastWith` twice, or with `nil`.*
 
 ### Reading Long Streams
 
@@ -1141,6 +1143,8 @@ catalog := newCatalog()
 ```
 
 An item carries no JSON annotations, since what a caller sees is decided by a query and its answer, not by the view (see [Handling Queries over HTTP](#handling-queries-over-http)).
+
+*Note that calling `NewInMemoryView` with `nil` as the function panics.*
 
 Every item has a revision of its own, which is the ID of the last event that changed it. The `RevisionIn` option makes the view keep it in a field of the item, so that a caller can hand it over to a command that uses the `NewIsSubjectOnEventIDPrecondition` function (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). The view sets the field whenever it changes an item, so you never set it yourself. Without the option, the view keeps the revisions to itself.
 
@@ -2044,6 +2048,8 @@ mux := http.NewServeMux()
 If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so does an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
 
 *Note that to answer an error that has a status code of its own with `401 Unauthorized` all the same, the function wraps it with `httpapi.ErrUnauthorized` itself, for example with `fmt.Errorf("%w: %w", httpapi.ErrUnauthorized, err)`.*
+
+*Note that calling `NewAPI` with `nil` as the function panics. The store may be `nil`, though, to test the queries alone (see [Testing Queries](#testing-queries)).*
 
 For an application without authentication, call the `NewPublicAPI` function instead. Commands and queries then receive `httpapi.NoUser` as user:
 
