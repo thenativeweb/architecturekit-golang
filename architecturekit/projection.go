@@ -115,7 +115,9 @@ func requireProjection(function string, projection any) {
 // also when it is a nil pointer, map, slice, function, or channel of a
 // concrete type, such as a view that was declared but never created. Such a
 // value is not equal to nil, since the interface knows its type, but it fails
-// as soon as it is used. It uses reflection, so call it only while wiring.
+// as soon as it is used. It uses reflection, so call it only while wiring, or
+// where it costs little next to the rest, such as for an event that is about
+// to be encoded and written.
 //
 // An interface never shows up as the kind, since reflect.ValueOf unpacks it.
 func isNil(value any) bool {

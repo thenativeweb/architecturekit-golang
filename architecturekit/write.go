@@ -26,9 +26,10 @@ type EventOn struct {
 //
 // Like a command, a write declares at least one precondition, made with
 // Require, or Unconditionally to write without any. OnStateRead has nothing to
-// guard, since Write reads no state. That, an event without a subject, and the
-// other mistakes Execute refuses in the preconditions of a command make Write
-// fail with an error of the category ErrPermanent, without writing anything.
+// guard, since Write reads no state. That, an event without a subject or one
+// that is nil, and the other mistakes Execute refuses in the preconditions of
+// a command make Write fail with an error of the category ErrPermanent,
+// without writing anything. A nil pointer of a concrete type counts as nil.
 // So does an event whose data can not be encoded as JSON, for example because
 // it holds a float NaN, as with Execute.
 // Writing no events writes nothing and returns nil, but the preconditions are
@@ -56,7 +57,7 @@ func Write(
 
 	candidates := make([]eventsourcingdb.EventCandidate, len(events))
 	for i, event := range events {
-		if event.Subject == "" || event.Event == nil {
+		if event.Subject == "" || isNil(event.Event) {
 			return nil, fmt.Errorf("%w: event %d of a write needs a subject and an event", ErrPermanent, i)
 		}
 
