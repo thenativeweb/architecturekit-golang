@@ -232,7 +232,7 @@ func run(
 	defer recoverInto(&failure)
 
 	catchUpSize := batchSizeOf(projection)
-	delay := store.reconnectInitialDelay
+	delay := store.settings.reconnectInitialDelay
 	attempt := 0
 
 	for {
@@ -265,15 +265,15 @@ func run(
 		// acceptable, since catching up, the expensive part, succeeded each
 		// time. A database that fails before the projection has caught up, or
 		// within the initial delay after, is still given ever more time.
-		if checkpointAfter, _ := writer.checkpoint(ctx); checkpointAfter != checkpointBefore || liveFor > store.reconnectInitialDelay {
-			delay = store.reconnectInitialDelay
+		if checkpointAfter, _ := writer.checkpoint(ctx); checkpointAfter != checkpointBefore || liveFor > store.settings.reconnectInitialDelay {
+			delay = store.settings.reconnectInitialDelay
 			attempt = 0
 		}
 
 		attempt++
 
-		if store.reconnectObserver != nil {
-			store.reconnectObserver(Reconnect{
+		if store.settings.reconnectObserver != nil {
+			store.settings.reconnectObserver(Reconnect{
 				Projection: progress.Name(),
 				Subject:    subjects.subject,
 				Err:        err,
@@ -290,7 +290,7 @@ func run(
 		case <-timer.C:
 		}
 
-		delay = min(2*delay, store.reconnectMaxDelay)
+		delay = min(2*delay, store.settings.reconnectMaxDelay)
 	}
 }
 

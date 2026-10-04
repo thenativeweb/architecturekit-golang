@@ -77,9 +77,11 @@ type stateCache struct {
 	order *list.List
 }
 
+// newStateCache creates a cache for the given number of subjects, which
+// NewStore hands over only if it is at least 1.
 func newStateCache(maxSubjects int) *stateCache {
 	return &stateCache{
-		maxSubjects: max(maxSubjects, 1),
+		maxSubjects: maxSubjects,
 		entries:     map[stateCacheKey]*list.Element{},
 		order:       list.New(),
 	}
