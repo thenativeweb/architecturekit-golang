@@ -14,6 +14,11 @@
 // it. The functions that turn a sequence into a result, such as Collect,
 // return it, unless they have their answer before it comes, as First, Single,
 // and Any may.
+//
+// The package is for reading a view. Items that are already in a slice, such
+// as a snapshot that an answer groups in several ways, are better served by
+// the slices package and a loop: a slice can not fail, so the errors here
+// would never occur.
 package query
 
 import (
