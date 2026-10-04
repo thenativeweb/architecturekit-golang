@@ -333,56 +333,99 @@ func TestInMemoryView(t *testing.T) {
 		assert.Empty(t, got.Revision, "without a field, the item carries no revision")
 	})
 
-	t.Run("refuses an empty event ID", func(t *testing.T) {
-		view := bookView()
-		byShelf := view.Index(func(item book) string { return item.Shelf })
-		ctx := context.Background()
-		anything := func(book) bool { return true }
-		noChange := func(*book) {}
+	t.Run("refuses an event ID that is empty or not a revision, and changes nothing", func(t *testing.T) {
+		for _, eventID := range []string{"", "abc", "-1", "1.5", " 1", "9223372036854775808"} {
+			for targetName, target := range viewTargets {
+				for name, change := range viewChanges {
+					t.Run(fmt.Sprintf("%s with %q %s", name, eventID, targetName), func(t *testing.T) {
+						fixture := newViewFixture(t)
+						before := fixture.state(t)
 
-		// Each operation hands out its outcome, or its count, which has to be
-		// zero along with the error.
-		operations := map[string]func() (any, error){
-			"Insert":       func() (any, error) { return view.Insert(ctx, "", book{ID: "42"}) },
-			"Upsert":       func() (any, error) { return view.Upsert(ctx, "42", "", noChange) },
-			"Update":       func() (any, error) { return view.Update(ctx, "42", "", noChange) },
-			"Delete":       func() (any, error) { return view.Delete(ctx, "42", "") },
-			"UpdateWhere":  func() (any, error) { return view.UpdateWhere(ctx, anything, "", noChange) },
-			"DeleteWhere":  func() (any, error) { return view.DeleteWhere(ctx, anything, "") },
-			"Index.Update": func() (any, error) { return byShelf.Update(ctx, "left", "", noChange) },
-			"Index.Delete": func() (any, error) { return byShelf.Delete(ctx, "left", "") },
-		}
+						result, err := change(context.Background(), fixture, target, eventID)
 
-		for name, operation := range operations {
-			t.Run(name, func(t *testing.T) {
-				result, err := operation()
-				assert.ErrorIs(t, err, architecturekit.ErrPermanent)
-				assert.Zero(t, result, "an error comes without an outcome or a count")
-			})
+						assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+						assert.ErrorIs(t, err, architecturekit.ErrNotARevision)
+						assert.EqualError(t, err, "architecturekit: permanent failure: architecturekit: not a revision: "+
+							"an operation on a view needs the ID of the event it applies, not "+strconv.Quote(eventID))
+						assert.Zero(t, result, "an error comes without an outcome or a count")
+						assert.False(t, fixture.ran, "a function that was handed over must not run")
+						assert.Equal(t, before, fixture.state(t), "the view has to stay as it is")
+					})
+				}
+			}
 		}
 	})
 
-	t.Run("refuses an event ID that is not a revision", func(t *testing.T) {
+	t.Run("accepts every revision as an event ID", func(t *testing.T) {
+		// What each function hands out on a free key, and on a taken key for an
+		// event that is older than the item, or newer. An error stands for the
+		// category the function fails with.
+		wants := map[string]struct{ onFree, olderOnTaken, newerOnTaken any }{
+			"Insert":       {architecturekit.Added, architecturekit.AlreadyApplied, architecturekit.ErrPermanent},
+			"Upsert":       {architecturekit.Added, architecturekit.AlreadyApplied, architecturekit.Applied},
+			"Update":       {architecturekit.Missing, architecturekit.AlreadyApplied, architecturekit.Applied},
+			"Delete":       {architecturekit.Missing, architecturekit.AlreadyApplied, architecturekit.Applied},
+			"UpdateWhere":  {0, 0, 1},
+			"DeleteWhere":  {0, 0, 1},
+			"Index.Update": {0, 0, 1},
+			"Index.Delete": {0, 0, 1},
+		}
+
+		// The smallest event ID is older than every item of the fixture, the
+		// largest one newer.
+		const smallest, largest = "0", "9223372036854775807"
+
+		for name, change := range viewChanges {
+			want := wants[name]
+			cases := []struct {
+				name    string
+				target  viewTarget
+				eventID string
+				want    any
+			}{
+				{"the smallest one on a free key", viewTargets["on a free key"], smallest, want.onFree},
+				{"the largest one on a free key", viewTargets["on a free key"], largest, want.onFree},
+				{"the smallest one on a taken key", viewTargets["on a taken key"], smallest, want.olderOnTaken},
+				{"the largest one on a taken key", viewTargets["on a taken key"], largest, want.newerOnTaken},
+			}
+
+			for _, test := range cases {
+				t.Run(name+" with "+test.name, func(t *testing.T) {
+					result, err := change(context.Background(), newViewFixture(t), test.target, test.eventID)
+
+					if category, isError := test.want.(error); isError {
+						assert.ErrorIs(t, err, category)
+						assert.NotErrorIs(t, err, architecturekit.ErrNotARevision, "the event ID itself is fine")
+						return
+					}
+
+					require.NoError(t, err)
+					assert.Equal(t, test.want, result)
+				})
+			}
+		}
+	})
+
+	t.Run("refuses an event ID that is not a revision where it is given, not at the next change", func(t *testing.T) {
 		view := bookView()
-		mustInsert(t, view, "1", book{ID: "42"})
+		ctx := context.Background()
 
-		outcome, err := view.Insert(context.Background(), "not a revision", book{ID: "42"})
-
-		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
-		assert.ErrorIs(t, err, architecturekit.ErrNotARevision)
+		outcome, err := view.Insert(ctx, "abc", book{ID: "42", Title: "draft"})
+		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "the insert has to be refused")
 		assert.Zero(t, outcome, "an error comes without an outcome")
 
-		outcome, err = view.Update(context.Background(), "42", "not a revision", func(*book) {})
-		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "updating")
-		assert.Zero(t, outcome, "an error comes without an outcome")
+		// The book never got in, so the next event about it finds nothing to
+		// compare with, rather than an ID that is not a revision.
+		outcome, err = view.Update(ctx, "42", "7", func(item *book) { item.Title = "final" })
+		require.NoError(t, err, "the next change must not fail")
+		assert.Equal(t, architecturekit.Missing, outcome)
 
-		outcome, err = view.Delete(context.Background(), "42", "not a revision")
-		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "deleting")
-		assert.Zero(t, outcome, "an error comes without an outcome")
+		mustInsert(t, view, "5", book{ID: "42", Title: "draft"})
 
-		outcome, err = view.Upsert(context.Background(), "42", "not a revision", func(*book) {})
-		assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "upserting an existing item")
-		assert.Zero(t, outcome, "an error comes without an outcome")
+		outcome, err = view.Update(ctx, "42", "7", func(item *book) { item.Title = "final" })
+		require.NoError(t, err)
+		assert.Equal(t, architecturekit.Applied, outcome)
+		assert.Equal(t, book{ID: "42", Title: "final", Revision: "7"}, mustGet(t, view, "42"))
 	})
 
 	t.Run("reports a failure among several items", func(t *testing.T) {
@@ -393,9 +436,6 @@ func TestInMemoryView(t *testing.T) {
 
 		_, err := view.UpdateWhere(context.Background(), onTheLeft, "3", func(item *book) { item.ID = "moved" })
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "the change of a key has to be refused")
-
-		_, err = view.DeleteWhere(context.Background(), onTheLeft, "not a revision")
-		assert.ErrorIs(t, err, architecturekit.ErrNotARevision)
 	})
 
 	t.Run("stays in order when many items are deleted", func(t *testing.T) {
@@ -421,6 +461,109 @@ func lookedUp(t *testing.T, index *architecturekit.InMemoryIndex[string, book, s
 	t.Helper()
 
 	return bookIDsOf(t, index.Lookup(context.Background(), shelf))
+}
+
+// viewFixture is a view with an index and two books on different shelves,
+// which records whether a function it handed over ran.
+type viewFixture struct {
+	view    *architecturekit.InMemoryView[string, book]
+	byShelf *architecturekit.InMemoryIndex[string, book, string]
+	ran     bool
+}
+
+func newViewFixture(t *testing.T) *viewFixture {
+	t.Helper()
+
+	view := bookView()
+	fixture := &viewFixture{view: view, byShelf: view.Index(func(item book) string { return item.Shelf })}
+
+	mustInsert(t, view, "1", book{ID: "a", Shelf: "left", Title: "kept"})
+	mustInsert(t, view, "2", book{ID: "b", Shelf: "right", Title: "kept"})
+	view.Seen("2")
+
+	return fixture
+}
+
+// change returns a change that sets the given key, so that Upsert can add an
+// item with it, and records that it ran.
+func (f *viewFixture) change(key string) func(item *book) {
+	return func(item *book) {
+		f.ran = true
+		item.ID = key
+		item.Title = "changed"
+	}
+}
+
+// isOn returns a match for the books on the given shelf, which records that
+// it ran.
+func (f *viewFixture) isOn(shelf string) func(item book) bool {
+	return func(item book) bool {
+		f.ran = true
+		return item.Shelf == shelf
+	}
+}
+
+// viewState is everything a change may touch: the items with their revisions,
+// the revision of the view, and what the index finds on every shelf.
+type viewState struct {
+	Items    []book
+	Revision string
+	Shelves  map[string][]string
+}
+
+func (f *viewFixture) state(t *testing.T) viewState {
+	t.Helper()
+
+	var items []book
+	for item, err := range f.view.All(context.Background()) {
+		require.NoError(t, err)
+		items = append(items, item)
+	}
+
+	shelves := map[string][]string{}
+	for _, shelf := range []string{"left", "right", "nowhere"} {
+		shelves[shelf] = lookedUp(t, f.byShelf, shelf)
+	}
+
+	return viewState{Items: items, Revision: f.view.Revision(), Shelves: shelves}
+}
+
+// viewTarget is the item a change is about, by its key and its shelf. The
+// fixture has a book with the key on the shelf, or none.
+type viewTarget struct{ key, shelf string }
+
+var viewTargets = map[string]viewTarget{
+	"on a free key":  {key: "c", shelf: "nowhere"},
+	"on a taken key": {key: "a", shelf: "left"},
+}
+
+// viewChanges are all functions that change a view, applied to the target with
+// the given event ID. Each hands out its outcome, or its count.
+var viewChanges = map[string]func(ctx context.Context, f *viewFixture, target viewTarget, eventID string) (any, error){
+	"Insert": func(ctx context.Context, f *viewFixture, target viewTarget, eventID string) (any, error) {
+		return f.view.Insert(ctx, eventID, book{ID: target.key, Shelf: target.shelf})
+	},
+	"Upsert": func(ctx context.Context, f *viewFixture, target viewTarget, eventID string) (any, error) {
+		return f.view.Upsert(ctx, target.key, eventID, f.change(target.key))
+	},
+	"Update": func(ctx context.Context, f *viewFixture, target viewTarget, eventID string) (any, error) {
+		return f.view.Update(ctx, target.key, eventID, f.change(target.key))
+	},
+	"Delete": func(ctx context.Context, f *viewFixture, target viewTarget, eventID string) (any, error) {
+		return f.view.Delete(ctx, target.key, eventID)
+	},
+	"UpdateWhere": func(ctx context.Context, f *viewFixture, target viewTarget, eventID string) (any, error) {
+		return f.view.UpdateWhere(ctx, f.isOn(target.shelf), eventID, f.change(target.key))
+	},
+	"DeleteWhere": func(ctx context.Context, f *viewFixture, target viewTarget, eventID string) (any, error) {
+		return f.view.DeleteWhere(ctx, f.isOn(target.shelf), eventID)
+	},
+	"Index.Update": func(ctx context.Context, f *viewFixture, target viewTarget, eventID string) (any, error) {
+		return f.byShelf.Update(ctx, target.shelf, eventID, f.change(target.key))
+	},
+	"Index.Delete": func(ctx context.Context, f *viewFixture, target viewTarget, eventID string) (any, error) {
+		return f.byShelf.Delete(ctx, target.shelf, eventID)
+	},
 }
 
 func TestInMemoryIndex(t *testing.T) {

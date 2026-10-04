@@ -23,6 +23,12 @@ import (
 // that, the view has a revision as a whole, which is the last event it has
 // seen at all (see Tracking).
 //
+// Every function that changes the view takes the ID of the event it applies,
+// and refuses one that is empty or not a revision (see CompareRevisions) at
+// once: it fails with an error of the category ErrPermanent that wraps
+// ErrNotARevision, and leaves the view as it is. So the mistake shows where it
+// is made, rather than at the next change of the same item.
+//
 // An upcaster may split a stored event into several events, its parts, which
 // all carry the ID of the stored event. A TypedProjection hands every part to
 // its handler with a context that holds the position of the part, and every
@@ -81,12 +87,12 @@ type InMemoryView[TKey comparable, TItem any] struct {
 }
 
 // inMemoryEntry is an item together with the event that changed it last:
-// revision is the ID of that event, and part is its part, if an upcaster split
-// it (see partKey). position is where the key of the item is in the order of
-// the view.
+// revision is the ID of that event, read as a number, and part is its part, if
+// an upcaster split it (see partKey). position is where the key of the item is
+// in the order of the view.
 type inMemoryEntry[TItem any] struct {
 	item     TItem
-	revision string
+	revision uint64
 	part     int
 	position int
 }
@@ -307,11 +313,10 @@ func sequenceOf[TItem any](items []TItem) iter.Seq2[TItem, error] {
 // A later part of the same event counts as newer (see InMemoryView), so two
 // parts of a split event that insert an item with the same key fail as well.
 func (v *InMemoryView[TKey, TItem]) Insert(ctx context.Context, eventID string, item TItem) (Outcome, error) {
-	if err := requireEventID(eventID); err != nil {
+	event, err := appliedEventOf(ctx, eventID)
+	if err != nil {
 		return 0, err
 	}
-
-	part := partOf(ctx)
 
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
@@ -319,19 +324,15 @@ func (v *InMemoryView[TKey, TItem]) Insert(ctx context.Context, eventID string, 
 	key := v.keyOf(item)
 
 	if entry, isFound := v.entries[key]; isFound {
-		isNewer, err := isNewerThan(eventID, part, entry)
-		if err != nil {
-			return 0, err
-		}
-		if !isNewer {
+		if !isNewerThan(event, entry) {
 			return AlreadyApplied, nil
 		}
 
 		return 0, fmt.Errorf("%w: event %s inserts an item with the key %v, which is already taken",
-			ErrPermanent, eventID, key)
+			ErrPermanent, event.id, key)
 	}
 
-	v.add(key, item, eventID, part)
+	v.add(key, item, event)
 
 	return Added, nil
 }
@@ -360,17 +361,16 @@ func (v *InMemoryView[TKey, TItem]) Upsert(
 	eventID string,
 	change func(item *TItem),
 ) (Outcome, error) {
-	if err := requireEventID(eventID); err != nil {
+	event, err := appliedEventOf(ctx, eventID)
+	if err != nil {
 		return 0, err
 	}
-
-	part := partOf(ctx)
 
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
 	if _, isFound := v.entries[key]; isFound {
-		return v.change(key, eventID, part, change)
+		return v.change(key, event, change)
 	}
 
 	var item TItem
@@ -378,10 +378,10 @@ func (v *InMemoryView[TKey, TItem]) Upsert(
 
 	if itemKey := v.keyOf(item); itemKey != key {
 		return 0, fmt.Errorf("%w: event %s upserts an item with the key %v under the key %v",
-			ErrPermanent, eventID, itemKey, key)
+			ErrPermanent, event.id, itemKey, key)
 	}
 
-	v.add(key, item, eventID, part)
+	v.add(key, item, event)
 
 	return Added, nil
 }
@@ -414,16 +414,15 @@ func (v *InMemoryView[TKey, TItem]) Update(
 	eventID string,
 	change func(item *TItem),
 ) (Outcome, error) {
-	if err := requireEventID(eventID); err != nil {
+	event, err := appliedEventOf(ctx, eventID)
+	if err != nil {
 		return 0, err
 	}
-
-	part := partOf(ctx)
 
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
-	return v.change(key, eventID, part, change)
+	return v.change(key, event, change)
 }
 
 // Delete removes the item with the given key, and reports what it did, like
@@ -433,16 +432,15 @@ func (v *InMemoryView[TKey, TItem]) Update(
 // The revision of the item goes with it, so an older event that adds the item
 // again, such as one that is applied a second time, adds it again.
 func (v *InMemoryView[TKey, TItem]) Delete(ctx context.Context, key TKey, eventID string) (Outcome, error) {
-	if err := requireEventID(eventID); err != nil {
+	event, err := appliedEventOf(ctx, eventID)
+	if err != nil {
 		return 0, err
 	}
-
-	part := partOf(ctx)
 
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
-	return v.delete(key, eventID, part)
+	return v.delete(key, event), nil
 }
 
 // UpdateWhere changes every matching item for which the event is newer, and
@@ -460,16 +458,15 @@ func (v *InMemoryView[TKey, TItem]) UpdateWhere(
 	eventID string,
 	change func(item *TItem),
 ) (int, error) {
-	if err := requireEventID(eventID); err != nil {
+	event, err := appliedEventOf(ctx, eventID)
+	if err != nil {
 		return 0, err
 	}
-
-	part := partOf(ctx)
 
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
-	return v.changeAll(v.keysWhere(match), eventID, part, change)
+	return v.changeAll(v.keysWhere(match), event, change)
 }
 
 // DeleteWhere removes every matching item for which the event is newer, and
@@ -480,16 +477,15 @@ func (v *InMemoryView[TKey, TItem]) DeleteWhere(
 	match func(TItem) bool,
 	eventID string,
 ) (int, error) {
-	if err := requireEventID(eventID); err != nil {
+	event, err := appliedEventOf(ctx, eventID)
+	if err != nil {
 		return 0, err
 	}
-
-	part := partOf(ctx)
 
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 
-	return v.deleteAll(v.keysWhere(match), eventID, part)
+	return v.deleteAll(v.keysWhere(match), event), nil
 }
 
 // keysWhere returns the keys of the matching items, in the order of the view.
@@ -507,12 +503,12 @@ func (v *InMemoryView[TKey, TItem]) keysWhere(match func(TItem) bool) []TKey {
 
 // add stores a new item. It expects the lock to be held, and the key to be
 // free.
-func (v *InMemoryView[TKey, TItem]) add(key TKey, item TItem, eventID string, part int) {
+func (v *InMemoryView[TKey, TItem]) add(key TKey, item TItem, event appliedEvent) {
 	if v.revisionIn != nil {
-		*v.revisionIn(&item) = eventID
+		*v.revisionIn(&item) = event.id
 	}
 
-	v.entries[key] = &inMemoryEntry[TItem]{item: item, revision: eventID, part: part, position: len(v.order)}
+	v.entries[key] = &inMemoryEntry[TItem]{item: item, revision: event.number, part: event.part, position: len(v.order)}
 	v.order = append(v.order, key)
 
 	for _, index := range v.indexes {
@@ -524,8 +520,7 @@ func (v *InMemoryView[TKey, TItem]) add(key TKey, item TItem, eventID string, pa
 // expects the lock to be held.
 func (v *InMemoryView[TKey, TItem]) change(
 	key TKey,
-	eventID string,
-	part int,
+	event appliedEvent,
 	change func(item *TItem),
 ) (Outcome, error) {
 	entry, isFound := v.entries[key]
@@ -533,11 +528,7 @@ func (v *InMemoryView[TKey, TItem]) change(
 		return Missing, nil
 	}
 
-	isNewer, err := isNewerThan(eventID, part, entry)
-	if err != nil {
-		return 0, err
-	}
-	if !isNewer {
+	if !isNewerThan(event, entry) {
 		return AlreadyApplied, nil
 	}
 
@@ -549,11 +540,11 @@ func (v *InMemoryView[TKey, TItem]) change(
 
 	if newKey := v.keyOf(changed); newKey != key {
 		return 0, fmt.Errorf("%w: event %s changes the key of an item from %v to %v",
-			ErrPermanent, eventID, key, newKey)
+			ErrPermanent, event.id, key, newKey)
 	}
 
 	if v.revisionIn != nil {
-		*v.revisionIn(&changed) = eventID
+		*v.revisionIn(&changed) = event.id
 	}
 
 	for _, index := range v.indexes {
@@ -562,8 +553,8 @@ func (v *InMemoryView[TKey, TItem]) change(
 	}
 
 	entry.item = changed
-	entry.revision = eventID
-	entry.part = part
+	entry.revision = event.number
+	entry.part = event.part
 
 	return Applied, nil
 }
@@ -572,13 +563,12 @@ func (v *InMemoryView[TKey, TItem]) change(
 // ones it changed. It expects the lock to be held.
 func (v *InMemoryView[TKey, TItem]) changeAll(
 	keys []TKey,
-	eventID string,
-	part int,
+	event appliedEvent,
 	change func(item *TItem),
 ) (int, error) {
 	changed := 0
 	for _, key := range keys {
-		outcome, err := v.change(key, eventID, part, change)
+		outcome, err := v.change(key, event, change)
 		if err != nil {
 			return changed, err
 		}
@@ -592,18 +582,14 @@ func (v *InMemoryView[TKey, TItem]) changeAll(
 
 // delete removes one item, if the part of the event is newer. It expects the
 // lock to be held.
-func (v *InMemoryView[TKey, TItem]) delete(key TKey, eventID string, part int) (Outcome, error) {
+func (v *InMemoryView[TKey, TItem]) delete(key TKey, event appliedEvent) Outcome {
 	entry, isFound := v.entries[key]
 	if !isFound {
-		return Missing, nil
+		return Missing
 	}
 
-	isNewer, err := isNewerThan(eventID, part, entry)
-	if err != nil {
-		return 0, err
-	}
-	if !isNewer {
-		return AlreadyApplied, nil
+	if !isNewerThan(event, entry) {
+		return AlreadyApplied
 	}
 
 	for _, index := range v.indexes {
@@ -613,24 +599,20 @@ func (v *InMemoryView[TKey, TItem]) delete(key TKey, eventID string, part int) (
 	delete(v.entries, key)
 	v.compact()
 
-	return Applied, nil
+	return Applied
 }
 
 // deleteAll removes the items with the given keys, and counts the ones it
 // removed. It expects the lock to be held.
-func (v *InMemoryView[TKey, TItem]) deleteAll(keys []TKey, eventID string, part int) (int, error) {
+func (v *InMemoryView[TKey, TItem]) deleteAll(keys []TKey, event appliedEvent) int {
 	removed := 0
 	for _, key := range keys {
-		outcome, err := v.delete(key, eventID, part)
-		if err != nil {
-			return removed, err
-		}
-		if outcome == Applied {
+		if v.delete(key, event) == Applied {
 			removed++
 		}
 	}
 
-	return removed, nil
+	return removed
 }
 
 // compact drops the keys of deleted items from the order once they make up
@@ -757,55 +739,64 @@ func (i *InMemoryIndex[TKey, TItem, TValue]) Update(
 	eventID string,
 	change func(item *TItem),
 ) (int, error) {
-	if err := requireEventID(eventID); err != nil {
+	event, err := appliedEventOf(ctx, eventID)
+	if err != nil {
 		return 0, err
 	}
-
-	part := partOf(ctx)
 
 	i.view.mutex.Lock()
 	defer i.view.mutex.Unlock()
 
-	return i.view.changeAll(i.keysOf(value), eventID, part, change)
+	return i.view.changeAll(i.keysOf(value), event, change)
 }
 
 // Delete removes every item with the given value for which the event is
 // newer, and reports how many it removed.
 func (i *InMemoryIndex[TKey, TItem, TValue]) Delete(ctx context.Context, value TValue, eventID string) (int, error) {
-	if err := requireEventID(eventID); err != nil {
+	event, err := appliedEventOf(ctx, eventID)
+	if err != nil {
 		return 0, err
 	}
-
-	part := partOf(ctx)
 
 	i.view.mutex.Lock()
 	defer i.view.mutex.Unlock()
 
-	return i.view.deleteAll(i.keysOf(value), eventID, part)
+	return i.view.deleteAll(i.keysOf(value), event), nil
 }
 
-// requireEventID refuses an empty event ID, which would come before every
-// revision, so that every operation with it would be skipped silently.
-func requireEventID(eventID string) error {
-	if eventID == "" {
-		return fmt.Errorf("%w: an operation on a view needs the ID of the event it applies", ErrPermanent)
+// appliedEvent is the event a change of the view applies: id is its ID, which
+// becomes the revision of the item, number is the same ID read as a number,
+// which is what the view compares, and part is its part, if an upcaster split
+// it (see partKey).
+type appliedEvent struct {
+	id     string
+	number uint64
+	part   int
+}
+
+// appliedEventOf reads the event a change of the view applies from its ID and
+// the context. It refuses an ID that CompareRevisions would refuse, so that the
+// view never keeps an ID it can not compare with the next one, and fails where
+// the mistake is made. Unlike a revision, the ID must not be empty either,
+// since an empty one would come before every revision, so that every change
+// with it would be skipped silently.
+func appliedEventOf(ctx context.Context, eventID string) (appliedEvent, error) {
+	number, isSet, err := revisionNumber(eventID)
+	if err != nil || !isSet {
+		return appliedEvent{}, fmt.Errorf("%w: %w: an operation on a view needs the ID of the event it applies, not %q",
+			ErrPermanent, ErrNotARevision, eventID)
 	}
 
-	return nil
+	return appliedEvent{id: eventID, number: number, part: partOf(ctx)}, nil
 }
 
 // isNewerThan reports whether a part of an event is newer than the last change
 // of an item. An event with a higher ID is newer, whatever its part, and for
 // the same ID, a later part is newer than an earlier one (see partKey).
-func isNewerThan[TItem any](eventID string, part int, entry *inMemoryEntry[TItem]) (bool, error) {
-	newer, err := CompareRevisions(eventID, entry.revision)
-	if err != nil {
-		return false, fmt.Errorf("%w: %w", ErrPermanent, err)
+func isNewerThan[TItem any](event appliedEvent, entry *inMemoryEntry[TItem]) bool {
+	if event.number == entry.revision {
+		return event.part > entry.part
 	}
 
-	if newer == 0 {
-		return part > entry.part, nil
-	}
-
-	return newer > 0, nil
+	return event.number > entry.revision
 }
