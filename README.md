@@ -2116,6 +2116,8 @@ Then call the `Route` function with the API, the mux, a pattern, the function th
 httpapi.Route(api, mux, "POST /api/books/{id}/borrow", toBorrowBook, borrowBook)
 ```
 
+A command changes something, so the pattern names a method that may do so, usually `POST`. A pattern without a method, such as `/api/books/{id}/borrow`, accepts every method, `GET` included, and `GET`, `HEAD`, `OPTIONS`, and `QUERY` must not change anything. A browser sends them from another site without asking, for example for a link that the user follows, along with the cookies of the user. So `Route` panics for a pattern without a method, or with one of these, rather than executing the command for any site that links to it.
+
 The route decodes the request body, builds the command, and executes it:
 
 ```shell
@@ -2183,9 +2185,11 @@ curl -X POST http://localhost:8080/api/books/42/return
 
 A body of `{}` is accepted as well, whatever the `Content-Type` header says, so that a caller that sends one out of habit keeps working. Any other body is answered with `400 Bad Request`, and the message says that the route takes no body.
 
-Requiring `application/json` is what keeps a browser from sending a command from another site without asking the server first, since a form can not send JSON. A route without a body can not rely on that, so before it looks at the body, it checks where the request comes from, with the `CrossOriginProtection` of `net/http`. A request that a browser sends from another origin, which the `Sec-Fetch-Site` header says, or, without it, an `Origin` header whose host differs from the `Host` header, is answered with `403 Forbidden`, and the error is `httpapi.ErrForbidden`. A request from the same origin passes, and so does one without these headers, such as one of `curl` or of another server, and one with `GET`, `HEAD`, or `OPTIONS`, which must not change anything.
+Requiring `application/json` is what keeps a browser from sending a command from another site without asking the server first, since a form can not send JSON. A route without a body can not rely on that, so before it looks at the body, it checks where the request comes from, with the `CrossOriginProtection` of `net/http`. A request that a browser sends from another origin, which the `Sec-Fetch-Site` header says, or, without it, an `Origin` header whose host differs from the `Host` header, is answered with `403 Forbidden`, and the error is `httpapi.ErrForbidden`. A request from the same origin passes, and so does one without these headers, such as one of `curl` or of another server.
 
 *Note that this also refuses a browser frontend that runs on another origin than the API, even on another subdomain, so such a frontend can not call a route without a body for now.*
+
+The check lets a request with `GET`, `HEAD`, or `OPTIONS` pass from any origin, since these methods must not change anything. That is why `Route` refuses a pattern with one of them, or without a method, which accepts every method (see [Handling Commands over HTTP](#handling-commands-over-http)). Wire a handler of your own that executes a command to a method that may change something as well, such as `POST`.
 
 #### Adding to the Answer
 

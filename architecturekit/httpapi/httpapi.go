@@ -19,6 +19,7 @@ import (
 	"mime"
 	"net/http"
 	"runtime/debug"
+	"strings"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
@@ -261,9 +262,14 @@ type NoUser struct{}
 // browser sends from another origin, which Sec-Fetch-Site says, or without
 // it, an Origin whose host differs from Host, is ErrForbidden. A request from
 // the same origin passes, and so does one without these headers, such as one
-// of curl or of another server, and one with GET, HEAD, or OPTIONS, which
-// must not change anything. So a browser frontend on another origin than the
-// API can not call such a route for now.
+// of curl or of another server. So a browser frontend on another origin than
+// the API can not call such a route for now.
+//
+// The check lets a request with GET, HEAD, or OPTIONS pass from any origin,
+// since these methods must not change anything. That is why Route refuses a
+// pattern with one of them, or without a method, which accepts every method
+// (see Route). Wire a handler of your own that executes a command to a method
+// that may change something as well, such as POST.
 type NoBody struct{}
 
 // NewPublicAPI creates an API for an application without authentication.
@@ -416,6 +422,15 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 // net/http, it would close the connection, and the caller would get no answer
 // at all.
 //
+// A command changes something, so the pattern names a method that may do so,
+// usually POST, as in POST /api/books/{id}/return. A pattern without a method
+// accepts every method, GET included, and GET, HEAD, OPTIONS, and QUERY must
+// not change anything. A browser sends them from another site without asking,
+// such as for a link that the user follows, with the cookies of the user, and
+// a route that takes no body lets them pass (see NoBody). So a pattern without
+// a method, or with one of these, is a programming error, and Route panics,
+// rather than executing the command for any site that links to it.
+//
 // A nil API, a nil toCommand, or a decider whose State or Decide is nil, is a
 // programming error, so Route panics, rather than failing every request, with
 // 500, or for a nil API, with no answer at all.
@@ -445,6 +460,15 @@ func Route[
 		panic("architecturekit/httpapi: Route needs a decider with a function that decides, not one whose Decide is nil")
 	}
 
+	switch method := methodOf(pattern); method {
+	case "":
+		panic(fmt.Sprintf("architecturekit/httpapi: Route needs a pattern that names a method, such as POST, not %q, "+
+			"which accepts every method, GET included", pattern))
+	case http.MethodGet, http.MethodHead, http.MethodOptions, methodQuery:
+		panic(fmt.Sprintf("architecturekit/httpapi: Route needs a pattern whose method may change something, such as POST, not %q, "+
+			"since %s must not change anything", pattern, method))
+	}
+
 	var settings routeSettings[TCommand]
 	for _, option := range options {
 		option(&settings)
@@ -462,6 +486,17 @@ func Route[
 
 		respond(w, handled.Events, fields, err, api.explain(r))
 	}))
+}
+
+// methodOf returns the method that a pattern of http.ServeMux names, or "" if
+// it names none. It reads the pattern as the mux does, which takes what comes
+// before the first space or tab for the method, if there is one.
+func methodOf(pattern string) string {
+	if i := strings.IndexAny(pattern, " \t"); i >= 0 {
+		return pattern[:i]
+	}
+
+	return ""
 }
 
 // fieldsFor asks the function of Adding for the fields of the answer to a
