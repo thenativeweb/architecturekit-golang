@@ -464,6 +464,13 @@ const statusClientClosedRequest = 499
 // StatusFor maps an error to an HTTP status. It asks for error categories
 // rather than concrete errors, so new failures do not need a new case here.
 //
+// An error that wraps architecturekit.ErrNotARevision maps to 400, since the
+// value that is not a revision was handed over, such as a bound of
+// architecturekit.Read or the revision a view is to wait for, which usually
+// come from the request. An error of the category architecturekit.ErrPermanent
+// maps to 500 even then, since an ID that the server stored or made itself is
+// broken.
+//
 // An error because the context ended belongs to no category. If the request
 // was canceled, which happens when the caller goes away, it maps to 499, which
 // is not logged, since nothing failed. If its deadline ran out, the server
@@ -502,6 +509,13 @@ func StatusFor(err error) int {
 		return statusClientClosedRequest
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable
+	// A permanent failure is the server's mistake, even if it says that an ID
+	// is not a revision, so it comes before ErrNotARevision. Both come last,
+	// so that an error that has a status of its own above keeps it.
+	case errors.Is(err, architecturekit.ErrPermanent):
+		return http.StatusInternalServerError
+	case errors.Is(err, architecturekit.ErrNotARevision):
+		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
 	}
