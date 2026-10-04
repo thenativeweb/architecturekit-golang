@@ -600,6 +600,72 @@ func TestRoute(t *testing.T) {
 			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNote, decider)
 		})
 	})
+
+	t.Run("panics for a pattern without a method, which accepts every method", func(t *testing.T) {
+		// A space in front of the path leaves the method empty, as the mux
+		// reads it.
+		for _, pattern := range []string{"/note", "example.com/note", " /note"} {
+			t.Run(pattern, func(t *testing.T) {
+				assert.PanicsWithValue(t,
+					fmt.Sprintf("architecturekit/httpapi: Route needs a pattern that names a method, such as POST, not %q, "+
+						"which accepts every method, GET included", pattern),
+					func() {
+						httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), pattern, toNote, noteDecider())
+					})
+			})
+		}
+	})
+
+	t.Run("panics for a pattern whose method must not change anything", func(t *testing.T) {
+		for _, test := range []struct {
+			pattern, method string
+		}{
+			{pattern: "GET /note", method: http.MethodGet},
+			{pattern: "HEAD /note", method: http.MethodHead},
+			{pattern: "OPTIONS /note", method: http.MethodOptions},
+			// QUERY asks with a body and changes nothing, like GET, which is how
+			// Revisioned treats it as well.
+			{pattern: "QUERY /note", method: "QUERY"},
+			{pattern: "GET example.com/note", method: http.MethodGet},
+			// The mux takes a tab for a space.
+			{pattern: "GET\t/note", method: http.MethodGet},
+		} {
+			t.Run(test.pattern, func(t *testing.T) {
+				assert.PanicsWithValue(t,
+					fmt.Sprintf("architecturekit/httpapi: Route needs a pattern whose method may change something, such as POST, not %q, "+
+						"since %s must not change anything", test.pattern, test.method),
+					func() {
+						httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), test.pattern, toNote, noteDecider())
+					})
+			})
+		}
+	})
+
+	t.Run("executes a command on a pattern whose method may change something", func(t *testing.T) {
+		for _, test := range []struct {
+			pattern, method string
+		}{
+			{pattern: "POST /note", method: http.MethodPost},
+			{pattern: "PUT /note", method: http.MethodPut},
+			{pattern: "PATCH /note", method: http.MethodPatch},
+			{pattern: "DELETE /note", method: http.MethodDelete},
+			{pattern: "ARCHIVE /note", method: "ARCHIVE"},
+			{pattern: "POST example.com/note", method: http.MethodPost},
+			{pattern: "POST\t/note", method: http.MethodPost},
+		} {
+			t.Run(test.pattern, func(t *testing.T) {
+				mux := http.NewServeMux()
+				httpapi.Route(httpapi.NewAPI(writingStore(t), userFrom), mux, test.pattern, toNote, noteDecider())
+
+				httpRequest := postingTo("/note", `{"id":"1","text":"hello"}`)
+				httpRequest.Method = test.method
+				response := serve(t, mux, httpRequest)
+
+				assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+				assert.JSONEq(t, `{"revision": "0"}`, response.Body.String())
+			})
+		}
+	})
 }
 
 // errBrokenBody is what failingReader fails with.

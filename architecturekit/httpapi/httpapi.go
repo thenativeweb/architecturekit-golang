@@ -15,9 +15,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"mime"
 	"net/http"
 	"runtime/debug"
+	"strings"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
@@ -188,12 +190,17 @@ func (api *API[TUser]) logRefusal(r *http.Request, status int, err error) {
 }
 
 // logIncomplete logs that a command has succeeded, but that the fields its
-// answer should hold could not be completed (see Adding). The caller gets the
-// revision all the same, so it is no internal failure, but it is worth
+// answer should hold could not be completed (see Adding), and why the fields
+// that came along with the error were dropped, if they were. The caller gets
+// the revision all the same, so it is no internal failure, but it is worth
 // knowing.
-func (api *API[TUser]) logIncomplete(r *http.Request, err error) {
-	api.loggerOrDefault().Error("httpapi: incomplete answer",
-		"method", r.Method, "route", r.Pattern, "error", err)
+func (api *API[TUser]) logIncomplete(r *http.Request, err, dropped error) {
+	attributes := []any{"method", r.Method, "route", r.Pattern, "error", err}
+	if dropped != nil {
+		attributes = append(attributes, "dropped", dropped)
+	}
+
+	api.loggerOrDefault().Error("httpapi: incomplete answer", attributes...)
 }
 
 // loggerOrDefault is the logger of the API, or the default one of slog if it
@@ -255,9 +262,14 @@ type NoUser struct{}
 // browser sends from another origin, which Sec-Fetch-Site says, or without
 // it, an Origin whose host differs from Host, is ErrForbidden. A request from
 // the same origin passes, and so does one without these headers, such as one
-// of curl or of another server, and one with GET, HEAD, or OPTIONS, which
-// must not change anything. So a browser frontend on another origin than the
-// API can not call such a route for now.
+// of curl or of another server. So a browser frontend on another origin than
+// the API can not call such a route for now.
+//
+// The check lets a request with GET, HEAD, or OPTIONS pass from any origin,
+// since these methods must not change anything. That is why Route refuses a
+// pattern with one of them, or without a method, which accepts every method
+// (see Route). Wire a handler of your own that executes a command to a method
+// that may change something as well, such as POST.
 type NoBody struct{}
 
 // NewPublicAPI creates an API for an application without authentication.
@@ -357,18 +369,25 @@ type routeSettings[TCommand any] struct {
 // command did, and returns a value that encodes to a JSON object, usually a
 // struct with json tags. It is only called after the command has succeeded.
 //
+// A value that encodes to null adds no fields. That is nil, and also a nil
+// pointer of a concrete type, which an interface does not count as nil, such
+// as the one that return lookup(handled) hands back if lookup returns a *T and
+// an error, and fails.
+//
 // If the function fails, the command has succeeded all the same, and its
 // events are written. So the answer stays a success, with the revision, which
 // the caller needs to read its own writes, and must not take for a reason to
-// send the command again. It holds whatever fields the function returned along
-// with its error, or none, and the error is logged through the logger of the
-// API, with the route of the request (see WithLogger).
+// send the command again, whatever is wrong with the fields the function
+// returned along with its error. The answer holds these fields if they can be
+// used, and none otherwise. The error is logged through the logger of the
+// API, with the route of the request (see WithLogger), and so is why the
+// fields were dropped, if they were.
 //
-// The kit adds the revision itself, so the fields must not contain one. A
-// value that holds a revision, that does not encode to a JSON object, or that
-// can not be encoded at all, such as one that holds NaN, is a programming
-// error: the route then answers 500, and logs why, although the events have
-// been written.
+// The kit adds the revision itself, so the fields must not contain one. If
+// the function did not fail, a value that holds a revision, that does not
+// encode to a JSON object, or that can not be encoded at all, such as one
+// that holds NaN, is a programming error: the route then answers 500, and
+// logs why, although the events have been written.
 //
 // A nil function, or giving Adding twice, is a programming error, so it
 // panics.
@@ -403,6 +422,15 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 // net/http, it would close the connection, and the caller would get no answer
 // at all.
 //
+// A command changes something, so the pattern names a method that may do so,
+// usually POST, as in POST /api/books/{id}/return. A pattern without a method
+// accepts every method, GET included, and GET, HEAD, OPTIONS, and QUERY must
+// not change anything. A browser sends them from another site without asking,
+// such as for a link that the user follows, with the cookies of the user, and
+// a route that takes no body lets them pass (see NoBody). So a pattern without
+// a method, or with one of these, is a programming error, and Route panics,
+// rather than executing the command for any site that links to it.
+//
 // A nil API, a nil toCommand, or a decider whose State or Decide is nil, is a
 // programming error, so Route panics, rather than failing every request, with
 // 500, or for a nil API, with no answer at all.
@@ -432,6 +460,15 @@ func Route[
 		panic("architecturekit/httpapi: Route needs a decider with a function that decides, not one whose Decide is nil")
 	}
 
+	switch method := methodOf(pattern); method {
+	case "":
+		panic(fmt.Sprintf("architecturekit/httpapi: Route needs a pattern that names a method, such as POST, not %q, "+
+			"which accepts every method, GET included", pattern))
+	case http.MethodGet, http.MethodHead, http.MethodOptions, methodQuery:
+		panic(fmt.Sprintf("architecturekit/httpapi: Route needs a pattern whose method may change something, such as POST, not %q, "+
+			"since %s must not change anything", pattern, method))
+	}
+
 	var settings routeSettings[TCommand]
 	for _, option := range options {
 		option(&settings)
@@ -442,17 +479,50 @@ func Route[
 
 		handled, err := Handle(r, api, toCommand, decider)
 
-		var fields any
+		var fields map[string]any
 		if err == nil && settings.fields != nil {
-			var failure error
-			fields, failure = settings.fields(handled)
-			if failure != nil {
-				api.logIncomplete(r, failure)
-			}
+			fields, err = api.fieldsFor(r, handled, settings.fields)
 		}
 
 		respond(w, handled.Events, fields, err, api.explain(r))
 	}))
+}
+
+// methodOf returns the method that a pattern of http.ServeMux names, or "" if
+// it names none. It reads the pattern as the mux does, which takes what comes
+// before the first space or tab for the method, if there is one.
+func methodOf(pattern string) string {
+	if i := strings.IndexAny(pattern, " \t"); i >= 0 {
+		return pattern[:i]
+	}
+
+	return ""
+}
+
+// fieldsFor asks the function of Adding for the fields of the answer to a
+// command that has succeeded (see fieldsOf).
+//
+// If the function fails, the command has succeeded all the same, so the
+// answer stays a success, whatever is wrong with the fields the function
+// returned along with its error. Fields that can not be used are dropped
+// then, rather than answered with 500, and why is logged with the error.
+func (api *API[TUser]) fieldsFor[TCommand any](
+	r *http.Request,
+	handled Handled[TCommand],
+	adding func(Handled[TCommand]) (any, error),
+) (map[string]any, error) {
+	value, failure := adding(handled)
+	fields, err := fieldsOf(value)
+
+	if failure != nil {
+		api.logIncomplete(r, failure, err)
+
+		if err != nil {
+			return nil, nil
+		}
+	}
+
+	return fields, err
 }
 
 // statusClientClosedRequest is what a request gets whose caller went away
@@ -564,47 +634,51 @@ func Respond[TUser any](
 func respond(
 	w http.ResponseWriter,
 	written []eventsourcingdb.Event,
-	fields any,
+	fields map[string]any,
 	err error,
 	explain func(status int, err error) string,
 ) {
 	var answer map[string]any
 	if err == nil {
-		answer, err = answerOf(written, fields)
+		answer = map[string]any{"revision": architecturekit.RevisionOf(written)}
+		maps.Copy(answer, fields)
 	}
 
 	respondResult(w, answer, err, explain)
 }
 
-// answerOf combines the revision with the fields of Adding. The fields are
-// decoded with numbers kept as they are, so that a large integer does not lose
-// digits on its way through a float.
-func answerOf(written []eventsourcingdb.Event, fields any) (map[string]any, error) {
-	answer := map[string]any{}
+// fieldsOf turns what the function of Adding returned into the fields of the
+// answer. A value that encodes to null holds no fields, such as nil, and also
+// a nil pointer of a concrete type, which an interface does not count as nil.
+// The fields are decoded with numbers kept as they are, so that a large
+// integer does not lose digits on its way through a float.
+//
+// A value that can not be encoded, also because a MarshalJSON function
+// panics, that does not encode to a JSON object, or that holds a revision,
+// which the kit adds itself, is an error.
+func fieldsOf(value any) (fields map[string]any, err error) {
+	defer recoverInto(&err)
 
-	if fields != nil {
-		// The error is wrapped with %v rather than %w, since fields that can
-		// not be encoded are a mistake in the code, which has to be answered
-		// with 500, whatever category the error of a MarshalJSON function has.
-		encoded, err := json.Marshal(fields)
-		if err != nil {
-			return nil, fmt.Errorf("httpapi: encoding the fields of the answer: %v", err)
-		}
-
-		decoder := json.NewDecoder(bytes.NewReader(encoded))
-		decoder.UseNumber()
-
-		if err := decoder.Decode(&answer); err != nil || answer == nil {
-			return nil, fmt.Errorf("httpapi: the fields of the answer must encode to a JSON object, not %s", encoded)
-		}
-		if _, hasRevision := answer["revision"]; hasRevision {
-			return nil, errors.New("httpapi: the fields of the answer must not contain a revision, which the kit adds itself")
-		}
+	// The error is wrapped with %v rather than %w, since fields that can not
+	// be encoded are a mistake in the code, which has to be answered with 500,
+	// whatever category the error of a MarshalJSON function has.
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("httpapi: encoding the fields of the answer: %v", err)
 	}
 
-	answer["revision"] = architecturekit.RevisionOf(written)
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
 
-	return answer, nil
+	// null leaves the map nil, without an error, which holds no fields.
+	if err := decoder.Decode(&fields); err != nil {
+		return nil, fmt.Errorf("httpapi: the fields of the answer must encode to a JSON object, not %s", encoded)
+	}
+	if _, hasRevision := fields["revision"]; hasRevision {
+		return nil, errors.New("httpapi: the fields of the answer must not contain a revision, which the kit adds itself")
+	}
+
+	return fields, nil
 }
 
 // categorise leaves an error of ToCommand or ToQuery that already says what
