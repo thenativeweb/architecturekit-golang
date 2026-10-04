@@ -110,7 +110,9 @@ const (
 // looks for it on that subject alone, not below it, and the subject does not
 // have to be one of those that are read. If it has no event of the type,
 // ifMissing says whether to read everything or nothing. If the latest event
-// of the type comes after the upper bound, the database refuses the read.
+// of the type comes after the upper bound, the database refuses the read, and
+// Read fails with an error of the category ErrPermanent, since trying again
+// never helps.
 //
 // It sets the lower bound, so it contradicts FromEvent and AfterEvent, and the
 // database reads from the latest event of a type only oldest first, so it
