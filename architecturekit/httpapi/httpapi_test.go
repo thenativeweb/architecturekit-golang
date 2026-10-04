@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
+	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
@@ -188,6 +189,68 @@ func TestStatusFor(t *testing.T) {
 		// more than 503, hence it has to win.
 		require.ErrorIs(t, architecturekit.ErrConflict, architecturekit.ErrTransient, "a conflict is expected to be transient")
 		assert.Equal(t, http.StatusConflict, httpapi.StatusFor(architecturekit.ErrConflict))
+	})
+
+	t.Run("maps a value that is not a revision to 400, unless it is a permanent failure", func(t *testing.T) {
+		// A value that is not a revision was handed over, usually from the
+		// request, while one that is permanent as well is an ID that the server
+		// stored or made itself.
+		notARevision := fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc")
+
+		cases := []struct {
+			label string
+			err   error
+			want  int
+		}{
+			{"alone", architecturekit.ErrNotARevision, http.StatusBadRequest},
+			{"as CompareRevisions returns it", notARevision, http.StatusBadRequest},
+			{"wrapped", fmt.Errorf("listing the books: %w", notARevision), http.StatusBadRequest},
+			{"joined with a permanent failure", errors.Join(architecturekit.ErrPermanent, notARevision), http.StatusInternalServerError},
+			{"joined with a permanent failure, the other way round", errors.Join(notARevision, architecturekit.ErrPermanent), http.StatusInternalServerError},
+			{"wrapped as a permanent failure", fmt.Errorf("%w: %w", architecturekit.ErrPermanent, notARevision), http.StatusInternalServerError},
+			{"wrapping a permanent failure", fmt.Errorf("%w: %w", notARevision, architecturekit.ErrPermanent), http.StatusInternalServerError},
+			{"joined with an event that could not be verified", errors.Join(architecturekit.ErrUnverified, notARevision), http.StatusInternalServerError},
+		}
+
+		for _, c := range cases {
+			t.Run(c.label, func(t *testing.T) {
+				assert.Equal(t, c.want, httpapi.StatusFor(c.err))
+			})
+		}
+	})
+
+	t.Run("keeps the status of every other category, also for an error that is permanent or not a revision as well", func(t *testing.T) {
+		// Both come last, so that an error with a status of its own keeps it,
+		// such as a permanent one that userFrom wraps with ErrUnauthorized to
+		// have it answered with 401.
+		categories := []struct {
+			label string
+			err   error
+			want  int
+		}{
+			{"unauthorized", httpapi.ErrUnauthorized, http.StatusUnauthorized},
+			{"forbidden", httpapi.ErrForbidden, http.StatusForbidden},
+			{"too large", httpapi.ErrTooLarge, http.StatusRequestEntityTooLarge},
+			{"wrong media type", httpapi.ErrUnsupportedMediaType, http.StatusUnsupportedMediaType},
+			{"malformed", httpapi.ErrMalformed, http.StatusBadRequest},
+			{"not found", httpapi.ErrNotFound, http.StatusNotFound},
+			{"no items", query.ErrNoItems, http.StatusNotFound},
+			{"domain rule", architecturekit.NewDomainError("nope"), http.StatusUnprocessableEntity},
+			{"conflict", architecturekit.ErrConflict, http.StatusConflict},
+			{"transient", architecturekit.ErrTransient, http.StatusServiceUnavailable},
+			{"a caller who went away", context.Canceled, 499},
+			{"a deadline that ran out", context.DeadlineExceeded, http.StatusServiceUnavailable},
+		}
+
+		for _, category := range categories {
+			for _, other := range []error{architecturekit.ErrPermanent, architecturekit.ErrNotARevision} {
+				t.Run(category.label+" and "+other.Error(), func(t *testing.T) {
+					assert.Equal(t, category.want, httpapi.StatusFor(errors.Join(category.err, other)))
+					assert.Equal(t, category.want, httpapi.StatusFor(errors.Join(other, category.err)))
+					assert.Equal(t, category.want, httpapi.StatusFor(fmt.Errorf("%w: %w", category.err, other)))
+				})
+			}
+		}
 	})
 }
 
@@ -702,6 +765,8 @@ var userFromFailures = []struct {
 	{"that is permanent", fmt.Errorf("%w: the session key is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, true},
 	{"that is unverified", fmt.Errorf("%w: the session is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, true},
 	{"of the domain", architecturekit.NewDomainError("the reader is suspended"), http.StatusUnprocessableEntity, true},
+	{"that is not a revision", fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc"), http.StatusBadRequest, true},
+	{"that is not a revision, but permanent", fmt.Errorf("%w: %w", architecturekit.ErrPermanent, fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc")), http.StatusInternalServerError, true},
 	{"because the caller went away", fmt.Errorf("reading the session: %w", context.Canceled), 499, true},
 	{"because the deadline ran out", fmt.Errorf("reading the session: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, true},
 }
@@ -772,6 +837,8 @@ var buildFailures = []struct {
 	{"that is too large", fmt.Errorf("%w: at most 10 books at once", httpapi.ErrTooLarge), http.StatusRequestEntityTooLarge, "httpapi: request body too large: at most 10 books at once", true},
 	{"that is no JSON", fmt.Errorf("%w: text/plain is not application/json", httpapi.ErrUnsupportedMediaType), http.StatusUnsupportedMediaType, "httpapi: unsupported media type: text/plain is not application/json", true},
 	{"of the domain", architecturekit.NewDomainError("the reader is suspended"), http.StatusUnprocessableEntity, "the reader is suspended", true},
+	{"that is not a revision", fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc"), http.StatusBadRequest, `architecturekit: not a revision: "abc"`, true},
+	{"that is not a revision, but permanent", fmt.Errorf("%w: %w", architecturekit.ErrPermanent, fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc")), http.StatusInternalServerError, "internal server error", true},
 	{"that is a conflict", fmt.Errorf("%w: reading %q", architecturekit.ErrConflict, "/readers/23"), http.StatusConflict, "conflict: the data has changed since it was read", true},
 	{"that is transient", fmt.Errorf("%w: session store at redis://10.0.3.9 is down", architecturekit.ErrTransient), http.StatusServiceUnavailable, "internal server error", true},
 	{"that is permanent", fmt.Errorf("%w: the catalog at /etc/catalog.yaml is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, "internal server error", true},
