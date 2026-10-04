@@ -180,22 +180,7 @@ func TestRouteAnswers(t *testing.T) {
 		assert.False(t, isAsked, "the fields are only asked for after the command has succeeded")
 	})
 
-	for _, test := range []struct {
-		name   string
-		fields any
-		logged string
-	}{
-		{"a revision in the fields", struct {
-			Revision string `json:"revision"`
-		}{"mine"}, "must not contain a revision"},
-		{"fields that are no JSON object", "just text", "must encode to a JSON object"},
-		{"fields that are null", (*struct{})(nil), "must encode to a JSON object"},
-		{"fields that can not be encoded", struct{ Callback func() }{func() {}}, "encoding the fields of the answer"},
-		{"fields that hold NaN", struct {
-			Score float64 `json:"score"`
-		}{math.NaN()}, "unsupported value: NaN"},
-		{"fields whose encoding fails with a category", unencodable{}, "encoding the fields of the answer"},
-	} {
+	for _, test := range unusableFields {
 		t.Run("with 500 and a log entry for "+test.name, func(t *testing.T) {
 			var logs bytes.Buffer
 			mux := routed(httpapi.NewAPI(writingStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))),
@@ -206,6 +191,31 @@ func TestRouteAnswers(t *testing.T) {
 			assert.Equal(t, http.StatusInternalServerError, response.Code)
 			assert.JSONEq(t, `{"message": "internal server error"}`, response.Body.String())
 			assert.Contains(t, logs.String(), test.logged)
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		fields any
+	}{
+		{"nil", nil},
+		{"a nil pointer of a concrete type", (*struct {
+			ID string `json:"id"`
+		})(nil)},
+		{"a nil map", map[string]any(nil)},
+		{"a nil slice", []string(nil)},
+		{"a MarshalJSON function that returns null", nothingToAdd{}},
+	} {
+		t.Run("with the revision alone, and without a log entry, for "+test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			mux := routed(httpapi.NewAPI(writingStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))),
+				httpapi.Adding(func(httpapi.Handled[note]) (any, error) { return test.fields, nil }))
+
+			response := postNote(t, mux, `{"id":"1","text":"hello"}`)
+
+			assert.Equal(t, http.StatusOK, response.Code)
+			assert.JSONEq(t, `{"revision": "0"}`, response.Body.String())
+			assert.Empty(t, logs.String(), "a value that encodes to null adds no fields, which is no failure")
 		})
 	}
 
@@ -224,11 +234,63 @@ func TestRouteAnswers(t *testing.T) {
 		// not send the command again.
 		assert.Equal(t, http.StatusOK, response.Code)
 		assert.JSONEq(t, `{"revision": "0", "id": "1"}`, response.Body.String(), "the fields returned along with the error are kept")
+		assert.Equal(t, 1, strings.Count(logs.String(), "\n"), "want exactly one entry")
 		assert.Contains(t, logs.String(), "httpapi: incomplete answer")
 		assert.Contains(t, logs.String(), `route="POST /note"`)
 		assert.Contains(t, logs.String(), "the files are gone")
+		assert.NotContains(t, logs.String(), "dropped", "fields that can be used are kept")
 		assert.NotContains(t, logs.String(), "internal failure")
 	})
+
+	t.Run("with the revision alone when Adding fails with a nil pointer of a concrete type", func(t *testing.T) {
+		// This is how a function that hands on a lookup with the usual shape
+		// of Go, a pointer and an error, fails: return lookup(handled).
+		lookup := func(httpapi.Handled[note]) (*struct {
+			ID string `json:"id"`
+		}, error) {
+			return nil, errors.New("looking up the answer failed")
+		}
+
+		var logs bytes.Buffer
+		mux := routed(httpapi.NewAPI(writingStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))),
+			httpapi.Adding(func(handled httpapi.Handled[note]) (any, error) {
+				return lookup(handled)
+			}))
+
+		response := postNote(t, mux, `{"id":"1","text":"hello"}`)
+
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.JSONEq(t, `{"revision": "0"}`, response.Body.String())
+		assert.Equal(t, 1, strings.Count(logs.String(), "\n"), "want exactly one entry")
+		assert.Contains(t, logs.String(), "httpapi: incomplete answer")
+		assert.Contains(t, logs.String(), "looking up the answer failed")
+		assert.NotContains(t, logs.String(), "dropped", "null holds no fields, so nothing was dropped")
+		assert.NotContains(t, logs.String(), "internal failure")
+	})
+
+	for _, test := range unusableFields {
+		t.Run("as a success, without the fields, when Adding fails with "+test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			mux := routed(httpapi.NewAPI(writingStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))),
+				httpapi.Adding(func(httpapi.Handled[note]) (any, error) {
+					return test.fields, errors.New("the files are gone")
+				}))
+
+			response := postNote(t, mux, `{"id":"1","text":"hello"}`)
+
+			// The events are written, so whatever is wrong with the fields, the
+			// caller needs the revision, and must not send the command again.
+			assert.Equal(t, http.StatusOK, response.Code)
+			assert.JSONEq(t, `{"revision": "0"}`, response.Body.String())
+			assert.Equal(t, 1, strings.Count(logs.String(), "\n"), "want exactly one entry")
+			assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: incomplete answer"`)
+			assert.Contains(t, logs.String(), `route="POST /note"`)
+			assert.Contains(t, logs.String(), `error="the files are gone"`)
+			assert.Contains(t, logs.String(), "dropped=")
+			assert.Contains(t, logs.String(), test.logged)
+			assert.NotContains(t, logs.String(), "internal failure")
+		})
+	}
 
 	t.Run("with the revision alone when Adding fails without fields", func(t *testing.T) {
 		var logs bytes.Buffer
@@ -296,6 +358,26 @@ func TestAdding(t *testing.T) {
 	})
 }
 
+// unusableFields are values that Adding can not add to an answer, along with
+// what the log says about each of them.
+var unusableFields = []struct {
+	name   string
+	fields any
+	logged string
+}{
+	{"a revision in the fields", struct {
+		Revision string `json:"revision"`
+	}{"mine"}, "must not contain a revision"},
+	{"fields that are no JSON object", "just text", "must encode to a JSON object"},
+	{"fields that are an empty list", []string{}, "must encode to a JSON object"},
+	{"fields that can not be encoded", struct{ Callback func() }{func() {}}, "encoding the fields of the answer"},
+	{"fields that hold NaN", struct {
+		Score float64 `json:"score"`
+	}{math.NaN()}, "unsupported value: NaN"},
+	{"fields whose encoding fails with a category", unencodable{}, "encoding the fields of the answer"},
+	{"fields whose encoding panics", panicking{}, "the note panicked"},
+}
+
 // unencodable fails while it is encoded, with an error that has a category of
 // its own, as a MarshalJSON function with a bug might. The answer exists all
 // the same, so that category must not decide the status.
@@ -303,6 +385,21 @@ type unencodable struct{}
 
 func (unencodable) MarshalJSON() ([]byte, error) {
 	return nil, fmt.Errorf("%w: the note is gone", httpapi.ErrNotFound)
+}
+
+// panicking panics while it is encoded, as a MarshalJSON function with a bug
+// might.
+type panicking struct{}
+
+func (panicking) MarshalJSON() ([]byte, error) {
+	panic("the note panicked")
+}
+
+// nothingToAdd encodes to null, which holds no fields.
+type nothingToAdd struct{}
+
+func (nothingToAdd) MarshalJSON() ([]byte, error) {
+	return []byte("null"), nil
 }
 
 // failingNotes answers every query with a failure the caller is not told
