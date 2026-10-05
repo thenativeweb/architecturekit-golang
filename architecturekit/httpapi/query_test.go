@@ -125,6 +125,7 @@ func TestQuery(t *testing.T) {
 		response := ask(t, mux, "/notes/7", "golo")
 
 		assert.Equal(t, http.StatusNotFound, response.Code)
+		assert.JSONEq(t, `{"message": "not found"}`, response.Body.String(), "the text of the package query is not for the caller")
 	})
 
 	t.Run("ErrForbidden survives the way out", func(t *testing.T) {

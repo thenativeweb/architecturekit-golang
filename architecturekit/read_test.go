@@ -444,7 +444,7 @@ func TestReadWithInvalidEventIDs(t *testing.T) {
 				assert.NotErrorIs(t, errs[0], architecturekit.ErrPermanent)
 				assert.NotErrorIs(t, errs[0], architecturekit.ErrTransient)
 				assert.EqualError(t, errs[0],
-					`architecturekit: not a revision: reading "/books/42": `+name+`("`+id+`") needs the ID of an event`)
+					`not a revision: reading "/books/42": `+name+`("`+id+`") needs the ID of an event`)
 				assert.False(t, asked.Load(), "the database must not be asked")
 			})
 		}
@@ -457,7 +457,7 @@ func TestReadWithInvalidEventIDs(t *testing.T) {
 			architecturekit.FromEvent("1"), architecturekit.BeforeEvent("abc"))
 
 		require.Len(t, errs, 1)
-		assert.EqualError(t, errs[0], `architecturekit: not a revision: reading "/books/42": BeforeEvent("abc") needs the ID of an event`)
+		assert.EqualError(t, errs[0], `not a revision: reading "/books/42": BeforeEvent("abc") needs the ID of an event`)
 		assert.False(t, asked.Load(), "the database must not be asked")
 	})
 

@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
+	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
@@ -613,20 +614,30 @@ func TestAnsweringRefusals(t *testing.T) {
 			message: `{"message": "conflict: the data has changed since it was read"}`,
 			detail:  "/tenants/acme-bank/books/42",
 		},
+		{
+			label:   "404 of a query that found no item",
+			err:     fmt.Errorf("finding %q: %w", "/tenants/acme-bank/books/42", query.ErrNoItems),
+			status:  http.StatusNotFound,
+			message: `{"message": "not found"}`,
+			detail:  "/tenants/acme-bank/books/42",
+		},
 	}
 
 	// Each of these errors is written for the caller, so it is the message.
 	explained := []struct {
-		label  string
-		err    error
-		status int
+		label   string
+		err     error
+		status  int
+		message string
 	}{
-		{"400", fmt.Errorf("%w: id must not be empty", httpapi.ErrMalformed), http.StatusBadRequest},
-		{"403", fmt.Errorf("%w: only librarians acquire books", httpapi.ErrForbidden), http.StatusForbidden},
-		{"404", fmt.Errorf("%w: book 42 is unknown", httpapi.ErrNotFound), http.StatusNotFound},
-		{"413", fmt.Errorf("%w: at most 1 byte is read", httpapi.ErrTooLarge), http.StatusRequestEntityTooLarge},
-		{"415", fmt.Errorf("%w: text/plain is not application/json", httpapi.ErrUnsupportedMediaType), http.StatusUnsupportedMediaType},
-		{"422", architecturekit.NewDomainError("book 42 is already borrowed"), http.StatusUnprocessableEntity},
+		{"400", fmt.Errorf("%w: id must not be empty", httpapi.ErrMalformed), http.StatusBadRequest, "malformed request: id must not be empty"},
+		{"400 for a value that is not a revision", fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc"), http.StatusBadRequest, `not a revision: "abc"`},
+		{"403", fmt.Errorf("%w: only librarians acquire books", httpapi.ErrForbidden), http.StatusForbidden, "forbidden: only librarians acquire books"},
+		{"404", fmt.Errorf("%w: book 42 is unknown", httpapi.ErrNotFound), http.StatusNotFound, "not found: book 42 is unknown"},
+		{"413", fmt.Errorf("%w: at most 1 byte is read", httpapi.ErrTooLarge), http.StatusRequestEntityTooLarge, "request body too large: at most 1 byte is read"},
+		{"415", fmt.Errorf("%w: text/plain is not application/json", httpapi.ErrUnsupportedMediaType), http.StatusUnsupportedMediaType, "unsupported media type: text/plain is not application/json"},
+		{"422", architecturekit.NewDomainError("book 42 is already borrowed"), http.StatusUnprocessableEntity, "book 42 is already borrowed"},
+		{"422 for an error of the category alone", fmt.Errorf("%w: book 42 is already borrowed", architecturekit.ErrDomain), http.StatusUnprocessableEntity, "domain rule violated: book 42 is already borrowed"},
 	}
 
 	for name, answer := range answerers {
@@ -657,7 +668,7 @@ func TestAnsweringRefusals(t *testing.T) {
 
 				assert.Equal(t, failure.status, recorder.Code)
 
-				expected, err := json.Marshal(map[string]string{"message": failure.err.Error()})
+				expected, err := json.Marshal(map[string]string{"message": failure.message})
 				require.NoError(t, err)
 				assert.JSONEq(t, string(expected), recorder.Body.String())
 				assert.Empty(t, logs.String(), "a failure the caller can fix must not be logged")

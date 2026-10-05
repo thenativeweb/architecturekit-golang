@@ -86,8 +86,8 @@ func messageOf(t *testing.T, message string) string {
 }
 
 func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
-	const notARevision = `architecturekit: not a revision: "abc"`
-	const notABound = `architecturekit: not a revision: reading "/note": AfterEvent("abc") needs the ID of an event`
+	const notARevision = `not a revision: "abc"`
+	const notABound = `not a revision: reading "/note": AfterEvent("abc") needs the ID of an event`
 
 	queries := map[string]struct {
 		wire    func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux)
@@ -203,6 +203,6 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, response.Code)
 		assert.JSONEq(t, `{"message": "internal server error"}`, response.Body.String())
 		assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
-		assert.Contains(t, logs.String(), "the view holds architecturekit: not a revision")
+		assert.Contains(t, logs.String(), "the view holds not a revision")
 	})
 }

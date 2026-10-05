@@ -21,7 +21,7 @@ import (
 // how long a projection takes.
 
 // ErrNotARevision means a revision could not be read as one.
-var ErrNotARevision = errors.New("architecturekit: not a revision")
+var ErrNotARevision = errors.New("not a revision")
 
 // Revisioned is optional. A view implements it when it knows how far its
 // projection has come, which lets a reader wait for a revision instead of

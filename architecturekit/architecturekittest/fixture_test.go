@@ -355,7 +355,7 @@ func TestThenFailed(t *testing.T) {
 
 		require.Len(t, recorder.failures, 1)
 		assert.Equal(t,
-			"expected an error matching architecturekit: domain rule violated, got 1 event(s): [test.account.opened]",
+			"expected an error matching domain rule violated, got 1 event(s): [test.account.opened]",
 			recorder.firstFailure())
 	})
 
@@ -367,7 +367,7 @@ func TestThenFailed(t *testing.T) {
 			ThenFailed(architecturekit.ErrTransient)
 
 		recorder.expectFailure(t,
-			"expected an error matching architecturekit: transient failure, got account is already open")
+			"expected an error matching transient failure, got account is already open")
 	})
 }
 

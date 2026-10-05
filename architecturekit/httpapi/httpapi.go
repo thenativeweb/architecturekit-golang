@@ -30,27 +30,30 @@ import (
 // into memory in full before it is decoded, so it needs an upper bound.
 const MaxRequestBody = 1 << 20
 
+// These errors sort the failures of a request. An error that is written for
+// the caller is answered with its text (see Respond), so their texts name what
+// is wrong, without the name of the package.
 var (
 	// ErrUnauthorized means the caller could not be determined.
-	ErrUnauthorized = errors.New("httpapi: unauthorized")
+	ErrUnauthorized = errors.New("unauthorized")
 
 	// ErrUnsupportedMediaType means the request did not claim to be JSON.
-	ErrUnsupportedMediaType = errors.New("httpapi: unsupported media type")
+	ErrUnsupportedMediaType = errors.New("unsupported media type")
 
 	// ErrTooLarge means the request body exceeded MaxRequestBody.
-	ErrTooLarge = errors.New("httpapi: request body too large")
+	ErrTooLarge = errors.New("request body too large")
 
 	// ErrForbidden means the user is known but not allowed to do this.
-	ErrForbidden = errors.New("httpapi: forbidden")
+	ErrForbidden = errors.New("forbidden")
 
 	// ErrMalformed means the body could not be decoded, or not be turned into
 	// a command.
-	ErrMalformed = errors.New("httpapi: malformed request")
-
-	// errNoStore means a command reached an API that was created without a
-	// store. That is a mistake in the wiring, which the caller is not told.
-	errNoStore = errors.New("httpapi: the API has no store, so it can not execute commands")
+	ErrMalformed = errors.New("malformed request")
 )
+
+// errNoStore means a command reached an API that was created without a store.
+// That is a mistake in the wiring, which the caller is not told.
+var errNoStore = errors.New("httpapi: the API has no store, so it can not execute commands")
 
 // ToCommand turns a request, its body, and the user into a command. The body
 // comes decoded into TRequest, by the rules of BodyOf, while the request holds
@@ -94,10 +97,10 @@ type apiSettings struct {
 // the method and the route of the request: the routes the API wires up, and
 // Respond and RespondResult in a handler of your own. A failure of the server
 // is logged as an error, which for a panic includes its value and its stack,
-// and a refusal with 401 or 409, whose details the caller is not told (see
-// Respond), as information. The same goes for an answer that Adding could not
-// complete, which is logged as an error. Without it, they log through the
-// default logger of log/slog.
+// and a refusal whose details the caller is not told, such as one with 401 or
+// 409 (see Respond), as information. The same goes for an answer that Adding
+// could not complete, which is logged as an error. Without it, they log
+// through the default logger of log/slog.
 //
 // A nil logger is a programming error, so WithLogger panics.
 func WithLogger(logger *slog.Logger) APIOption {
@@ -170,6 +173,16 @@ func (api *API[TUser]) explain(r *http.Request) func(status int, err error) stri
 			api.logRefusal(r, status, err)
 
 			return "conflict: the data has changed since it was read"
+
+		// A query that expects one item and finds none fails with
+		// query.ErrNoItems, whose text speaks of a sequence, in the words of a
+		// package that knows nothing about HTTP. So unless the application says
+		// itself what was not found, with ErrNotFound, the caller is told what
+		// the status says, and the error is logged as information, as above.
+		case status == http.StatusNotFound && !errors.Is(err, ErrNotFound):
+			api.logRefusal(r, status, err)
+
+			return "not found"
 
 		// Every other error is written for the caller, such as the business rule
 		// a command broke, or what is wrong with a request.
@@ -613,10 +626,14 @@ func StatusFor(err error) int {
 //   - 401 says "unauthorized", and 409 says "conflict: the data has changed
 //     since it was read", while the error is logged at level Info, since the
 //     server did not fail.
+//   - 404 says "not found" for a query that found no item, whose error
+//     query.ErrNoItems speaks of a sequence rather than of what was not
+//     found, and it is logged the same way. An error of ErrNotFound, on the
+//     other hand, is written for the caller, and so it is the message.
 //   - 500 and above say "internal server error", while the failure is logged
 //     at level Error.
 //
-// Both are logged through the logger of the API, with the route of the
+// Each of them is logged through the logger of the API, with the route of the
 // request (see WithLogger).
 //
 // Unlike Route and Handle, Respond does not know where an error comes from, so

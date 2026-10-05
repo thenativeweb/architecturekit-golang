@@ -106,7 +106,7 @@ func TestNoBody(t *testing.T) {
 
 				assert.Equal(t, http.StatusBadRequest, response.Code)
 				assert.JSONEq(t,
-					`{"message": "httpapi: malformed request: this route takes no body, so the body has to be empty, or {}"}`,
+					`{"message": "malformed request: this route takes no body, so the body has to be empty, or {}"}`,
 					response.Body.String())
 			})
 		}
@@ -202,7 +202,7 @@ func TestNoBody(t *testing.T) {
 		_, err := httpapi.BodyOf[httpapi.NoBody](bodyRequest("", strings.NewReader(`{"text":"hello"}`)))
 
 		require.ErrorIs(t, err, httpapi.ErrMalformed)
-		assert.EqualError(t, err, "httpapi: malformed request: this route takes no body, so the body has to be empty, or {}")
+		assert.EqualError(t, err, "malformed request: this route takes no body, so the body has to be empty, or {}")
 	})
 
 	t.Run("BodyOf reads no more than the limit", func(t *testing.T) {
@@ -286,7 +286,7 @@ var sameOrigins = []struct {
 	{label: "an old browser on the same host", secFetchSite: "", origin: "http://example.com"},
 }
 
-const fromAnotherOrigin = "httpapi: forbidden: a command without a body is not accepted from another origin"
+const fromAnotherOrigin = "forbidden: a command without a body is not accepted from another origin"
 
 func TestNoBodyFromAnotherOrigin(t *testing.T) {
 	for _, test := range crossOrigins {
