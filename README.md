@@ -728,7 +728,7 @@ Like a command, a write declares at least one precondition, such as `OnPristineS
 
 ### Handling Errors
 
-Apart from the end of the context and `ErrNotARevision`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
+Apart from the end of the context, `ErrNotARevision`, and `ErrEmptyRange`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
 
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
@@ -768,7 +768,9 @@ An error that your own code returns, for example from a decider or a projection,
 
 If the context ends, reading and writing stop, and the error is the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides.
 
-The other exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
+Another exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
+
+The last exception is `ErrEmptyRange`, which belongs to no category either. It means that the bounds of `Read` leave no room for any event, such as `BeforeEvent("0")` (see [Reading Events](#reading-events)). The error wraps `ErrEmptyRange` and names the values, so check for it with `errors.Is` as well. Such bounds usually come from a request, so `StatusFor` maps it to `400 Bad Request` as well.
 
 *Note that only the end of the context matches `context.Canceled` or `context.DeadlineExceeded`. If an error of the client matches one of them all the same, for example because connecting to the database timed out, which the standard library reports as `context.DeadlineExceeded`, the failure of the database keeps that error in its message only, so that it does not look like the end of the context.*
 
@@ -982,7 +984,9 @@ The IDs are strings, as everywhere else in the kit. The database hands them out 
 
 *Note that `FromLatestEvent` looks for the event on the given subject alone, not below it, and that this subject does not have to be one of those that are read.*
 
-*Note that the database refuses bounds that leave no room for any event, such as `AfterEvent` and `BeforeEvent` with two neighboring IDs, or an upper bound before the latest event of the type given to `FromLatestEvent`. `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the reason the database gives.*
+Bounds that leave no room for any event are a mistake, since no event can ever lie between them, such as `BeforeEvent("0")`, `AfterEvent` and `BeforeEvent` with two neighboring IDs, or a lower bound above the upper one. They end the iteration with an error that wraps `ErrEmptyRange` and names the values, before the database is asked, as in `empty range: no event can lie after "0" and before "1"` or `empty range: no event can lie from "2" up to "1"`. The error names the values only, never the options, since a caller of an API does not know them, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). A range that is only empty for now, on the other hand, such as the one after the last event, is no mistake, since events can still come there, so `Read` hands out no events for it, without an error.
+
+*Note that the lower bound of `FromLatestEvent` is only known once the database has found the latest event of the type, so together with it, only an upper bound that leaves no room on its own, `BeforeEvent("0")`, is refused that way. The database refuses an upper bound before the latest event of the type, and `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the reason the database gives.*
 
 Every event is verified, like everything else the store reads, before the loop sees it (see [Verifying Events](#verifying-events)). A failure belongs to a category, as with `Load` (see [Handling Errors](#handling-errors)), and ends the iteration. The store stops reading as soon as the loop ends, so breaking out of it after a page is fine.
 
@@ -2545,12 +2549,14 @@ It checks the categories in this order:
 | `context.Canceled` | `499 Client Closed Request` |
 | `context.DeadlineExceeded` | `503 Service Unavailable` |
 | `architecturekit.ErrPermanent` | `500 Internal Server Error` |
-| `architecturekit.ErrNotARevision` | `400 Bad Request` |
+| `architecturekit.ErrNotARevision`, `architecturekit.ErrEmptyRange` | `400 Bad Request` |
 | any other error | `500 Internal Server Error` |
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged. Its message is `request canceled`, because the error may name internals, such as the subject that was read.*
 
 *Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, a value for `CompareRevisions` or `ParseRevision`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
+
+*Note that `ErrEmptyRange` means that the bounds of `Read` leave no room for any event, which usually come from the request as well. So it is answered the same way, with `400 Bad Request` and the error as the message, such as `empty range: no event can lie before "0"`, unless the error belongs to the category `ErrPermanent` as well (see [Reading Events](#reading-events)).*
 
 *Note that an error of the function that returns a command, of the one that returns a query, or of the one that determines the user keeps its status code only if it has one of its own, or belongs to the category `ErrPermanent`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
 

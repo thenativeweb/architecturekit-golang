@@ -270,7 +270,7 @@ func TestReadBounds(t *testing.T) {
 		assert.Equal(t, ids, idsOf(events))
 	})
 
-	t.Run("bounds that leave no room for an event are refused by the database", func(t *testing.T) {
+	t.Run("bounds that leave no room for an event are refused before the database is asked", func(t *testing.T) {
 		subject, ids := fiveIn(t)
 
 		events, errs := readAll(t, requireStore(t), architecturekit.ExactSubject(subject),
@@ -278,8 +278,9 @@ func TestReadBounds(t *testing.T) {
 
 		assert.Empty(t, events)
 		require.Len(t, errs, 1)
-		assert.ErrorIs(t, errs[0], architecturekit.ErrPermanent)
-		assert.ErrorContains(t, errs[0], "lowerBound ID must be less than or equal to upperBound ID")
+		assert.ErrorIs(t, errs[0], architecturekit.ErrEmptyRange)
+		assert.NotErrorIs(t, errs[0], architecturekit.ErrPermanent)
+		assert.EqualError(t, errs[0], `empty range: no event can lie after "`+ids[1]+`" and before "`+ids[2]+`"`)
 	})
 }
 
