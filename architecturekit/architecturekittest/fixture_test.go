@@ -393,6 +393,19 @@ func TestThenState(t *testing.T) {
 
 		assert.True(t, checked, "ThenState did not run its check")
 	})
+
+	t.Run("fails on a nil function, also one that was declared but never set", func(t *testing.T) {
+		var declared func(account)
+
+		for _, check := range []func(account){nil, declared} {
+			recorder := &spy{}
+			architecturekittest.Given(recorder, decider(), opened{Owner: "golo"}).
+				When(open{Owner: "jane"}).
+				ThenState(check)
+
+			assert.Equal(t, []string{"ThenState needs a function, not nil"}, recorder.failures)
+		}
+	})
 }
 
 func TestGivenStored(t *testing.T) {
@@ -492,6 +505,42 @@ func TestEventMatchers(t *testing.T) {
 				recorder.expectFailure(t, "no owner given")
 				assert.NotEmpty(t, recorder.failures, "%s did not report the error", label)
 			})
+		}
+	})
+
+	t.Run("fail on a nil function, whatever the decision is, also one that was declared but never set", func(t *testing.T) {
+		// Without events, ThenNoEvent would otherwise pass, asserting nothing.
+		var declared func(architecturekit.Event) bool
+
+		commands := map[string]open{
+			"with events":    {Owner: "golo"},
+			"without events": {Owner: "nobody"},
+			"with an error":  {},
+		}
+
+		for label, check := range map[string]func(
+			d *architecturekittest.Decision[open, account], match func(architecturekit.Event) bool,
+		){
+			"ThenSomeEvent": func(d *architecturekittest.Decision[open, account], match func(architecturekit.Event) bool) {
+				d.ThenSomeEvent(match)
+			},
+			"ThenEveryEvent": func(d *architecturekittest.Decision[open, account], match func(architecturekit.Event) bool) {
+				d.ThenEveryEvent(match)
+			},
+			"ThenNoEvent": func(d *architecturekittest.Decision[open, account], match func(architecturekit.Event) bool) {
+				d.ThenNoEvent(match)
+			},
+		} {
+			for decision, cmd := range commands {
+				t.Run(label+" "+decision, func(t *testing.T) {
+					for _, match := range []func(architecturekit.Event) bool{nil, declared} {
+						recorder := &spy{}
+						check(architecturekittest.Given(recorder, decider()).When(cmd), match)
+
+						assert.Equal(t, []string{label + " needs a function, not nil"}, recorder.failures)
+					}
+				})
+			}
 		}
 	})
 }

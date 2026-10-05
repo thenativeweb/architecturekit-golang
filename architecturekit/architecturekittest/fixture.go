@@ -214,11 +214,18 @@ func (d *Decision[TCommand, TState]) ThenFailed(target error) *Decision[TCommand
 }
 
 // ThenSomeEvent expects at least one event to match.
+//
+// A nil function is a mistake in the test, so ThenSomeEvent fails, saying so,
+// whatever the decision is.
 func (d *Decision[TCommand, TState]) ThenSomeEvent(
 	match func(architecturekit.Event) bool,
 ) *Decision[TCommand, TState] {
 	d.t.Helper()
 
+	if match == nil {
+		d.t.Fatalf("ThenSomeEvent needs a function, not nil")
+		return d
+	}
 	if d.err != nil {
 		d.t.Fatalf("expected events, got error: %v", d.err)
 		return d
@@ -236,11 +243,18 @@ func (d *Decision[TCommand, TState]) ThenSomeEvent(
 }
 
 // ThenEveryEvent expects all events to match, and at least one to be there.
+//
+// A nil function is a mistake in the test, so ThenEveryEvent fails, saying so,
+// whatever the decision is.
 func (d *Decision[TCommand, TState]) ThenEveryEvent(
 	match func(architecturekit.Event) bool,
 ) *Decision[TCommand, TState] {
 	d.t.Helper()
 
+	if match == nil {
+		d.t.Fatalf("ThenEveryEvent needs a function, not nil")
+		return d
+	}
 	if d.err != nil {
 		d.t.Fatalf("expected events, got error: %v", d.err)
 		return d
@@ -262,11 +276,19 @@ func (d *Decision[TCommand, TState]) ThenEveryEvent(
 
 // ThenNoEvent expects nothing to match, which is how a test says that a
 // command did not do something in particular.
+//
+// A nil function is a mistake in the test, so ThenNoEvent fails, saying so,
+// whatever the decision is, also without any events, where a test would
+// otherwise assert nothing and pass all the same.
 func (d *Decision[TCommand, TState]) ThenNoEvent(
 	match func(architecturekit.Event) bool,
 ) *Decision[TCommand, TState] {
 	d.t.Helper()
 
+	if match == nil {
+		d.t.Fatalf("ThenNoEvent needs a function, not nil")
+		return d
+	}
 	if d.err != nil {
 		d.t.Fatalf("expected events, got error: %v", d.err)
 		return d
@@ -284,10 +306,17 @@ func (d *Decision[TCommand, TState]) ThenNoEvent(
 
 // ThenState checks the state the command decided on. It is the state Given
 // built, which is what makes it useful for testing upcasters.
+//
+// A nil function is a mistake in the test, so ThenState fails, saying so.
 func (d *Decision[TCommand, TState]) ThenState(
 	check func(TState),
 ) *Decision[TCommand, TState] {
 	d.t.Helper()
+
+	if check == nil {
+		d.t.Fatalf("ThenState needs a function, not nil")
+		return d
+	}
 
 	check(d.state)
 

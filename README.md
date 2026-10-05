@@ -3024,6 +3024,8 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
   ThenEveryEvent(isBookBorrowed)
 ```
 
+*Note that `ThenSomeEvent`, `ThenEveryEvent`, and `ThenNoEvent` fail the test for `nil` as the function, whatever the decision is, and say so. Otherwise, `ThenNoEvent` would pass for a decision without events, although it checks nothing.*
+
 #### Expecting Rejections
 
 To expect that a command is rejected, call the `ThenFailed` function with the error you expect. It matches with `errors.Is`, so it takes the error the decider returns, as well as every error that this error wraps. For example, `acquireBook` wraps `ErrBookAlreadyAcquired` to add the ID of the book (see [Making Decisions](#making-decisions)), and `ThenFailed` still finds it:
@@ -3081,6 +3083,8 @@ architecturekittest.Given(t, returnBook, BookAcquired{}, BookBorrowed{}).
     }
   })
 ```
+
+*Note that `ThenState` fails the test for `nil` as the function, and says so.*
 
 #### Testing Upcasters
 
