@@ -1495,7 +1495,7 @@ To run a projection, call the `StartProjection` function with a context, the sto
 
 *Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection`, the other functions that run a projection, and `Read` panic, as does a `nil` projection. A `nil` pointer or a `nil` `ProjectionFunc` counts as a `nil` projection.*
 
-The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that with the `WaitCaughtUp` function of the run:
+The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that with the `WaitCaughtUp` function, which takes a context and the runs:
 
 ```go
 ctx, cancel := context.WithCancel(context.TODO())
@@ -1505,7 +1505,7 @@ run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("
   architecturekit.Named("catalog"),
 )
 
-if err := run.WaitCaughtUp(ctx); err != nil {
+if err := architecturekit.WaitCaughtUp(ctx, run); err != nil {
   return err
 }
 
@@ -1516,13 +1516,15 @@ The options after the projection are optional. `Named` gives the projection a na
 
 *Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic.*
 
-`WaitCaughtUp` waits until the run has applied the events that were stored when it started, and returns `nil` then, and only then, so that `nil` always means that the view is complete:
+`WaitCaughtUp` waits until every run has applied the events that were stored when it started, and returns `nil` then, and only then, so that `nil` always means that the views are complete. To wait for several projections, hand over all of their runs, as in `architecturekit.WaitCaughtUp(ctx, catalogRun, readersRun)`. It waits for all of them at once, not one after the other, and returns as soon as one of them ends before it has caught up:
 
-- If the run ends before it catches up, `WaitCaughtUp` returns the error the run ended with.
-- If the run ends without an error before it catches up, because its context ended, `WaitCaughtUp` returns an error that wraps `context.Canceled` and says that the projection stopped before it caught up.
+- If a run ends before it catches up, `WaitCaughtUp` returns the error the run ended with. If the run has a name, the error names it, as in `projection "catalog": …`, and wraps the error of the run, so that `errors.Is` still finds what that wraps.
+- If a run ends without an error before it catches up, because its context ended, `WaitCaughtUp` returns an error that wraps `context.Canceled` and says that the projection stopped before it caught up, naming it if it has a name.
 - If the context handed to `WaitCaughtUp` ends first, it returns the error of that context.
 
-A run that has caught up counts as caught up, even if it has ended since, or the context handed to `WaitCaughtUp` has ended. If several of the other cases have happened by the time `WaitCaughtUp` looks, the error the run ended with comes first, since it tells why, and the error of the context handed to `WaitCaughtUp` comes next. So if the run and `WaitCaughtUp` share a context, as in the example above, and that context times out, `WaitCaughtUp` returns its error, `context.DeadlineExceeded`, which tells more than `context.Canceled`.
+A run that has caught up counts as caught up, even if it has ended since, or the context handed to `WaitCaughtUp` has ended. If several of the other cases have happened by the time `WaitCaughtUp` looks, the error a run ended with comes first, since it tells why, that of the first such run among the ones handed over, and the error of the context handed to `WaitCaughtUp` comes next. So if the run and `WaitCaughtUp` share a context, as in the example above, and that context times out, `WaitCaughtUp` returns its error, `context.DeadlineExceeded`, which tells more than `context.Canceled`.
+
+*Note that `WaitCaughtUp` returns `nil` at once without any run, since none of them is behind, and that a `nil` run makes it panic.*
 
 For finer control, the run offers what `WaitCaughtUp` waits for. `CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. If the run ends before it catches up, the channel is never closed, so wait for `Done` as well. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did, since canceling the context is how a projection is stopped. If `Apply` returns an error that trying again will not fix, the run ends, and `Err` returns it.
 
@@ -2049,6 +2051,28 @@ _, err = architecturekit.ParseRevision("")
 ```
 
 For a value that is not a revision, it returns an error that wraps `ErrNotARevision` and names the value, as `CompareRevisions` does.
+
+#### Waiting for Written Events
+
+Sometimes a step on the server builds on what was just written, for example a handler that executes a command and then answers with what a view holds after it. To wait until a view has seen the events that `Execute` or `Write` returned, call the `WaitForWritten` function with a context, the view, the written events, and how long to wait at most:
+
+```go
+writtenEvents, err := architecturekit.Execute(ctx, store, borrowBook, cmd)
+if err != nil {
+  // ...
+}
+
+err = architecturekit.WaitForWritten(ctx, catalog, writtenEvents, 5*time.Second)
+if err != nil {
+  // ...
+}
+```
+
+It waits with `WaitFor` for the revision that `RevisionOf` returns for the events, and returns `nil` once the view has reached it. If no events were written, it returns `nil` at once, since there is nothing to wait for. If the time runs out first, it returns an error of the category `ErrTransient` that says so, as in `the view did not catch up within 5s`, since the view may still catch up. If the context ends first, it returns the error of the context, and any other error of the view as it is.
+
+*Note that running out of time is an error here, since the step needs what was written. The `Await` function of the `httpapi` package, on the other hand, waits for the revision a caller asks for, and takes running out of time for none, so that the handler answers with what the view holds (see [Waiting for a Revision in a Handler of Your Own](#waiting-for-a-revision-in-a-handler-of-your-own)).*
+
+*Note that `WaitForWritten` panics for a `nil` view, a `nil` pointer included, and for a timeout that is not positive, since a view that catches up with a write that has just happened needs some time, and waiting no time at all would fail almost always.*
 
 ### Setting Up an HTTP API
 
@@ -2761,7 +2785,7 @@ func main() {
   waitCtx, cancelWait := context.WithTimeout(ctx, time.Minute)
   defer cancelWait()
 
-  if err := run.WaitCaughtUp(waitCtx); err != nil {
+  if err := architecturekit.WaitCaughtUp(waitCtx, run); err != nil {
     if ctx.Err() != nil {
       // The process was asked to stop while waiting.
       return
