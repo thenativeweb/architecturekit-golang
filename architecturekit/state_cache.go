@@ -88,10 +88,10 @@ type sameVisit struct {
 // isSame reports whether two values are deeply equal, as reflect.DeepEqual
 // does, except that every value equals itself, which DeepEqual does not
 // promise. Two functions are the same if both are nil or both are not, since
-// functions can not be compared, and two floats or complex numbers are the
-// same if their bits are, so that NaN is the same as NaN, while 0 and -0
-// differ. Map keys are looked up as Go looks them up, though, so a map with a
-// NaN key, which Go never finds again, does not equal itself.
+// functions can not be compared, and two floats are the same if they are
+// equal or both NaN, as are the parts of two complex numbers. Map keys are
+// looked up as Go looks them up, though, so a map with a NaN key, which Go
+// never finds again, does not equal itself.
 //
 // visited holds the references compared so far. One that is compared again is
 // taken to be the same, so that a cycle ends; if it is not, the comparison
@@ -159,9 +159,9 @@ func isSame(left, right reflect.Value, visited map[sameVisit]bool) bool {
 	}
 }
 
-// isSameFloat compares two floats by their bits.
+// isSameFloat reports whether two floats are equal, or both NaN.
 func isSameFloat(left, right float64) bool {
-	return math.Float64bits(left) == math.Float64bits(right)
+	return left == right || (math.IsNaN(left) && math.IsNaN(right))
 }
 
 // isSameElements compares the elements of two arrays, or of two slices of

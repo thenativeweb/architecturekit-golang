@@ -87,8 +87,8 @@ type storeSettings struct {
 // The very same *State is not compared at all. The initial values of two
 // different ones are compared as reflect.DeepEqual compares them, except that
 // every value equals itself: two functions in them are equal if both are nil
-// or both are not, and two floats or complex numbers if their bits are, so
-// that NaN equals NaN.
+// or both are not, and two floats if they are equal or both NaN, as are the
+// parts of two complex numbers.
 //
 // A negative number of subjects is a programming error, so it panics.
 func WithStateCache(maxSubjects int) StoreOption {
