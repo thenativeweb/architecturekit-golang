@@ -2,6 +2,7 @@ package architecturekit_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -368,5 +369,60 @@ func TestSubjectScheme(t *testing.T) {
 		pattern := "/tenant/{tenant}/workshop/{workshop}"
 
 		assert.Equal(t, pattern, architecturekit.NewSubjectScheme(pattern).Pattern())
+	})
+}
+
+func TestSubjectSchemeValue(t *testing.T) {
+	scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
+
+	t.Run("takes the value of a placeholder out of a subject", func(t *testing.T) {
+		tenant, ok := scheme.Value("/tenant/acme/workshop/go-cqrs", "tenant")
+		require.True(t, ok)
+		assert.Equal(t, "acme", tenant)
+
+		workshop, ok := scheme.Value("/tenant/acme/workshop/go-cqrs", "workshop")
+		require.True(t, ok)
+		assert.Equal(t, "go-cqrs", workshop)
+	})
+
+	t.Run("reports false for a subject that does not follow the pattern, as Match does", func(t *testing.T) {
+		for _, subject := range []string{
+			"tenant/acme/workshop/go-cqrs",
+			"/tenant/acme/workshop",
+			"/client/acme/workshop/go-cqrs",
+			"/tenant/acme/workshop/go.cqrs",
+		} {
+			t.Run(subject, func(t *testing.T) {
+				_, matches := scheme.Match(subject)
+				require.False(t, matches)
+
+				value, ok := scheme.Value(subject, "tenant")
+				assert.False(t, ok, "%q should not match %q", subject, scheme.Pattern())
+				assert.Empty(t, value)
+			})
+		}
+	})
+
+	t.Run("panics for a placeholder the pattern does not have", func(t *testing.T) {
+		message := `architecturekit: pattern "/tenant/{tenant}/workshop/{workshop}" has no placeholder "tennant"`
+
+		assert.PanicsWithValue(t, message, func() {
+			scheme.Value("/tenant/acme/workshop/go-cqrs", "tennant")
+		})
+
+		// The mistake is in the code, so it is found whatever the subject is.
+		assert.PanicsWithValue(t, message, func() {
+			scheme.Value("/client/acme", "tennant")
+		})
+	})
+
+	t.Run("panics for a literal segment or a placeholder in braces, neither of which is the name of one", func(t *testing.T) {
+		books := architecturekit.NewSubjectScheme("/books/{book}")
+
+		for _, name := range []string{"books", "{book}", ""} {
+			assert.PanicsWithValue(t,
+				fmt.Sprintf("architecturekit: pattern %q has no placeholder %q", "/books/{book}", name),
+				func() { books.Value("/books/42", name) })
+		}
 	})
 }

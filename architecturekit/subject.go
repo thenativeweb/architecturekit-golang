@@ -2,6 +2,7 @@ package architecturekit
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -10,8 +11,9 @@ import (
 // in braces, as in "/tenant/{tenant}/workshop/{workshop}".
 //
 // A scheme works in both directions. Build composes a subject from values, and
-// Match takes one apart again, which a projection needs to recover the
-// aggregate ID that the events themselves do not carry.
+// Match takes one apart again, or Value takes a single value out of it, which
+// a projection needs to recover the aggregate ID that the events themselves do
+// not carry.
 //
 // EventSourcingDB allows only ASCII letters and digits, underscores, and
 // hyphens in a segment of a subject, so this is what the literal segments of
@@ -158,6 +160,11 @@ func (s *SubjectScheme) Check(values ...string) error {
 // the pattern, which is an ordinary case for a projection reading recursively
 // across several schemes. A subject with a value that Check refuses does not
 // follow it either, so that Match takes apart only what Build composes.
+//
+// The map holds the value of every placeholder of the pattern, and looking up
+// any other name in it, such as one with a typo, yields an empty string. To
+// take a single value out of a subject, use Value, which panics for such a
+// name instead.
 func (s *SubjectScheme) Match(subject string) (map[string]string, bool) {
 	if !strings.HasPrefix(subject, "/") {
 		return nil, false
@@ -188,6 +195,26 @@ func (s *SubjectScheme) Match(subject string) (map[string]string, bool) {
 	}
 
 	return values, true
+}
+
+// Value takes the value of a single placeholder out of a subject. It reports
+// false if the subject does not follow the pattern, as Match does. To take
+// several values out of the same subject, use Match.
+//
+// A placeholder that the pattern does not have, such as one with a typo, is a
+// programming error and panics, whatever the subject is, rather than yield an
+// empty value, as the map that Match returns would.
+func (s *SubjectScheme) Value(subject, placeholder string) (string, bool) {
+	if !slices.Contains(s.placeholders, placeholder) {
+		panic(fmt.Sprintf("architecturekit: pattern %q has no placeholder %q", s.pattern, placeholder))
+	}
+
+	values, ok := s.Match(subject)
+	if !ok {
+		return "", false
+	}
+
+	return values[placeholder], true
 }
 
 // subjectCharacters names the characters that EventSourcingDB allows in a
