@@ -1186,7 +1186,7 @@ Every function that changes the view takes the ID of the event it applies. An ID
 
 The functions that read and change items take a context and report an error, as a view in a database would need: `All` and `Lookup` hand it out along with the items, and every other one returns it. So a view in a database can offer functions of the same shape, which the handlers of a projection call the same way. The kit has no interface for the functions that change a view, though: a projection takes its view by its type, such as `*InMemoryView`, so moving it to a view in a database changes that type.
 
-If an upcaster splits a stored event into several events, they all carry the ID of the stored event (see [Versioning Events](#versioning-events)). A projection created with `NewProjection` hands each of them to its handler with a context that holds its position among them, and the view reads it from the context it gets. For the same ID, the view counts a later event as newer than an earlier one, so every one of them is applied, in order, also if several of them change the same item. Applying the stored event again still changes nothing, and the revision of the item stays the ID of the stored event. That is why a handler always hands the context it gets on to the view, rather than one of its own, such as `context.Background()`.
+If an upcaster splits a stored event into several events, they all carry the ID of the stored event (see [Versioning Events](#versioning-events)). A projection created with `NewTypedProjection` hands each of them to its handler with a context that holds its position among them, and the view reads it from the context it gets. For the same ID, the view counts a later event as newer than an earlier one, so every one of them is applied, in order, also if several of them change the same item. Applying the stored event again still changes nothing, and the revision of the item stays the ID of the stored event. That is why a handler always hands the context it gets on to the view, rather than one of its own, such as `context.Background()`.
 
 *Note that the view as a whole has a revision as well, which is the last event it has seen at all, rather than the last one that changed a particular item (see [Reading Your Own Writes](#reading-your-own-writes)).*
 
@@ -1419,11 +1419,11 @@ A query that reads a single item can then take an `architecturekit.KeyedView[str
 
 ### Defining Projections
 
-A projection turns events into a view. Call the `NewProjection` function, and call the `On` function for every event type the view depends on. Each handler receives an `Envelope`, which holds the metadata of the event, such as its `ID`, `Time`, and `Subject`, and its data, decoded into the Go type of the event:
+A projection turns events into a view. Call the `NewTypedProjection` function, and call the `On` function for every event type the view depends on. Each handler receives an `Envelope`, which holds the metadata of the event, such as its `ID`, `Time`, and `Subject`, and its data, decoded into the Go type of the event:
 
 ```go
 func newCatalogProjection(catalog *architecturekit.InMemoryView[string, BookItem]) *architecturekit.TypedProjection {
-  return architecturekit.NewProjection().
+  return architecturekit.NewTypedProjection().
     On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
       _, err := catalog.Insert(ctx, event.ID, BookItem{
         ID:     bookIDOf(event.Subject),
@@ -1462,13 +1462,13 @@ func bookIDOf(subject string) string {
 }
 ```
 
-`NewProjection` returns a `*TypedProjection`, which is a `Projection` like any other, so you can run, track, and test it as described below. Events without a handler are skipped, since a projection usually reads more events than it depends on. If the data of an event can not be decoded, the projection returns an error of the category `ErrPermanent`. An error returned by a handler is passed on unchanged.
+`NewTypedProjection` returns a `*TypedProjection`, which is a `Projection` like any other, so you can run, track, and test it as described below. Events without a handler are skipped, since a projection usually reads more events than it depends on. If the data of an event can not be decoded, the projection returns an error of the category `ErrPermanent`. An error returned by a handler is passed on unchanged.
 
 If the view keeps the revisions of its items for a precondition, a skipped event makes the revision of its item fall behind the subject (see [Defining Views](#defining-views)). In that case, give every event type of the subject a handler, also one that does not change the item, such as `BookInspected`, which the state ignores. Its handler calls `Update` with a change that does nothing, which only moves the revision of the item on:
 
 ```go
 func newCatalogProjection(catalog *architecturekit.InMemoryView[string, BookItem]) *architecturekit.TypedProjection {
-  return architecturekit.NewProjection().
+  return architecturekit.NewTypedProjection().
     // ...
     On(func(ctx context.Context, event architecturekit.Envelope[BookInspected]) error {
       _, err := catalog.Update(ctx, bookIDOf(event.Subject), event.ID, func(*BookItem) {})
@@ -1640,7 +1640,7 @@ func (p *BookTableProjection) SaveCheckpoint(ctx context.Context, eventID string
 }
 ```
 
-To make a projection created with `NewProjection` resumable, embed it in a type of your own, and add the two functions there:
+To make a projection created with `NewTypedProjection` resumable, embed it in a type of your own, and add the two functions there:
 
 ```go
 type BookTable struct {
@@ -1700,7 +1700,7 @@ func (tx *bookTableTx) Rollback(ctx context.Context) error {
 }
 ```
 
-Instead of implementing `Apply` on the `Tx` yourself, you can use handlers created with `NewProjection`. Build them in `Begin`, so that they write into the transaction that has just been started, and embed them in the `Tx`, which then only needs `Commit` and `Rollback`:
+Instead of implementing `Apply` on the `Tx` yourself, you can use handlers created with `NewTypedProjection`. Build them in `Begin`, so that they write into the transaction that has just been started, and embed them in the `Tx`, which then only needs `Commit` and `Rollback`:
 
 ```go
 func (p *TransactionalBookTableProjection) Begin(ctx context.Context) (architecturekit.Tx, error) {
@@ -1712,7 +1712,7 @@ func (p *TransactionalBookTableProjection) Begin(ctx context.Context) (architect
 
   return &bookTableTx{
     tx: tx,
-    TypedProjection: architecturekit.NewProjection().
+    TypedProjection: architecturekit.NewTypedProjection().
       On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
         _, err := tx.ExecContext(ctx, "INSERT INTO books ...")
         return err
@@ -1789,7 +1789,7 @@ type LoanMailer struct {
 
 func NewLoanMailer(mailer Mailer, checkpoints CheckpointStore) *LoanMailer {
   return &LoanMailer{
-    TypedProjection: architecturekit.NewProjection().
+    TypedProjection: architecturekit.NewTypedProjection().
       On(func(ctx context.Context, event architecturekit.Envelope[BookBorrowed]) error {
         // The ID of the event lets the receiver recognize a mail it got before.
         err := mailer.Send(ctx, event.ID, event.Data.BorrowedBy, "You have borrowed a book.")
@@ -2912,7 +2912,7 @@ To test deciders without a database, use the `architecturekittest` package:
 import "github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
 ```
 
-Call the `Given` function with a `*testing.T`, the decider, and the events that have happened so far. Then call the `When` function with the command, and check the outcome:
+Call the `Given` function with a `*testing.T`, the decider, and the events that have happened so far. Then call the `When` function with the command, and check the decision:
 
 ```go
 func TestBorrowBook(t *testing.T) {
@@ -2935,9 +2935,9 @@ func TestBorrowBook(t *testing.T) {
 }
 ```
 
-`Given` returns a `*Fixture`, and `When` returns an `*Outcome`. The functions that check the outcome return the outcome again, so they can be chained.
+`Given` returns a `*Fixture`, and `When` returns a `*Decision`, which is the decider's decision on the command: events, nothing, or a refusal. The functions that check the decision return the decision again, so they can be chained.
 
-Like `Execute`, `When` refuses an event that is `nil`, a `nil` pointer included, an event that the state of the decider has no rule for, and an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). As `Execute` does, it checks all events for `nil` first, then all of them for a rule, and encodes them last. It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches. Only an event ID of `OnEventID` that is not a revision is refused with the error that wraps `ErrNotARevision` instead, as `Execute` does, which `ThenFailed(architecturekit.ErrNotARevision)` matches.
+Like `Execute`, `When` refuses an event that is `nil`, a `nil` pointer included, an event that the state of the decider has no rule for, and an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). As `Execute` does, it checks all events for `nil` first, then all of them for a rule, and encodes them last. It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The decision then holds the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches. Only an event ID of `OnEventID` that is not a revision is refused with the error that wraps `ErrNotARevision` instead, as `Execute` does, which `ThenFailed(architecturekit.ErrNotARevision)` matches.
 
 *Note that `Given` takes a `testing.TB`, as does every function of the package that can fail a test, so it works with the `*testing.B` of a benchmark as well.*
 

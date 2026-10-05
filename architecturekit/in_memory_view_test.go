@@ -964,7 +964,7 @@ func counterItemProjection(
 	view *architecturekit.InMemoryView[string, counterItem],
 	followsResets bool,
 ) *architecturekit.TypedProjection {
-	projection := architecturekit.NewProjection().
+	projection := architecturekit.NewTypedProjection().
 		On(func(ctx context.Context, event architecturekit.Envelope[incremented]) error {
 			_, err := view.Upsert(ctx, event.Subject, event.ID, func(item *counterItem) {
 				item.Subject = event.Subject
@@ -1203,7 +1203,7 @@ func newBookCatalog(
 	view := bookView()
 	catalog := &bookCatalog{view: view, byID: view.Index(func(item book) string { return item.ID })}
 
-	projection := architecturekit.NewProjection().
+	projection := architecturekit.NewTypedProjection().
 		On(func(ctx context.Context, event architecturekit.Envelope[bookAcquired]) error {
 			outcome, err := acquire(ctx, catalog, strings.TrimPrefix(event.Subject, "/books/"), event.ID, event.Data.Title)
 			catalog.acquired = append(catalog.acquired, outcome)

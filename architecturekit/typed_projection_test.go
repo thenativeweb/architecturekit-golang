@@ -20,7 +20,7 @@ type credits struct {
 }
 
 func (c *credits) projection() *architecturekit.TypedProjection {
-	return architecturekit.NewProjection().
+	return architecturekit.NewTypedProjection().
 		On(func(_ context.Context, event architecturekit.Envelope[credited]) error {
 			c.envelopes = append(c.envelopes, event)
 			return nil
@@ -86,7 +86,7 @@ func TestTypedProjection(t *testing.T) {
 	t.Run("hands each event to the handler of its type", func(t *testing.T) {
 		var order []string
 
-		projection := architecturekit.NewProjection().
+		projection := architecturekit.NewTypedProjection().
 			On(func(_ context.Context, event architecturekit.Envelope[incremented]) error {
 				order = append(order, "incremented "+itoa(event.Data.By))
 				return nil
@@ -131,7 +131,7 @@ func TestTypedProjection(t *testing.T) {
 	t.Run("returns the error of a handler unchanged", func(t *testing.T) {
 		errFull := errors.New("the view is full")
 
-		projection := architecturekit.NewProjection().
+		projection := architecturekit.NewTypedProjection().
 			On(func(context.Context, architecturekit.Envelope[credited]) error {
 				return errFull
 			})
@@ -147,7 +147,7 @@ func TestTypedProjection(t *testing.T) {
 
 		for _, handle := range []func(context.Context, architecturekit.Envelope[credited]) error{nil, declared} {
 			assert.PanicsWithValue(t, "architecturekit: On needs a function, not nil", func() {
-				architecturekit.NewProjection().On(handle)
+				architecturekit.NewTypedProjection().On(handle)
 			})
 		}
 	})
@@ -156,7 +156,7 @@ func TestTypedProjection(t *testing.T) {
 		assert.PanicsWithValue(t,
 			"architecturekit: On needs the event type architecturekit_test.credited, not the pointer *architecturekit_test.credited",
 			func() {
-				architecturekit.NewProjection().
+				architecturekit.NewTypedProjection().
 					On(func(context.Context, architecturekit.Envelope[*credited]) error { return nil })
 			})
 	})
@@ -165,7 +165,7 @@ func TestTypedProjection(t *testing.T) {
 		assert.PanicsWithValue(t,
 			"architecturekit: On needs the event type architecturekit_test.pointed, not the pointer *architecturekit_test.pointed",
 			func() {
-				architecturekit.NewProjection().
+				architecturekit.NewTypedProjection().
 					On(func(context.Context, architecturekit.Envelope[*pointed]) error { return nil })
 			})
 	})
@@ -174,7 +174,7 @@ func TestTypedProjection(t *testing.T) {
 		ignore := func(context.Context, architecturekit.Envelope[credited]) error { return nil }
 
 		assert.Panics(t, func() {
-			architecturekit.NewProjection().On(ignore).On(ignore)
+			architecturekit.NewTypedProjection().On(ignore).On(ignore)
 		})
 	})
 
@@ -240,7 +240,7 @@ func TestTypedProjection(t *testing.T) {
 
 	t.Run("UpcastWith panics when called twice", func(t *testing.T) {
 		assert.Panics(t, func() {
-			architecturekit.NewProjection().
+			architecturekit.NewTypedProjection().
 				UpcastWith(architecturekit.NewUpcasters()).
 				UpcastWith(architecturekit.NewUpcasters())
 		})
@@ -248,12 +248,12 @@ func TestTypedProjection(t *testing.T) {
 
 	t.Run("UpcastWith panics without a set", func(t *testing.T) {
 		assert.Panics(t, func() {
-			architecturekit.NewProjection().UpcastWith(nil)
+			architecturekit.NewTypedProjection().UpcastWith(nil)
 		})
 	})
 
 	t.Run("is rebuilt unless embedded in a resumable type", func(t *testing.T) {
-		assert.Equal(t, architecturekit.ModeRebuild, architecturekit.ModeOf(architecturekit.NewProjection()))
+		assert.Equal(t, architecturekit.ModeRebuild, architecturekit.ModeOf(architecturekit.NewTypedProjection()))
 
 		target := &credits{}
 		resumable := &resumableCredits{TypedProjection: target.projection()}
@@ -272,7 +272,7 @@ func TestTypedProjection(t *testing.T) {
 		var total int
 		var subjects []string
 
-		projection := architecturekit.NewProjection().
+		projection := architecturekit.NewTypedProjection().
 			On(func(_ context.Context, event architecturekit.Envelope[incremented]) error {
 				total += event.Data.By
 				subjects = append(subjects, event.Subject)

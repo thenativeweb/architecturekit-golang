@@ -481,10 +481,10 @@ func TestEventMatchers(t *testing.T) {
 	t.Run("fail on an error", func(t *testing.T) {
 		always := func(architecturekit.Event) bool { return true }
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[open, account]){
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[open, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[open, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNoEvent(always) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[open, account]){
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[open, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[open, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[open, account]) { d.ThenNoEvent(always) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}
@@ -695,11 +695,11 @@ func TestEventWithoutRule(t *testing.T) {
 	t.Run("fails every assertion that expects events or nothing", func(t *testing.T) {
 		always := func(architecturekit.Event) bool { return true }
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[emit, account]){
-			"ThenNothing":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNothing() },
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[emit, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[emit, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNoEvent(always) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[emit, account]){
+			"ThenNothing":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNothing() },
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[emit, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[emit, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNoEvent(always) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}
@@ -759,12 +759,12 @@ func TestEventThatCanNotBeEncoded(t *testing.T) {
 		always := func(architecturekit.Event) bool { return true }
 		never := func(architecturekit.Event) bool { return false }
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[emit, account]){
-			"ThenEvents":     func(o *architecturekittest.Outcome[emit, account]) { o.ThenEvents(withNaN.events...) },
-			"ThenNothing":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNothing() },
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[emit, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[emit, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNoEvent(never) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[emit, account]){
+			"ThenEvents":     func(d *architecturekittest.Decision[emit, account]) { d.ThenEvents(withNaN.events...) },
+			"ThenNothing":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNothing() },
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[emit, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[emit, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNoEvent(never) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}
@@ -832,12 +832,12 @@ func TestNilEvent(t *testing.T) {
 		always := func(architecturekit.Event) bool { return true }
 		never := func(architecturekit.Event) bool { return false }
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[emit, account]){
-			"ThenEvents":     func(o *architecturekittest.Outcome[emit, account]) { o.ThenEvents(opened{Owner: "golo"}) },
-			"ThenNothing":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNothing() },
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[emit, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[emit, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNoEvent(never) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[emit, account]){
+			"ThenEvents":     func(d *architecturekittest.Decision[emit, account]) { d.ThenEvents(opened{Owner: "golo"}) },
+			"ThenNothing":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNothing() },
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[emit, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[emit, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNoEvent(never) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}
@@ -932,11 +932,11 @@ func TestWhenChecksPreconditions(t *testing.T) {
 			architecturekit.OnStateRead(),
 		}}
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[open, account]){
-			"ThenNothing":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNothing() },
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[open, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[open, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNoEvent(always) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[open, account]){
+			"ThenNothing":    func(d *architecturekittest.Decision[open, account]) { d.ThenNothing() },
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[open, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[open, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[open, account]) { d.ThenNoEvent(always) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}

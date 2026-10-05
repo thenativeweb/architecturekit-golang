@@ -86,15 +86,15 @@ func GivenStored[TCommand architecturekit.Command, TState any](
 // rule for, since the state could not read the subject any more, and an
 // event whose data can not be encoded as JSON, for example because it holds
 // a float NaN. As Execute does, it checks all events for nil first, then all
-// of them for a rule, and encodes them last. In each case, the outcome is
-// then the error of the category architecturekit.ErrPermanent that Execute
+// of them for a rule, and encodes them last. In each case, the decision then
+// holds the error of the category architecturekit.ErrPermanent that Execute
 // returns, so that ThenEvents and the other assertions that expect events
 // fail, naming the cause, and ThenFailed(architecturekit.ErrPermanent)
 // matches it. Only an ID of architecturekit.OnEventID that is not a revision
 // is refused with an error that wraps architecturekit.ErrNotARevision
 // instead, as Execute does, which
 // ThenFailed(architecturekit.ErrNotARevision) matches.
-func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState] {
+func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Decision[TCommand, TState] {
 	f.t.Helper()
 
 	err := architecturekit.CheckPreconditions(cmd)
@@ -115,7 +115,7 @@ func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState
 		encoded, err = encode(cmd.Subject(), events)
 	}
 
-	return &Outcome[TCommand, TState]{
+	return &Decision[TCommand, TState]{
 		t:       f.t,
 		cmd:     cmd,
 		state:   f.state,
@@ -125,9 +125,9 @@ func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState
 	}
 }
 
-// Outcome is what a command did. Every assertion returns the outcome again, so
-// they can be chained.
-type Outcome[TCommand architecturekit.Command, TState any] struct {
+// Decision is the decider's decision on the command: events, nothing, or a
+// refusal. Every assertion returns the decision again, so they can be chained.
+type Decision[TCommand architecturekit.Command, TState any] struct {
 	t      testing.TB
 	cmd    TCommand
 	state  TState
@@ -141,56 +141,56 @@ type Outcome[TCommand architecturekit.Command, TState any] struct {
 }
 
 // ThenEvents expects exactly these events, in this order.
-func (o *Outcome[TCommand, TState]) ThenEvents(expected ...architecturekit.Event) *Outcome[TCommand, TState] {
-	o.t.Helper()
+func (d *Decision[TCommand, TState]) ThenEvents(expected ...architecturekit.Event) *Decision[TCommand, TState] {
+	d.t.Helper()
 
-	if o.err != nil {
-		o.t.Fatalf("expected events, got error: %v", o.err)
-		return o
+	if d.err != nil {
+		d.t.Fatalf("expected events, got error: %v", d.err)
+		return d
 	}
-	if len(o.events) != len(expected) {
-		o.t.Fatalf("expected %d event(s), got %d: %s",
-			len(expected), len(o.events), describe(o.events))
-		return o
+	if len(d.events) != len(expected) {
+		d.t.Fatalf("expected %d event(s), got %d: %s",
+			len(expected), len(d.events), describe(d.events))
+		return d
 	}
 
 	for i, want := range expected {
-		got := o.events[i]
+		got := d.events[i]
 
 		if got.EventType() != want.EventType() {
-			o.t.Fatalf("event %d: got type %q, want %q", i, got.EventType(), want.EventType())
-			return o
+			d.t.Fatalf("event %d: got type %q, want %q", i, got.EventType(), want.EventType())
+			return d
 		}
 
 		wantJSON, err := json.Marshal(want)
 		if err != nil {
-			o.t.Fatalf("event %d: %v", i, err)
-			return o
+			d.t.Fatalf("event %d: %v", i, err)
+			return d
 		}
 
-		if string(o.encoded[i]) != string(wantJSON) {
-			o.t.Fatalf("event %d: got %s, want %s", i, o.encoded[i], wantJSON)
-			return o
+		if string(d.encoded[i]) != string(wantJSON) {
+			d.t.Fatalf("event %d: got %s, want %s", i, d.encoded[i], wantJSON)
+			return d
 		}
 	}
 
-	return o
+	return d
 }
 
 // ThenNothing expects neither events nor a failure, which is what a command
 // does when it finds there is nothing left to do.
-func (o *Outcome[TCommand, TState]) ThenNothing() *Outcome[TCommand, TState] {
-	o.t.Helper()
+func (d *Decision[TCommand, TState]) ThenNothing() *Decision[TCommand, TState] {
+	d.t.Helper()
 
-	if o.err != nil {
-		o.t.Fatalf("expected nothing to happen, got error: %v", o.err)
-		return o
+	if d.err != nil {
+		d.t.Fatalf("expected nothing to happen, got error: %v", d.err)
+		return d
 	}
-	if len(o.events) > 0 {
-		o.t.Fatalf("expected nothing to happen, got %s", describe(o.events))
+	if len(d.events) > 0 {
+		d.t.Fatalf("expected nothing to happen, got %s", describe(d.events))
 	}
 
-	return o
+	return d
 }
 
 // ThenFailed expects the command to have failed with an error that matches
@@ -199,125 +199,125 @@ func (o *Outcome[TCommand, TState]) ThenNothing() *Outcome[TCommand, TState] {
 // architecturekit.ErrDomain or architecturekit.ErrPermanent, as well as a
 // sentinel error of the domain, such as an ErrBookAlreadyAcquired that the
 // decider returns as it is, or wraps to add details.
-func (o *Outcome[TCommand, TState]) ThenFailed(target error) *Outcome[TCommand, TState] {
-	o.t.Helper()
+func (d *Decision[TCommand, TState]) ThenFailed(target error) *Decision[TCommand, TState] {
+	d.t.Helper()
 
-	if o.err == nil {
-		o.t.Fatalf("expected an error matching %v, got %s", target, describe(o.events))
-		return o
+	if d.err == nil {
+		d.t.Fatalf("expected an error matching %v, got %s", target, describe(d.events))
+		return d
 	}
-	if !errors.Is(o.err, target) {
-		o.t.Fatalf("expected an error matching %v, got %v", target, o.err)
+	if !errors.Is(d.err, target) {
+		d.t.Fatalf("expected an error matching %v, got %v", target, d.err)
 	}
 
-	return o
+	return d
 }
 
 // ThenSomeEvent expects at least one event to match.
-func (o *Outcome[TCommand, TState]) ThenSomeEvent(
+func (d *Decision[TCommand, TState]) ThenSomeEvent(
 	match func(architecturekit.Event) bool,
-) *Outcome[TCommand, TState] {
-	o.t.Helper()
+) *Decision[TCommand, TState] {
+	d.t.Helper()
 
-	if o.err != nil {
-		o.t.Fatalf("expected events, got error: %v", o.err)
-		return o
+	if d.err != nil {
+		d.t.Fatalf("expected events, got error: %v", d.err)
+		return d
 	}
 
-	for _, event := range o.events {
+	for _, event := range d.events {
 		if match(event) {
-			return o
+			return d
 		}
 	}
 
-	o.t.Fatalf("no event matched, got %s", describe(o.events))
+	d.t.Fatalf("no event matched, got %s", describe(d.events))
 
-	return o
+	return d
 }
 
 // ThenEveryEvent expects all events to match, and at least one to be there.
-func (o *Outcome[TCommand, TState]) ThenEveryEvent(
+func (d *Decision[TCommand, TState]) ThenEveryEvent(
 	match func(architecturekit.Event) bool,
-) *Outcome[TCommand, TState] {
-	o.t.Helper()
+) *Decision[TCommand, TState] {
+	d.t.Helper()
 
-	if o.err != nil {
-		o.t.Fatalf("expected events, got error: %v", o.err)
-		return o
+	if d.err != nil {
+		d.t.Fatalf("expected events, got error: %v", d.err)
+		return d
 	}
-	if len(o.events) == 0 {
-		o.t.Fatalf("expected events, got none")
-		return o
+	if len(d.events) == 0 {
+		d.t.Fatalf("expected events, got none")
+		return d
 	}
 
-	for i, event := range o.events {
+	for i, event := range d.events {
 		if !match(event) {
-			o.t.Fatalf("event %d did not match: %s", i, describe(o.events))
-			return o
+			d.t.Fatalf("event %d did not match: %s", i, describe(d.events))
+			return d
 		}
 	}
 
-	return o
+	return d
 }
 
 // ThenNoEvent expects nothing to match, which is how a test says that a
 // command did not do something in particular.
-func (o *Outcome[TCommand, TState]) ThenNoEvent(
+func (d *Decision[TCommand, TState]) ThenNoEvent(
 	match func(architecturekit.Event) bool,
-) *Outcome[TCommand, TState] {
-	o.t.Helper()
+) *Decision[TCommand, TState] {
+	d.t.Helper()
 
-	if o.err != nil {
-		o.t.Fatalf("expected events, got error: %v", o.err)
-		return o
+	if d.err != nil {
+		d.t.Fatalf("expected events, got error: %v", d.err)
+		return d
 	}
 
-	for i, event := range o.events {
+	for i, event := range d.events {
 		if match(event) {
-			o.t.Fatalf("event %d matched although it should not: %s", i, describe(o.events))
-			return o
+			d.t.Fatalf("event %d matched although it should not: %s", i, describe(d.events))
+			return d
 		}
 	}
 
-	return o
+	return d
 }
 
 // ThenState checks the state the command decided on. It is the state Given
 // built, which is what makes it useful for testing upcasters.
-func (o *Outcome[TCommand, TState]) ThenState(
+func (d *Decision[TCommand, TState]) ThenState(
 	check func(TState),
-) *Outcome[TCommand, TState] {
-	o.t.Helper()
+) *Decision[TCommand, TState] {
+	d.t.Helper()
 
-	check(o.state)
+	check(d.state)
 
-	return o
+	return d
 }
 
 // ThenPreconditions expects the command to declare exactly these, in this
 // order.
-func (o *Outcome[TCommand, TState]) ThenPreconditions(
+func (d *Decision[TCommand, TState]) ThenPreconditions(
 	expected ...Precondition,
-) *Outcome[TCommand, TState] {
-	o.t.Helper()
+) *Decision[TCommand, TState] {
+	d.t.Helper()
 
-	declared := PreconditionsOf(o.cmd)
+	declared := PreconditionsOf(d.cmd)
 
 	if len(declared) != len(expected) {
-		o.t.Fatalf("expected %d precondition(s), got %d: %s",
+		d.t.Fatalf("expected %d precondition(s), got %d: %s",
 			len(expected), len(declared), describePreconditions(declared))
-		return o
+		return d
 	}
 
 	for i, want := range expected {
 		if declared[i] != want {
-			o.t.Fatalf("precondition %d: got %s, want %s",
+			d.t.Fatalf("precondition %d: got %s, want %s",
 				i, describePrecondition(declared[i]), describePrecondition(want))
-			return o
+			return d
 		}
 	}
 
-	return o
+	return d
 }
 
 // checkNotNil fails if one of the events is nil, also a nil pointer of a

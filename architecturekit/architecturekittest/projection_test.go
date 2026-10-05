@@ -177,7 +177,7 @@ func TestProject(t *testing.T) {
 	t.Run("drives a typed projection", func(t *testing.T) {
 		view := ownerView()
 
-		projection := architecturekit.NewProjection().
+		projection := architecturekit.NewTypedProjection().
 			On(func(ctx context.Context, event architecturekit.Envelope[opened]) error {
 				_, err := view.Insert(ctx, event.ID, owner{Name: event.Data.Owner})
 				return err
@@ -476,7 +476,7 @@ func (o *typedOwnerTable) Checkpoint(context.Context) (string, error) { return "
 
 func (o *typedOwnerTable) Begin(context.Context) (architecturekit.Tx, error) {
 	tx := &typedOwnerTx{table: o}
-	tx.TypedProjection = architecturekit.NewProjection().
+	tx.TypedProjection = architecturekit.NewTypedProjection().
 		On(func(_ context.Context, event architecturekit.Envelope[opened]) error {
 			tx.pending = append(tx.pending, event.Data.Owner)
 			return nil

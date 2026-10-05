@@ -29,7 +29,7 @@ type Envelope[TEvent Event] struct {
 
 // TypedProjection is a projection that hands every event to the handler
 // registered for its type, with the data already decoded. Create it with
-// NewProjection, and register a handler per event type with On.
+// NewTypedProjection, and register a handler per event type with On.
 //
 // It is the read side's counterpart of State: the event type is taken from the
 // Go type of the handler, so it is written exactly once, on the event, and the
@@ -43,12 +43,12 @@ type TypedProjection struct {
 	upcasters *Upcasters
 }
 
-// NewProjection creates a projection without any handlers.
+// NewTypedProjection creates a projection without any handlers.
 //
 // The result is a Projection like any other, so it can be tracked, run, and
 // tested as usual. To make it resumable, embed it in a type that adds the
 // Checkpoint and SaveCheckpoint functions.
-func NewProjection() *TypedProjection {
+func NewTypedProjection() *TypedProjection {
 	return &TypedProjection{
 		handlers: map[string]func(ctx context.Context, event eventsourcingdb.Event) error{},
 	}
