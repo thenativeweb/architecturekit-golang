@@ -224,8 +224,8 @@ func WithSignatureVerification(verificationKey ed25519.PublicKey) StoreOption {
 // written are not checked, since they are not read. To turn this off, hand
 // over WithoutHashVerification.
 //
-// A nil client is a programming error, so NewStore panics, rather than the
-// store failing once it first reads or writes.
+// A nil client, or a nil option, is a programming error, so NewStore panics,
+// rather than the store failing once it first reads or writes.
 func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOption) *Store {
 	if client == nil {
 		panic("architecturekit: NewStore needs a client, not nil")
@@ -235,9 +235,7 @@ func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOpt
 		reconnectInitialDelay: defaultReconnectInitialDelay,
 		reconnectMaxDelay:     defaultReconnectMaxDelay,
 	}
-	for _, option := range options {
-		option(&settings)
-	}
+	applyOptions("NewStore", &settings, options)
 
 	if settings.skipsHashes && settings.verificationKey != nil {
 		panic("architecturekit: WithoutHashVerification contradicts WithSignatureVerification, which checks the hash as well")
@@ -249,6 +247,20 @@ func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOpt
 	}
 
 	return store
+}
+
+// applyOptions applies the options to the settings of the function of the kit
+// with the given name, in their order. A nil option, such as one that was
+// declared but never set, is a programming error, so applyOptions panics,
+// naming the function, rather than with a nil dereference.
+func applyOptions[TSettings any, TOption ~func(*TSettings)](function string, settings *TSettings, options []TOption) {
+	for _, option := range options {
+		if option == nil {
+			panic(fmt.Sprintf("architecturekit: %s got a nil option", function))
+		}
+
+		option(settings)
+	}
 }
 
 // Load reads the state of a subject exactly the way Execute does before it
@@ -280,7 +292,8 @@ func Load[TState any](
 // bound the IDs, which the database hands out as one ascending sequence
 // across all subjects, NewestFirst turns the order around, and FromLatestEvent
 // starts from the latest event of a type. Options that contradict each other
-// panic (see ReadOption). For anything else, use ReadEvents of the client SDK.
+// panic (see ReadOption), and so does a nil option. For anything else, use
+// ReadEvents of the client SDK.
 //
 // A bound whose ID is not the ID of an event, such as an empty one, ends the
 // iteration with the error of ParseRevision, which wraps ErrNotARevision and

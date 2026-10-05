@@ -105,6 +105,35 @@ func TestNamed(t *testing.T) {
 				architecturekit.Named("catalog"), architecturekit.Named("loans"))
 		})
 	})
+
+	t.Run("a nil option panics, naming the function, also one that was declared but never set", func(t *testing.T) {
+		var declared architecturekit.ProjectionOption
+
+		for name, start := range map[string]func(option architecturekit.ProjectionOption){
+			"StartProjection": func(option architecturekit.ProjectionOption) {
+				architecturekit.StartProjection(t.Context(), nil, architecturekit.SubjectTree("/"), &collector{},
+					architecturekit.Named("catalog"), option)
+			},
+			"StartTransactionalProjection": func(option architecturekit.ProjectionOption) {
+				architecturekit.StartTransactionalProjection(t.Context(), nil, architecturekit.SubjectTree("/"), &transactionalCollector{},
+					architecturekit.Named("catalog"), option)
+			},
+			"CatchUpProjection": func(option architecturekit.ProjectionOption) {
+				_ = architecturekit.CatchUpProjection(t.Context(), nil, architecturekit.SubjectTree("/"), &collector{},
+					architecturekit.Named("catalog"), option)
+			},
+			"CatchUpTransactionalProjection": func(option architecturekit.ProjectionOption) {
+				_ = architecturekit.CatchUpTransactionalProjection(t.Context(), nil, architecturekit.SubjectTree("/"), &transactionalCollector{},
+					architecturekit.Named("catalog"), option)
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				for _, option := range []architecturekit.ProjectionOption{nil, declared} {
+					assert.PanicsWithValue(t, "architecturekit: "+name+" got a nil option", func() { start(option) })
+				}
+			})
+		}
+	})
 }
 
 func TestReconnect(t *testing.T) {

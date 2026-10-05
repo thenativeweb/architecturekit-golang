@@ -170,9 +170,7 @@ func readSettingsOf(subjects Subjects, options []ReadOption) readSettings {
 		database: eventsourcingdb.ReadEventsOptions{Recursive: subjects.recursive},
 	}
 
-	for _, option := range options {
-		option(&settings)
-	}
+	applyOptions("Read", &settings, options)
 
 	if settings.database.FromLatestEvent != nil && settings.order != "" {
 		panic(fmt.Sprintf("architecturekit: the database reads from the latest event of a type only oldest first, "+

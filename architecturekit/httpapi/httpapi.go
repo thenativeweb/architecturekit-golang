@@ -127,8 +127,8 @@ func WithLogger(logger *slog.Logger) APIOption {
 // is answered with 500, and the failure says that there is no store.
 //
 // A nil userFrom, on the other hand, is a programming error, so NewAPI panics,
-// rather than failing every request with 500. For an application without
-// authentication, use NewPublicAPI.
+// rather than failing every request with 500, and so does a nil option. For an
+// application without authentication, use NewPublicAPI.
 func NewAPI[TUser any](
 	store *architecturekit.Store,
 	userFrom func(*http.Request) (TUser, error),
@@ -138,12 +138,35 @@ func NewAPI[TUser any](
 		panic("architecturekit/httpapi: NewAPI needs a function that determines the user, not nil")
 	}
 
+	return newAPI("NewAPI", store, userFrom, options)
+}
+
+// newAPI creates the API of NewAPI and NewPublicAPI, which it names if one of
+// the options is nil.
+func newAPI[TUser any](
+	function string,
+	store *architecturekit.Store,
+	userFrom func(*http.Request) (TUser, error),
+	options []APIOption,
+) *API[TUser] {
 	var settings apiSettings
-	for _, option := range options {
-		option(&settings)
-	}
+	applyOptions(function, &settings, options)
 
 	return &API[TUser]{store: store, userFrom: userFrom, logger: settings.logger}
+}
+
+// applyOptions applies the options to the settings of the function of httpapi
+// with the given name, in their order. A nil option, such as one that was
+// declared but never set, is a programming error, so applyOptions panics,
+// naming the function, rather than with a nil dereference.
+func applyOptions[TSettings any, TOption ~func(*TSettings)](function string, settings *TSettings, options []TOption) {
+	for _, option := range options {
+		if option == nil {
+			panic(fmt.Sprintf("architecturekit/httpapi: %s got a nil option", function))
+		}
+
+		option(settings)
+	}
 }
 
 // explain returns the function that turns an error into the message the
@@ -313,10 +336,12 @@ type NoBody struct{}
 
 // NewPublicAPI creates an API for an application without authentication.
 // Every request is served, and commands and queries receive NoUser.
+//
+// A nil option is a programming error, so NewPublicAPI panics, as NewAPI does.
 func NewPublicAPI(store *architecturekit.Store, options ...APIOption) *API[NoUser] {
-	return NewAPI(store, func(*http.Request) (NoUser, error) {
+	return newAPI("NewPublicAPI", store, func(*http.Request) (NoUser, error) {
 		return NoUser{}, nil
-	}, options...)
+	}, options)
 }
 
 // Handled is what a command did. It carries the command itself, so that a
@@ -491,9 +516,10 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 // and Route panics, rather than executing the command for any site that links
 // to it, or whenever a query is sent again.
 //
-// A nil API, a nil toCommand, or the zero Decider, one that was not made with
-// NewDecider, is a programming error, so Route panics, rather than failing
-// every request, with 500, or for a nil API, with no answer at all.
+// A nil API, a nil toCommand, the zero Decider, one that was not made with
+// NewDecider, or a nil option, is a programming error, so Route panics, rather
+// than failing every request, with 500, or for a nil API, with no answer at
+// all.
 func Route[
 	TUser any,
 	TRequest any,
@@ -527,9 +553,7 @@ func Route[
 	}
 
 	var settings routeSettings[TCommand]
-	for _, option := range options {
-		option(&settings)
-	}
+	applyOptions("Route", &settings, options)
 
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer api.answerPanic(w, r)

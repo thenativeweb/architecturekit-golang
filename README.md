@@ -47,7 +47,7 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io")
 
 The `NewStore` function returns a `*Store`, which reads and writes the events of all commands. For details on the client, see the [client SDK for Go](https://github.com/thenativeweb/eventsourcingdb-client-golang).
 
-*Note that calling `NewStore` with `nil` as the client panics.*
+*Note that calling `NewStore` with `nil` as the client, or as one of the options, panics.*
 
 ### Defining Commands
 
@@ -1056,7 +1056,7 @@ events := architecturekit.Read(context.TODO(), store, architecturekit.ExactSubje
 
 The IDs are strings, as everywhere else in the kit. The database hands them out as one ascending sequence across all subjects, so a bound does not have to be an event of the subjects that are read. An ID that is not the one of an event, such as `abc` or an empty one, ends the iteration with an error that wraps `ErrNotARevision` and names the ID, as in `not a revision: "abc"`, before the database is asked. That way, an ID that comes from a request can be told apart from a failure of the database, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
-*Note that a read has at most one lower bound, one upper bound, and one order, and that `FromLatestEvent` counts as a lower bound. Options that contradict each other, such as `FromEvent` together with `AfterEvent`, or `NewestFirst` given twice, make `Read` panic. So does `FromLatestEvent` together with `NewestFirst`, since the database reads from the latest event of a type only oldest first, and so does the zero value of `Subjects`. A subject for `FromLatestEvent` that does not start with a slash makes `FromLatestEvent` itself panic, and so does a value other than `ReadEverything` and `ReadNothing`.*
+*Note that a read has at most one lower bound, one upper bound, and one order, and that `FromLatestEvent` counts as a lower bound. Options that contradict each other, such as `FromEvent` together with `AfterEvent`, or `NewestFirst` given twice, make `Read` panic. So does `FromLatestEvent` together with `NewestFirst`, since the database reads from the latest event of a type only oldest first, and so does the zero value of `Subjects`, or a `nil` option. A subject for `FromLatestEvent` that does not start with a slash makes `FromLatestEvent` itself panic, and so does a value other than `ReadEverything` and `ReadNothing`.*
 
 *Note that `FromLatestEvent` looks for the event on the given subject alone, not below it, and that this subject does not have to be one of those that are read.*
 
@@ -1234,7 +1234,7 @@ catalog := newCatalog()
 
 An item carries no JSON annotations, since what a caller sees is decided by a query and its answer, not by the view (see [Handling Queries over HTTP](#handling-queries-over-http)).
 
-*Note that calling `NewInMemoryView` with `nil` as the function panics.*
+*Note that calling `NewInMemoryView` with `nil` as the function, or as one of the options, panics.*
 
 Every item has a revision of its own, which is the ID of the last event that changed it. The `RevisionIn` option makes the view keep it in a field of the item, so that a caller can hand it over to a command that uses the `OnEventID` function (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). The view sets the field whenever it changes an item, so you never set it yourself. Without the option, the view keeps the revisions to itself.
 
@@ -1592,7 +1592,7 @@ if err := architecturekit.WaitCaughtUp(ctx, run); err != nil {
 
 The options after the projection are optional. `Named` gives the projection a name, by which the observer of reconnects and the health checks report it (see [Checking Health over HTTP](#checking-health-over-http)). The `Name` function of the run returns it.
 
-*Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic.*
+*Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic, and so does a `nil` option.*
 
 `WaitCaughtUp` waits until every run has applied the events that were stored when it started, and returns `nil` then, and only then, so that `nil` always means that the views are complete. To wait for several projections, hand over all of their runs, as in `architecturekit.WaitCaughtUp(ctx, catalogRun, readersRun)`. It waits for all of them at once, not one after the other, and returns as soon as one of them ends before it has caught up:
 
@@ -2197,7 +2197,7 @@ Everything that answers through an API logs every error it does not explain to t
 api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
 ```
 
-*Note that calling `WithLogger` with `nil` panics.*
+*Note that calling `WithLogger` with `nil` panics, and so does calling `NewAPI` or `NewPublicAPI` with `nil` as one of the options.*
 
 #### Determining the User
 
@@ -2297,7 +2297,7 @@ To answer this way in a handler of your own, call the `Respond` function with th
 
 *Note that the function has the type `httpapi.ToCommand`. The request type only describes the body, so it may come from another package, for example one that the application shares with its clients.*
 
-*Note that calling `Route` with `nil` as the API or as the function, or with a `Decider` that was not created with `NewDecider`, panics, rather than failing every request.*
+*Note that calling `Route` with `nil` as the API, as the function, or as one of the options, or with a `Decider` that was not created with `NewDecider`, panics, rather than failing every request.*
 
 #### Handling Commands Without a Body
 
@@ -2537,7 +2537,7 @@ To answer this way in a handler of your own, call the `RespondResult` function w
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 
-*Note that calling `Query` with `nil` as the API, or for either function, panics, rather than failing every request.*
+*Note that calling `Query` with `nil` as the API, for either function, or as one of the options, panics, rather than failing every request.*
 
 #### Answering Queries in Your Own Format
 
@@ -3279,6 +3279,8 @@ config := server.Config{
 ```
 
 *Note that with `-short` every test that asks for a database is skipped, so that the other tests run without Docker.*
+
+*Note that a `nil` option makes `Store`, `IsolatedStore`, and the `Store` function of a `Database` panic before they ask for a database, so with `-short` as well.*
 
 *Note that the database runs the image `thenativeweb/eventsourcingdb:latest`, as the client SDK starts it, rather than a version of your choice. Docker pulls the image only if it is missing, so which release that is depends on what the machine has pulled before. The database runs without a signing key, so its events carry no signature, and a store with `WithSignatureVerification` fails to read them with an error of the category `ErrUnverified`. Signature verification can therefore not be tested with it (see [Verifying Events](#verifying-events)).*
 

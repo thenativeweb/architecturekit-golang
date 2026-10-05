@@ -45,6 +45,16 @@ func TestNewStore(t *testing.T) {
 		}
 	})
 
+	t.Run("panics on a nil option, also one that was declared but never set", func(t *testing.T) {
+		var declared StoreOption
+
+		for _, option := range []StoreOption{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: NewStore got a nil option", func() {
+				NewStore(offlineClient(t), "https://thenativeweb.io", WithStateCache(1), option)
+			})
+		}
+	})
+
 	t.Run("has no state cache without WithStateCache", func(t *testing.T) {
 		store := NewStore(offlineClient(t), "https://thenativeweb.io")
 

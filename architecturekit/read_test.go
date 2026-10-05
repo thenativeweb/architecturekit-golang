@@ -590,6 +590,16 @@ func TestReadOptionContradictions(t *testing.T) {
 		})
 	}
 
+	t.Run("a nil option panics, also one that was declared but never set", func(t *testing.T) {
+		// Read panics when it is called, as for options that contradict each
+		// other, not once the events are iterated.
+		var declared architecturekit.ReadOption
+
+		for _, option := range []architecturekit.ReadOption{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: Read got a nil option", read(architecturekit.FromEvent("1"), option))
+		}
+	})
+
 	t.Run("options that do not contradict each other do not panic", func(t *testing.T) {
 		assert.NotPanics(t, read(architecturekit.FromEvent("1"), architecturekit.UpToEvent("2"), architecturekit.NewestFirst()))
 		assert.NotPanics(t, read(architecturekit.AfterEvent("1"), architecturekit.BeforeEvent("2")))

@@ -611,6 +611,20 @@ func TestRoute(t *testing.T) {
 		})
 	})
 
+	t.Run("panics for a nil option, also one that was declared but never set", func(t *testing.T) {
+		var declared httpapi.RouteOption[note]
+		withID := httpapi.Adding(func(handled httpapi.Handled[note]) (any, error) {
+			return map[string]string{"id": handled.Command.ID}, nil
+		})
+
+		for _, option := range []httpapi.RouteOption[note]{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit/httpapi: Route got a nil option", func() {
+				httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNote, noteDecider(),
+					withID, option)
+			})
+		}
+	})
+
 	t.Run("panics for a pattern without a method, which accepts every method", func(t *testing.T) {
 		// A space in front of the path leaves the method empty, as the mux
 		// reads it.
@@ -843,6 +857,16 @@ func TestNewAPI(t *testing.T) {
 		assert.PanicsWithValue(t,
 			"architecturekit/httpapi: NewAPI needs a function that determines the user, not nil",
 			func() { httpapi.NewAPI[user](nil, nil) })
+	})
+
+	t.Run("panics on a nil option, also one that was declared but never set", func(t *testing.T) {
+		var declared httpapi.APIOption
+
+		for _, option := range []httpapi.APIOption{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit/httpapi: NewAPI got a nil option", func() {
+				httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(slog.Default()), option)
+			})
+		}
 	})
 }
 

@@ -157,7 +157,8 @@ func batchSizeOf(projection any) int {
 //
 // A nil projection, or one that is transactional as well, is a programming
 // error and panics; use CatchUpTransactionalProjection for the latter. A nil
-// pointer or a nil ProjectionFunc counts as a nil projection.
+// pointer or a nil ProjectionFunc counts as a nil projection. A nil option
+// panics as well.
 func CatchUpProjection(
 	ctx context.Context,
 	store *Store,
@@ -171,14 +172,14 @@ func CatchUpProjection(
 
 	// Catching up has no use for a name, but checks the options all the same,
 	// so that a mistake in them shows here as well.
-	_ = projectionSettingsOf(options)
+	_ = projectionSettingsOf("CatchUpProjection", options)
 
 	return catchUpOnce(ctx, store, subjects, writerFor(projection), projection)
 }
 
 // CatchUpTransactionalProjection is CatchUpProjection for a transactional
-// projection. A nil projection, including a nil pointer, is a programming
-// error and panics.
+// projection. A nil projection, including a nil pointer, or a nil option, is a
+// programming error and panics.
 func CatchUpTransactionalProjection(
 	ctx context.Context,
 	store *Store,
@@ -191,7 +192,7 @@ func CatchUpTransactionalProjection(
 
 	// Catching up has no use for a name, but checks the options all the same,
 	// so that a mistake in them shows here as well.
-	_ = projectionSettingsOf(options)
+	_ = projectionSettingsOf("CatchUpTransactionalProjection", options)
 
 	return catchUpOnce(ctx, store, subjects, &transactionalWriter{projection: projection}, projection)
 }

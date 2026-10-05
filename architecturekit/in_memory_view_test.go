@@ -80,6 +80,17 @@ func TestInMemoryView(t *testing.T) {
 		}
 	})
 
+	t.Run("panics on a nil option, also one that was declared but never set", func(t *testing.T) {
+		var declared architecturekit.InMemoryViewOption[book]
+
+		for _, option := range []architecturekit.InMemoryViewOption[book]{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: NewInMemoryView got a nil option", func() {
+				architecturekit.NewInMemoryView(func(item book) string { return item.ID },
+					architecturekit.RevisionIn(func(item *book) *string { return &item.Revision }), option)
+			})
+		}
+	})
+
 	t.Run("inserts and gets items", func(t *testing.T) {
 		view := bookView()
 

@@ -104,7 +104,8 @@ type ProjectionRun struct {
 //
 // A nil projection, or one that is transactional as well, is a programming
 // error and panics; use StartTransactionalProjection for the latter. A nil
-// pointer or a nil ProjectionFunc counts as a nil projection.
+// pointer or a nil ProjectionFunc counts as a nil projection. A nil option
+// panics as well.
 func StartProjection(
 	ctx context.Context,
 	store *Store,
@@ -116,7 +117,7 @@ func StartProjection(
 	requireProjection("StartProjection", projection)
 	refuseTransactional(projection)
 
-	return start(projectionSettingsOf(options), func(progress *ProjectionRun) error {
+	return start(projectionSettingsOf("StartProjection", options), func(progress *ProjectionRun) error {
 		return run(ctx, store, subjects, writerFor(projection), projection, progress)
 	})
 }
@@ -126,8 +127,8 @@ func StartProjection(
 // committed together with the ID of its last event. A panic in the Apply of a
 // transaction rolls the transaction back before the run ends.
 //
-// A nil projection, including a nil pointer, is a programming error and
-// panics.
+// A nil projection, including a nil pointer, or a nil option, is a programming
+// error and panics.
 func StartTransactionalProjection(
 	ctx context.Context,
 	store *Store,
@@ -138,7 +139,7 @@ func StartTransactionalProjection(
 	requireSubjects(subjects)
 	requireProjection("StartTransactionalProjection", projection)
 
-	return start(projectionSettingsOf(options), func(progress *ProjectionRun) error {
+	return start(projectionSettingsOf("StartTransactionalProjection", options), func(progress *ProjectionRun) error {
 		return run(ctx, store, subjects,
 			&transactionalWriter{projection: projection}, projection, progress)
 	})

@@ -282,9 +282,9 @@ func Varying(varies Volatile) QueryOption {
 // So is a result that can not be encoded, such as one that holds NaN, which
 // JSON has no number for.
 //
-// A nil API, toQuery, or answer is a programming error, so Query panics, as
-// Route does, rather than failing every request, with 500, or for a nil API,
-// with no answer at all.
+// A nil API, toQuery, answer, or option is a programming error, so Query
+// panics, as Route does, rather than failing every request, with 500, or for a
+// nil API, with no answer at all.
 func Query[TUser any, TRequest any, TQuery any, TResult any](
 	api *API[TUser],
 	mux *http.ServeMux,
@@ -314,9 +314,7 @@ func Query[TUser any, TRequest any, TQuery any, TResult any](
 	}
 
 	var settings querySettings
-	for _, option := range options {
-		option(&settings)
-	}
+	applyOptions("Query", &settings, options)
 
 	if settings.varies != nil && !settings.isTagged {
 		panic("architecturekit/httpapi: Varying needs Revisioned, since only a revisioned query has a tag")

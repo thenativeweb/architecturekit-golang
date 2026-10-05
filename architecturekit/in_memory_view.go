@@ -178,7 +178,7 @@ func CloneWith[TItem any](clone func(item TItem) TItem) InMemoryViewOption[TItem
 // the given function.
 //
 // A nil function is a programming error, so it panics while the view is being
-// built, rather than once the first item arrives.
+// built, rather than once the first item arrives. So does a nil option.
 func NewInMemoryView[TKey comparable, TItem any](
 	keyOf func(TItem) TKey,
 	options ...InMemoryViewOption[TItem],
@@ -188,9 +188,7 @@ func NewInMemoryView[TKey comparable, TItem any](
 	}
 
 	configured := inMemoryViewOptions[TItem]{}
-	for _, option := range options {
-		option(&configured)
-	}
+	applyOptions("NewInMemoryView", &configured, options)
 
 	return &InMemoryView[TKey, TItem]{
 		keyOf:      keyOf,

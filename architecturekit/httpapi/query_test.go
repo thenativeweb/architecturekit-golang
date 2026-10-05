@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -189,6 +191,17 @@ func TestQuery(t *testing.T) {
 				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "QUERY /notes", toListNotes, noAnswer, options...)
 			})
 		})
+
+		t.Run("a "+kind+" panics for a nil option, also one that was declared but never set", func(t *testing.T) {
+			var declared httpapi.QueryOption
+
+			for _, option := range []httpapi.QueryOption{nil, declared} {
+				assert.PanicsWithValue(t, "architecturekit/httpapi: Query got a nil option", func() {
+					httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "QUERY /notes", toListNotes, answerListNotes,
+						append(slices.Clone(options), option)...)
+				})
+			}
+		})
 	}
 }
 
@@ -275,6 +288,16 @@ func TestPublicAPI(t *testing.T) {
 		response := ask(t, mux, "/public", "")
 
 		assert.Equal(t, http.StatusOK, response.Code)
+	})
+
+	t.Run("panics on a nil option, naming itself, also one that was declared but never set", func(t *testing.T) {
+		var declared httpapi.APIOption
+
+		for _, option := range []httpapi.APIOption{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit/httpapi: NewPublicAPI got a nil option", func() {
+				httpapi.NewPublicAPI(deadStore(t), httpapi.WithLogger(slog.Default()), option)
+			})
+		}
 	})
 }
 
