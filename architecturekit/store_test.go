@@ -412,12 +412,10 @@ func TestExecute(t *testing.T) {
 					return nil, errors.New("this one cannot be migrated")
 				}))
 
-		decider := architecturekit.Decider[increment, counter]{
-			State: state,
-			Decide: func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+		decider := architecturekit.NewDecider(state,
+			func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
 				return []architecturekit.Event{incremented{By: 1}}, nil
-			},
-		}
+			})
 
 		_, err = architecturekit.Execute(context.Background(), store, decider,
 			increment{subject: subject, By: 1})
@@ -433,12 +431,10 @@ func emittingDecider(
 	state *architecturekit.State[counter],
 	events ...architecturekit.Event,
 ) architecturekit.Decider[increment, counter] {
-	return architecturekit.Decider[increment, counter]{
-		State: state,
-		Decide: func(context.Context, increment, counter) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(state,
+		func(context.Context, increment, counter) ([]architecturekit.Event, error) {
 			return events, nil
-		},
-	}
+		})
 }
 
 // fixtureRefusal returns the error with which the test fixture of

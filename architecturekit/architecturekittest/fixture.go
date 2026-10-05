@@ -40,7 +40,7 @@ func Given[TCommand architecturekit.Command, TState any](
 ) *Fixture[TCommand, TState] {
 	t.Helper()
 
-	state, err := architecturekit.Replay(decider.State, history...)
+	state, err := architecturekit.Replay(decider.State(), history...)
 	if err != nil {
 		t.Fatalf("given: %v", err)
 	}
@@ -58,7 +58,7 @@ func GivenStored[TCommand architecturekit.Command, TState any](
 ) *Fixture[TCommand, TState] {
 	t.Helper()
 
-	state, err := architecturekit.ReplayStored(decider.State, history...)
+	state, err := architecturekit.ReplayStored(decider.State(), history...)
 	if err != nil {
 		t.Fatalf("given stored: %v", err)
 	}
@@ -93,7 +93,7 @@ func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState
 		err = checkNotNil(cmd.Subject(), events)
 	}
 	if err == nil {
-		err = checkRules(f.decider.State, cmd.Subject(), events)
+		err = checkRules(f.decider.State(), cmd.Subject(), events)
 	}
 
 	var encoded [][]byte

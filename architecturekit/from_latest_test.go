@@ -18,10 +18,7 @@ func counterFromLatestState() *architecturekit.State[counter] {
 }
 
 func counterFromLatestDecider() architecturekit.Decider[increment, counter] {
-	decider := counterDecider()
-	decider.State = counterFromLatestState()
-
-	return decider
+	return architecturekit.NewDecider(counterFromLatestState(), counterDecider().Decide)
 }
 
 func TestReplayWithFromLatest(t *testing.T) {

@@ -43,12 +43,10 @@ func toUncheckedNote(_ *http.Request, request uncheckedNoteRequest, _ user) (unc
 }
 
 func uncheckedNoteDecider() architecturekit.Decider[uncheckedNote, notes] {
-	return architecturekit.Decider[uncheckedNote, notes]{
-		State: architecturekit.NewState(notes{}),
-		Decide: func(context.Context, uncheckedNote, notes) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(architecturekit.NewState(notes{}),
+		func(context.Context, uncheckedNote, notes) ([]architecturekit.Event, error) {
 			return nil, nil
-		},
-	}
+		})
 }
 
 // toNotePanicking panics while it turns a request into a command, with an
@@ -385,15 +383,10 @@ func TestMissingPartsInHandleAndAsk(t *testing.T) {
 		noAnswer    httpapi.Answer[listNotes, []noteResponse]
 	)
 
-	withoutState := noteDecider()
-	withoutState.State = nil
-
-	withoutDecide := noteDecider()
-	withoutDecide.Decide = nil
+	var zeroDecider architecturekit.Decider[note, notes]
 
 	// handleWithout lists the ways to give Handle, along with an API, a nil
-	// function or a decider without one of its parts, with the message it
-	// fails with.
+	// function or the zero Decider, with the message it fails with.
 	handleWithout := map[string]struct {
 		toCommand httpapi.ToCommand[user, noteRequest, note]
 		decider   architecturekit.Decider[note, notes]
@@ -402,13 +395,9 @@ func TestMissingPartsInHandleAndAsk(t *testing.T) {
 		"a function that turns the request into a command": {
 			toNoCommand, noteDecider(), handleWithoutCommand,
 		},
-		"a state in the decider": {
-			toNote, withoutState,
-			"architecturekit/httpapi: Handle needs a decider with a state, not one whose State is nil",
-		},
-		"a function in the decider that decides": {
-			toNote, withoutDecide,
-			"architecturekit/httpapi: Handle needs a decider with a function that decides, not one whose Decide is nil",
+		"a decider made with NewDecider": {
+			toNote, zeroDecider,
+			"architecturekit/httpapi: Handle needs a decider made with NewDecider, not the zero Decider",
 		},
 	}
 

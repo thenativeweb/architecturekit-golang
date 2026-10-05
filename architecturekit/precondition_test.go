@@ -23,12 +23,13 @@ func interrupted(
 	t.Helper()
 
 	decide := decider.Decide
-	decider.Decide = func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
-		_, err := architecturekit.Execute(ctx, store, counterDecider(), increment{subject: cmd.subject, By: 100})
-		assert.NoError(t, err, "failed to write in between")
+	decider = architecturekit.NewDecider(decider.State(),
+		func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+			_, err := architecturekit.Execute(ctx, store, counterDecider(), increment{subject: cmd.subject, By: 100})
+			assert.NoError(t, err, "failed to write in between")
 
-		return decide(ctx, cmd, current)
-	}
+			return decide(ctx, cmd, current)
+		})
 
 	return decider
 }
@@ -123,12 +124,13 @@ func TestExecuteOnStateRead(t *testing.T) {
 
 		decider := counterDecider()
 		decide := decider.Decide
-		decider.Decide = func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
-			haveRead.Done()
-			haveRead.Wait()
+		decider = architecturekit.NewDecider(decider.State(),
+			func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+				haveRead.Done()
+				haveRead.Wait()
 
-			return decide(ctx, cmd, current)
-		}
+				return decide(ctx, cmd, current)
+			})
 
 		var waitGroup sync.WaitGroup
 		results := make([]error, concurrent)

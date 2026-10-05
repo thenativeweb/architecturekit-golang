@@ -63,15 +63,13 @@ func noteDecider() architecturekit.Decider[note, notes] {
 		return current
 	})
 
-	return architecturekit.Decider[note, notes]{
-		State: state,
-		Decide: func(ctx context.Context, cmd note, current notes) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(state,
+		func(ctx context.Context, cmd note, current notes) ([]architecturekit.Event, error) {
 			if current.Count > 0 {
 				return nil, architecturekit.NewDomainError("note %s already exists", cmd.ID)
 			}
 			return []architecturekit.Event{noted{Text: cmd.Text}}, nil
-		},
-	}
+		})
 }
 
 type user struct {
@@ -583,20 +581,10 @@ func TestRoute(t *testing.T) {
 		})
 	})
 
-	t.Run("panics for a decider without a state", func(t *testing.T) {
-		decider := noteDecider()
-		decider.State = nil
+	t.Run("panics for the zero Decider, which was not made with NewDecider", func(t *testing.T) {
+		var decider architecturekit.Decider[note, notes]
 
-		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a decider with a state, not one whose State is nil", func() {
-			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNote, decider)
-		})
-	})
-
-	t.Run("panics for a decider without a function that decides", func(t *testing.T) {
-		decider := noteDecider()
-		decider.Decide = nil
-
-		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a decider with a function that decides, not one whose Decide is nil", func() {
+		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a decider made with NewDecider, not the zero Decider", func() {
 			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNote, decider)
 		})
 	})

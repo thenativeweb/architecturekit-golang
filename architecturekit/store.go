@@ -678,7 +678,7 @@ func executeOnce[TCommand Command, TState any](
 ) ([]eventsourcingdb.Event, error) {
 	subject := cmd.Subject()
 
-	state, lastEventID, err := fold(ctx, store, subject, decider.State)
+	state, lastEventID, err := fold(ctx, store, subject, decider.State())
 	if err != nil {
 		return nil, err
 	}
@@ -699,7 +699,7 @@ func executeOnce[TCommand Command, TState any](
 
 	// An event the state has no rule for would leave a subject the state can
 	// not read any more, so then none of the events is written.
-	if err := decider.State.checkRules(subject, events); err != nil {
+	if err := decider.State().checkRules(subject, events); err != nil {
 		return nil, err
 	}
 

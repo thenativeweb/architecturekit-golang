@@ -239,10 +239,11 @@ func TestEncodingEvents(t *testing.T) {
 
 		decider := emittingDecider(encodingState(), measured{Value: math.NaN()})
 		decide := decider.Decide
-		decider.Decide = func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
-			cancel()
-			return decide(ctx, cmd, current)
-		}
+		decider = architecturekit.NewDecider(decider.State(),
+			func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+				cancel()
+				return decide(ctx, cmd, current)
+			})
 
 		_, err := architecturekit.Execute(ctx, store, decider, increment{subject: subjectFor(t)})
 

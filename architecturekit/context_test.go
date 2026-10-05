@@ -111,8 +111,7 @@ func TestTheEndOfTheContext(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		decider := counterDecider()
-		decider.State = cancelingCounterState(cancel)
+		decider := architecturekit.NewDecider(cancelingCounterState(cancel), counterDecider().Decide)
 
 		// The whole history holds thirty, so ten more would exceed the limit.
 		// Its first event alone holds ten, which would let them pass.
@@ -132,10 +131,11 @@ func TestTheEndOfTheContext(t *testing.T) {
 
 		decider := counterDecider()
 		decide := decider.Decide
-		decider.Decide = func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
-			cancel()
-			return decide(ctx, cmd, current)
-		}
+		decider = architecturekit.NewDecider(decider.State(),
+			func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+				cancel()
+				return decide(ctx, cmd, current)
+			})
 
 		written, err := architecturekit.Execute(ctx, store, decider, increment{subject: subject, By: 10})
 

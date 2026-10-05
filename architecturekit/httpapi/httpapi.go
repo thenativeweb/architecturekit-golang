@@ -307,10 +307,10 @@ type Handled[TCommand any] struct {
 // http.ErrAbortHandler panics on, since net/http expects it to abort the
 // response.
 //
-// A nil API, a nil toCommand, or a decider whose State or Decide is nil, is a
-// programming error, so Handle panics, and does so first, on every request,
-// also one whose caller is unknown. Like any other panic, that comes back as
-// an error, which names the mistake rather than a nil pointer.
+// A nil API, a nil toCommand, or the zero Decider, one that was not made with
+// NewDecider, is a programming error, so Handle panics, and does so first, on
+// every request, also one whose caller is unknown. Like any other panic, that
+// comes back as an error, which names the mistake rather than a nil pointer.
 func Handle[
 	TUser any,
 	TRequest any,
@@ -330,11 +330,8 @@ func Handle[
 	if toCommand == nil {
 		panic("architecturekit/httpapi: Handle needs a function that turns the request into a command, not nil")
 	}
-	if decider.State == nil {
-		panic("architecturekit/httpapi: Handle needs a decider with a state, not one whose State is nil")
-	}
-	if decider.Decide == nil {
-		panic("architecturekit/httpapi: Handle needs a decider with a function that decides, not one whose Decide is nil")
+	if decider.State() == nil {
+		panic("architecturekit/httpapi: Handle needs a decider made with NewDecider, not the zero Decider")
 	}
 
 	user, err := UserOf(r, api)
@@ -439,9 +436,9 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 // a method, or with one of these, is a programming error, and Route panics,
 // rather than executing the command for any site that links to it.
 //
-// A nil API, a nil toCommand, or a decider whose State or Decide is nil, is a
-// programming error, so Route panics, rather than failing every request, with
-// 500, or for a nil API, with no answer at all.
+// A nil API, a nil toCommand, or the zero Decider, one that was not made with
+// NewDecider, is a programming error, so Route panics, rather than failing
+// every request, with 500, or for a nil API, with no answer at all.
 func Route[
 	TUser any,
 	TRequest any,
@@ -461,11 +458,8 @@ func Route[
 	if toCommand == nil {
 		panic("architecturekit/httpapi: Route needs a function that turns the request into a command, not nil")
 	}
-	if decider.State == nil {
-		panic("architecturekit/httpapi: Route needs a decider with a state, not one whose State is nil")
-	}
-	if decider.Decide == nil {
-		panic("architecturekit/httpapi: Route needs a decider with a function that decides, not one whose Decide is nil")
+	if decider.State() == nil {
+		panic("architecturekit/httpapi: Route needs a decider made with NewDecider, not the zero Decider")
 	}
 
 	switch method := methodOf(pattern); method {

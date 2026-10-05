@@ -33,15 +33,13 @@ func cloneSeen(current seen) seen {
 
 // seenDecider increments a subject only by an amount it has not seen yet.
 func seenDecider(state *architecturekit.State[seen]) architecturekit.Decider[increment, seen] {
-	return architecturekit.Decider[increment, seen]{
-		State: state,
-		Decide: func(_ context.Context, cmd increment, current seen) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(state,
+		func(_ context.Context, cmd increment, current seen) ([]architecturekit.Event, error) {
 			if current.Amounts[cmd.By] {
 				return nil, architecturekit.NewDomainError("%d has been seen already", cmd.By)
 			}
 			return []architecturekit.Event{incremented{By: cmd.By}}, nil
-		},
-	}
+		})
 }
 
 // listState appends every amount to a slice that the initial value holds, so

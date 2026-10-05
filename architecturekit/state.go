@@ -323,10 +323,60 @@ func (s *State[TState]) checkRules(subject string, events []Event) error {
 	return nil
 }
 
-// Decider connects a state with the decision made on it.
+// Decider connects a state with the decision made on it. Create one with
+// NewDecider.
+//
+// The zero value, such as a variable that was declared but never set, has
+// neither a state nor a decision, so its State returns nil. Handing it to
+// Execute or to the test fixture of architecturekittest is a programming
+// error and panics, and so does handing it to Route of httpapi, while Handle
+// fails with an error that names the mistake.
 type Decider[TCommand Command, TState any] struct {
-	State  *State[TState]
-	Decide func(ctx context.Context, cmd TCommand, state TState) ([]Event, error)
+	state  *State[TState]
+	decide func(ctx context.Context, cmd TCommand, state TState) ([]Event, error)
+}
+
+// NewDecider creates a decider that decides on the given state with the given
+// function. For every command, Execute reads the state of the subject of the
+// command, and decide returns the events to write, or an error if the command
+// is refused. The types of the command and the state come from the arguments,
+// so that none of them has to be given:
+//
+//	var borrowBook = architecturekit.NewDecider(bookState,
+//	  func(ctx context.Context, cmd BorrowBook, book Book) ([]architecturekit.Event, error) {
+//	    if book.IsBorrowed {
+//	      return nil, architecturekit.NewDomainError("book %s is already borrowed", cmd.BookID)
+//	    }
+//
+//	    return []architecturekit.Event{BookBorrowed{BorrowedBy: cmd.ReaderID}}, nil
+//	  })
+//
+// A nil state or a nil function is a programming error, so NewDecider panics,
+// rather than the first command failing.
+func NewDecider[TCommand Command, TState any](
+	state *State[TState],
+	decide func(ctx context.Context, cmd TCommand, state TState) ([]Event, error),
+) Decider[TCommand, TState] {
+	if state == nil {
+		panic("architecturekit: NewDecider needs a state, not nil")
+	}
+	if decide == nil {
+		panic("architecturekit: NewDecider needs a function that decides, not nil")
+	}
+
+	return Decider[TCommand, TState]{state: state, decide: decide}
+}
+
+// State returns the state the decider decides on, or nil for the zero value.
+func (d Decider[TCommand, TState]) State() *State[TState] {
+	return d.state
+}
+
+// Decide decides on a command, given the state, with the function the decider
+// was created with, and returns what that function returns. The zero value
+// has no such function, so it panics.
+func (d Decider[TCommand, TState]) Decide(ctx context.Context, cmd TCommand, state TState) ([]Event, error) {
+	return d.decide(ctx, cmd, state)
 }
 
 // Replay folds a sequence of events into a state. It is meant for tests, where

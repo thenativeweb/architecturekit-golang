@@ -192,9 +192,8 @@ var (
 )
 
 func decider() architecturekit.Decider[open, account] {
-	return architecturekit.Decider[open, account]{
-		State: accountState(),
-		Decide: func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(accountState(),
+		func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
 			if current.IsOpen {
 				return nil, fmt.Errorf("%w: owned by %s", errAccountAlreadyOpen, current.Owner)
 			}
@@ -210,8 +209,7 @@ func decider() architecturekit.Decider[open, account] {
 			}
 
 			return []architecturekit.Event{opened{Owner: cmd.Owner}}, nil
-		},
-	}
+		})
 }
 
 // emitDecider emits exactly what it was handed, which is how the tests reach
@@ -243,12 +241,10 @@ func emitDecider() architecturekit.Decider[emit, account] {
 
 // emitDeciderOn emits exactly what it was handed, on the given state.
 func emitDeciderOn(state *architecturekit.State[account]) architecturekit.Decider[emit, account] {
-	return architecturekit.Decider[emit, account]{
-		State: state,
-		Decide: func(ctx context.Context, cmd emit, _ account) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(state,
+		func(ctx context.Context, cmd emit, _ account) ([]architecturekit.Event, error) {
 			return cmd.events, nil
-		},
-	}
+		})
 }
 
 // --- the happy paths and the fixture's own failure paths ---
@@ -266,6 +262,14 @@ func TestGiven(t *testing.T) {
 		architecturekittest.Given(recorder, decider(), unheardOf{})
 
 		recorder.expectFailure(t, "given:")
+	})
+
+	t.Run("panics for the zero Decider, as for a decider without a state", func(t *testing.T) {
+		var zeroDecider architecturekit.Decider[open, account]
+
+		assert.Panics(t, func() {
+			architecturekittest.Given(t, zeroDecider)
+		})
 	})
 }
 
@@ -415,6 +419,14 @@ func TestGivenStored(t *testing.T) {
 		})
 
 		recorder.expectFailure(t, "given stored:")
+	})
+
+	t.Run("panics for the zero Decider, as for a decider without a state", func(t *testing.T) {
+		var zeroDecider architecturekit.Decider[open, account]
+
+		assert.Panics(t, func() {
+			architecturekittest.GivenStored(t, zeroDecider)
+		})
 	})
 }
 
@@ -917,10 +929,11 @@ func TestWhenChecksPreconditions(t *testing.T) {
 
 		spying := decider()
 		decide := spying.Decide
-		spying.Decide = func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
-			decided = true
-			return decide(ctx, cmd, current)
-		}
+		spying = architecturekit.NewDecider(spying.State(),
+			func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
+				decided = true
+				return decide(ctx, cmd, current)
+			})
 
 		architecturekittest.Given(t, spying).
 			When(open{Owner: "golo", preconditions: []architecturekit.Precondition{}}).

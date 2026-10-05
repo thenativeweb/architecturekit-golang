@@ -1003,8 +1003,7 @@ func projectIncrementAndReset(t *testing.T, followsResets bool) (counterItem, []
 func TestRevisionIn(t *testing.T) {
 	// The decider ignores resets, as a state does with events that matter for no
 	// decision.
-	decider := counterDecider()
-	decider.State = resetIgnoringState()
+	decider := architecturekit.NewDecider(resetIgnoringState(), counterDecider().Decide)
 
 	t.Run("panics on a nil function", func(t *testing.T) {
 		assert.PanicsWithValue(t, "architecturekit: RevisionIn needs a function, not nil", func() {
