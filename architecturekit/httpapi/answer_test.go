@@ -448,13 +448,13 @@ func TestWithLogger(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes", toListNotes, failingNotes)
+		httpapi.Query(api, mux, "QUERY /notes", toListNotes, failingNotes)
 
 		response := ask(t, mux, "/notes", "golo")
 
 		require.Equal(t, http.StatusInternalServerError, response.Code)
 		assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
-		assert.Contains(t, logs.String(), `route="GET /notes"`)
+		assert.Contains(t, logs.String(), `route="QUERY /notes"`)
 		assert.Contains(t, logs.String(), "the index is gone")
 	})
 
@@ -462,28 +462,28 @@ func TestWithLogger(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes", toListNotes, failingNotes, httpapi.Revisioned(noteView(), time.Second))
+		httpapi.Query(api, mux, "QUERY /notes", toListNotes, failingNotes, httpapi.Revisioned(noteView(), time.Second))
 
 		response := ask(t, mux, "/notes", "golo")
 
 		require.Equal(t, http.StatusInternalServerError, response.Code)
-		assert.Contains(t, logs.String(), `route="GET /notes"`)
+		assert.Contains(t, logs.String(), `route="QUERY /notes"`)
 	})
 
 	t.Run("logs a failure while waiting for a revision, with its route", func(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes", toListNotes, answerListNotes, httpapi.Revisioned(brokenView{}, time.Second))
+		httpapi.Query(api, mux, "QUERY /notes", toListNotes, answerListNotes, httpapi.Revisioned(brokenView{}, time.Second))
 
-		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request := httptest.NewRequest("QUERY", "/notes", nil)
 		request.Header.Set("X-User", "golo")
 		request.Header.Set(httpapi.HeaderWaitFor, "7")
 		recorder := httptest.NewRecorder()
 		mux.ServeHTTP(recorder, request)
 
 		require.Equal(t, http.StatusInternalServerError, recorder.Code)
-		assert.Contains(t, logs.String(), `route="GET /notes"`)
+		assert.Contains(t, logs.String(), `route="QUERY /notes"`)
 		assert.Contains(t, logs.String(), "the view is broken")
 	})
 

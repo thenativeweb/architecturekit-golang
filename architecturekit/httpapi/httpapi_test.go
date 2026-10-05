@@ -644,8 +644,8 @@ func TestRoute(t *testing.T) {
 			{pattern: "GET /note", method: http.MethodGet},
 			{pattern: "HEAD /note", method: http.MethodHead},
 			{pattern: "OPTIONS /note", method: http.MethodOptions},
-			// QUERY asks with a body and changes nothing, like GET, which is how
-			// Revisioned treats it as well.
+			// QUERY asks with a body and changes nothing, like GET, which is why
+			// queries are asked with it (see Query).
 			{pattern: "QUERY /note", method: "QUERY"},
 			{pattern: "GET example.com/note", method: http.MethodGet},
 			// The mux takes a tab for a space.
@@ -954,13 +954,13 @@ func TestFailingUserFrom(t *testing.T) {
 		},
 		"a query": func(t *testing.T, api *httpapi.API[user]) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
-			httpapi.Query(api, mux, "GET /notes", toListNotes, answerListNotes)
+			httpapi.Query(api, mux, "QUERY /notes", toListNotes, answerListNotes)
 
 			return ask(t, mux, "/notes", "golo")
 		},
 		"a revisioned query": func(t *testing.T, api *httpapi.API[user]) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
-			httpapi.Query(api, mux, "GET /notes", toListNotes, answerListNotes, httpapi.Revisioned(noteView(), time.Second))
+			httpapi.Query(api, mux, "QUERY /notes", toListNotes, answerListNotes, httpapi.Revisioned(noteView(), time.Second))
 
 			return ask(t, mux, "/notes", "golo")
 		},
@@ -1048,13 +1048,13 @@ func TestFailingToCommandAndToQuery(t *testing.T) {
 		},
 		"a query": func(t *testing.T, api *httpapi.API[user], err error) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
-			httpapi.Query(api, mux, "GET /notes", failingToQuery(err), answerListNotes)
+			httpapi.Query(api, mux, "QUERY /notes", failingToQuery(err), answerListNotes)
 
 			return ask(t, mux, "/notes", "golo")
 		},
 		"a revisioned query": func(t *testing.T, api *httpapi.API[user], err error) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
-			httpapi.Query(api, mux, "GET /notes", failingToQuery(err), answerListNotes, httpapi.Revisioned(noteView(), time.Second))
+			httpapi.Query(api, mux, "QUERY /notes", failingToQuery(err), answerListNotes, httpapi.Revisioned(noteView(), time.Second))
 
 			return ask(t, mux, "/notes", "golo")
 		},

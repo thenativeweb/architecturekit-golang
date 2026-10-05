@@ -16,6 +16,10 @@ import (
 // ErrNotFound means the query asked for something that does not exist.
 var ErrNotFound = errors.New("not found")
 
+// methodQuery is QUERY, the method that a query is asked with (see Query).
+// net/http has no name for it yet.
+const methodQuery = "QUERY"
+
 // ToQuery turns request data and the user into a query. It is the read
 // side's counterpart to ToCommand, without a decoded body, since a query
 // usually reads from the URL. One whose input does not fit there reads the
@@ -85,19 +89,15 @@ type querySettings struct {
 
 // Revisioned has a query wait for the revision a caller asks for, for at most
 // the given time (DefaultWait, unless there is a reason for another), answer
-// 304 when nothing has changed, or 412 for a method other than GET, HEAD and
-// QUERY, and tag the answer with the revision of the view it served.
+// 304 when nothing has changed, and tag the answer with the revision of the
+// view it served.
 //
 // Whether nothing has changed, it tells from If-None-Match, which it reads
 // the way HTTP has it: as a list of tags, or *, compared weakly, so that a tag
 // that a proxy marked as weak while compressing the answer still matches.
-//
-// HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, a method
-// that asks with a body and changes nothing, which it treats like GET
-// (draft-ietf-httpbis-safe-method-w-body), and 412 for every other method. So
-// a query that is sent as POST, since its input does not fit into the query
-// string, is answered with 412 when nothing has changed. It carries the tag
-// and the revision, as 304 does, and a message.
+// HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, which it
+// treats like GET (draft-ietf-httpbis-safe-method-w-body), also when the
+// query asks with a body. It carries the tag and the revision, and no body.
 //
 // The tag holds the query, so two callers get the same tag only if they ask
 // the same: a query that holds the user, or anything else that tells callers
@@ -195,9 +195,19 @@ func Varying(varies Volatile) QueryOption {
 // Query wires a query to the mux and answers in the kit's default format,
 // which is the result itself, with Cache-Control: no-store, so that no cache
 // keeps it. With Revisioned, it reads its own writes and answers 304 when
-// nothing has changed, or 412 for a method other than GET, HEAD and QUERY;
-// with Varying in addition, its tag changes with what the answer takes from
-// elsewhere.
+// nothing has changed; with Varying in addition, its tag changes with what the
+// answer takes from elsewhere.
+//
+// A query is asked with QUERY, a method that changes nothing, like GET, but
+// may carry a body (draft-ietf-httpbis-safe-method-w-body), as in the API of
+// EventSourcingDB. So the pattern names it, as in QUERY /api/books, and
+// toQuery reads the input of the query from the path, the query string, or
+// the body, with BodyOf. A query without input that refuses a body reads it
+// as NoBody, which accepts one that is empty, or {} (see NoBody). A pattern
+// without a method, which accepts every method, or with another method than
+// QUERY, is a programming error, so Query panics, as Route does for a method
+// that must not change anything. A handler of your own that asks with Ask may
+// use any method, such as GET for a download.
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack, as with Route.
@@ -223,6 +233,16 @@ func Query[TUser any, TQuery any, TResult any](
 	}
 	if answer == nil {
 		panic("architecturekit/httpapi: Query needs a function that answers the query, not nil")
+	}
+
+	switch method := methodOf(pattern); method {
+	case methodQuery:
+	case "":
+		panic(fmt.Sprintf("architecturekit/httpapi: Query needs a pattern that names the method QUERY, not %q, "+
+			"which accepts every method", pattern))
+	default:
+		panic(fmt.Sprintf("architecturekit/httpapi: Query needs a pattern whose method is QUERY, not %q, "+
+			"since a query is asked with QUERY rather than %s", pattern, method))
 	}
 
 	var settings querySettings

@@ -60,7 +60,7 @@ func queryMux(t *testing.T) *http.ServeMux {
 
 	api := httpapi.NewAPI(deadStore(t), userFrom)
 	mux := http.NewServeMux()
-	httpapi.Query(api, mux, "GET /notes", toListNotes, answerListNotes)
+	httpapi.Query(api, mux, "QUERY /notes", toListNotes, answerListNotes)
 
 	return mux
 }
@@ -68,7 +68,7 @@ func queryMux(t *testing.T) *http.ServeMux {
 func ask(t *testing.T, mux *http.ServeMux, path, asUser string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request := httptest.NewRequest("QUERY", path, nil)
 	if asUser != "" {
 		request.Header.Set("X-User", asUser)
 	}
@@ -117,7 +117,7 @@ func TestQuery(t *testing.T) {
 
 		// A single-item lookup that finds nothing reports query.ErrNoItems, which
 		// the HTTP layer turns into 404 without the application saying so.
-		httpapi.Query(api, mux, "GET /notes/{id}", toListNotes,
+		httpapi.Query(api, mux, "QUERY /notes/{id}", toListNotes,
 			func(context.Context, listNotes) (noteResponse, error) {
 				return noteResponse{}, query.ErrNoItems
 			})
@@ -134,7 +134,7 @@ func TestQuery(t *testing.T) {
 		api := httpapi.NewAPI(deadStore(t), userFrom)
 		mux := http.NewServeMux()
 
-		httpapi.Query(api, mux, "GET /restricted",
+		httpapi.Query(api, mux, "QUERY /restricted",
 			func(*http.Request, user) (listNotes, error) {
 				return listNotes{}, errors.Join(httpapi.ErrForbidden, errors.New("not for you"))
 			},
@@ -149,7 +149,7 @@ func TestQuery(t *testing.T) {
 		api := httpapi.NewAPI(deadStore(t), userFrom)
 		mux := http.NewServeMux()
 
-		httpapi.Query(api, mux, "GET /rule",
+		httpapi.Query(api, mux, "QUERY /rule",
 			func(*http.Request, user) (listNotes, error) {
 				return listNotes{}, architecturekit.NewDomainError("that combination makes no sense")
 			},
@@ -174,19 +174,19 @@ func TestQuery(t *testing.T) {
 			// Without the panic, every request panics again while the panic is
 			// answered, and net/http closes the connection without an answer.
 			assert.PanicsWithValue(t, "architecturekit/httpapi: Query needs the API, not nil", func() {
-				httpapi.Query(noAPI, http.NewServeMux(), "GET /notes", toListNotes, answerListNotes, options...)
+				httpapi.Query(noAPI, http.NewServeMux(), "QUERY /notes", toListNotes, answerListNotes, options...)
 			})
 		})
 
 		t.Run("a "+kind+" panics for a nil function that turns the request into a query", func(t *testing.T) {
 			assert.PanicsWithValue(t, "architecturekit/httpapi: Query needs a function that turns the request into a query, not nil", func() {
-				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "GET /notes", toNothing, answerListNotes, options...)
+				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "QUERY /notes", toNothing, answerListNotes, options...)
 			})
 		})
 
 		t.Run("a "+kind+" panics for a nil function that answers the query", func(t *testing.T) {
 			assert.PanicsWithValue(t, "architecturekit/httpapi: Query needs a function that answers the query, not nil", func() {
-				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "GET /notes", toListNotes, noAnswer, options...)
+				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "QUERY /notes", toListNotes, noAnswer, options...)
 			})
 		})
 	}
@@ -206,7 +206,7 @@ func TestQueryRefusals(t *testing.T) {
 		wire := func(logs *bytes.Buffer, answer httpapi.Answer[listNotes, []noteResponse]) *http.ServeMux {
 			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(logs)))
 			mux := http.NewServeMux()
-			httpapi.Query(api, mux, "GET /notes", toListNotes, answer, options...)
+			httpapi.Query(api, mux, "QUERY /notes", toListNotes, answer, options...)
 
 			return mux
 		}
@@ -218,7 +218,7 @@ func TestQueryRefusals(t *testing.T) {
 
 			assert.Equal(t, http.StatusUnauthorized, response.Code)
 			assert.JSONEq(t, `{"message": "unauthorized"}`, response.Body.String())
-			assertRefusalLogged(t, logs.String(), "GET", "GET /notes", http.StatusUnauthorized, "no user given")
+			assertRefusalLogged(t, logs.String(), "QUERY", "QUERY /notes", http.StatusUnauthorized, "no user given")
 		})
 
 		t.Run(name+" answers 409 with a fixed text, and logs the details", func(t *testing.T) {
@@ -228,7 +228,7 @@ func TestQueryRefusals(t *testing.T) {
 
 			assert.Equal(t, http.StatusConflict, response.Code)
 			assert.JSONEq(t, `{"message": "conflict: the data has changed since it was read"}`, response.Body.String())
-			assertRefusalLogged(t, logs.String(), "GET", "GET /notes", http.StatusConflict, "/tenants/acme-bank/books/42")
+			assertRefusalLogged(t, logs.String(), "QUERY", "QUERY /notes", http.StatusConflict, "/tenants/acme-bank/books/42")
 		})
 	}
 }
@@ -265,7 +265,7 @@ func TestPublicAPI(t *testing.T) {
 		api := httpapi.NewPublicAPI(deadStore(t))
 		mux := http.NewServeMux()
 
-		httpapi.Query(api, mux, "GET /public",
+		httpapi.Query(api, mux, "QUERY /public",
 			func(r *http.Request, _ httpapi.NoUser) (listNotes, error) {
 				return listNotes{}, nil
 			},
@@ -375,7 +375,7 @@ func TestResultsThatCanNotBeEncoded(t *testing.T) {
 				var logs bytes.Buffer
 				api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 				mux := http.NewServeMux()
-				httpapi.Query(api, mux, "GET /notes", allNotes, answer, options...)
+				httpapi.Query(api, mux, "QUERY /notes", allNotes, answer, options...)
 
 				response := ask(t, mux, "/notes", "golo")
 
@@ -387,8 +387,8 @@ func TestResultsThatCanNotBeEncoded(t *testing.T) {
 
 				assert.Equal(t, 1, strings.Count(logs.String(), "\n"), "want exactly one entry")
 				assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: internal failure"`)
-				assert.Contains(t, logs.String(), "method=GET")
-				assert.Contains(t, logs.String(), `route="GET /notes"`)
+				assert.Contains(t, logs.String(), "method=QUERY")
+				assert.Contains(t, logs.String(), `route="QUERY /notes"`)
 				assert.Contains(t, logs.String(), "httpapi: encoding the result")
 			})
 		}
@@ -414,4 +414,172 @@ func seenView(revision string) *architecturekit.InMemoryView[string, noteItem] {
 	view.Seen(revision)
 
 	return view
+}
+
+// A query is asked with QUERY, a method that asks with a body and changes
+// nothing, as the API of EventSourcingDB does.
+
+func TestQueryMethod(t *testing.T) {
+	for kind, options := range map[string]func() []httpapi.QueryOption{
+		"a query": func() []httpapi.QueryOption { return nil },
+		"a revisioned query": func() []httpapi.QueryOption {
+			return []httpapi.QueryOption{httpapi.Revisioned(seenView("4"), time.Second)}
+		},
+	} {
+		wire := func(pattern string) func() {
+			return func() {
+				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), pattern, allNotes, countNotesIn(noteView()), options()...)
+			}
+		}
+
+		t.Run(kind+" panics for a pattern without a method, which accepts every method", func(t *testing.T) {
+			// A space in front of the path leaves the method empty, as the mux
+			// reads it.
+			for _, pattern := range []string{"/notes", "example.com/notes", " /notes"} {
+				t.Run(pattern, func(t *testing.T) {
+					assert.PanicsWithValue(t,
+						fmt.Sprintf("architecturekit/httpapi: Query needs a pattern that names the method QUERY, not %q, "+
+							"which accepts every method", pattern),
+						wire(pattern))
+				})
+			}
+		})
+
+		t.Run(kind+" panics for a pattern with another method", func(t *testing.T) {
+			for _, test := range []struct {
+				pattern, method string
+			}{
+				{pattern: "GET /notes", method: http.MethodGet},
+				{pattern: "HEAD /notes", method: http.MethodHead},
+				{pattern: "POST /notes", method: http.MethodPost},
+				{pattern: "OPTIONS /notes", method: http.MethodOptions},
+				{pattern: "GET example.com/notes", method: http.MethodGet},
+				// The mux takes a tab for a space.
+				{pattern: "GET\t/notes", method: http.MethodGet},
+				// The mux tells methods apart by case.
+				{pattern: "query /notes", method: "query"},
+			} {
+				t.Run(test.pattern, func(t *testing.T) {
+					assert.PanicsWithValue(t,
+						fmt.Sprintf("architecturekit/httpapi: Query needs a pattern whose method is QUERY, not %q, "+
+							"since a query is asked with QUERY rather than %s", test.pattern, test.method),
+						wire(test.pattern))
+				})
+			}
+		})
+
+		t.Run(kind+" panics for a nil function first, as for every other mistake in the wiring", func(t *testing.T) {
+			var toNothing httpapi.ToQuery[user, countNotes]
+
+			assert.PanicsWithValue(t, "architecturekit/httpapi: Query needs a function that turns the request into a query, not nil", func() {
+				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "GET /notes", toNothing, countNotesIn(noteView()), options()...)
+			})
+		})
+
+		t.Run(kind+" answers a pattern with QUERY", func(t *testing.T) {
+			for _, pattern := range []string{"QUERY /notes", "QUERY example.com/notes", "QUERY\t/notes"} {
+				t.Run(pattern, func(t *testing.T) {
+					mux := http.NewServeMux()
+					httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, pattern, allNotes, countNotesIn(noteView()), options()...)
+
+					response := askNotes(mux, nil)
+
+					assert.Equal(t, http.StatusOK, response.Code)
+					assert.Equal(t, "0\n", response.Body.String())
+				})
+			}
+		})
+
+		t.Run(kind+" answers no other method", func(t *testing.T) {
+			isAsked := false
+			mux := http.NewServeMux()
+			httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes", allNotes,
+				func(context.Context, countNotes) (int, error) {
+					isAsked = true
+					return 0, nil
+				}, options()...)
+
+			for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodOptions} {
+				t.Run(method, func(t *testing.T) {
+					request := httptest.NewRequest(method, "/notes", nil)
+					request.Header.Set("X-User", "golo")
+					response := serve(t, mux, request)
+
+					assert.Equal(t, http.StatusMethodNotAllowed, response.Code)
+					assert.Equal(t, "QUERY", response.Header().Get("Allow"))
+				})
+			}
+
+			assert.False(t, isAsked, "the query must only be asked with QUERY")
+		})
+	}
+
+	t.Run("a query without input accepts a body that is empty, or {}", func(t *testing.T) {
+		// A query without input reads its body with BodyOf, as NoBody, so that a
+		// body that asks for something it does not do is refused.
+		mux := http.NewServeMux()
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes",
+			func(r *http.Request, _ user) (httpapi.NoBody, error) {
+				return httpapi.BodyOf[httpapi.NoBody](r)
+			},
+			func(context.Context, httpapi.NoBody) ([]noteResponse, error) {
+				return []noteResponse{{Text: "first"}}, nil
+			})
+
+		for label, test := range map[string]struct {
+			body, contentType string
+			status            int
+			message           string
+		}{
+			"an empty body":                  {body: "", contentType: "", status: http.StatusOK},
+			"an empty body, said to be JSON": {body: "", contentType: "application/json", status: http.StatusOK},
+			"{}":                             {body: "{}", contentType: "application/json", status: http.StatusOK},
+			"{}, without a Content-Type":     {body: "{}", contentType: "", status: http.StatusOK},
+			"a body that asks for something": {
+				body: `{"limit":2}`, contentType: "application/json", status: http.StatusBadRequest,
+				message: "malformed request: this route takes no body, so the body has to be empty, or {}",
+			},
+		} {
+			t.Run(label, func(t *testing.T) {
+				request := httptest.NewRequest("QUERY", "/notes", strings.NewReader(test.body))
+				request.Header.Set("X-User", "golo")
+				if test.contentType != "" {
+					request.Header.Set("Content-Type", test.contentType)
+				}
+
+				response := serve(t, mux, request)
+
+				require.Equal(t, test.status, response.Code, response.Body.String())
+				if test.status == http.StatusOK {
+					assert.JSONEq(t, `[{"text": "first"}]`, response.Body.String())
+				} else {
+					assert.JSONEq(t, messageOf(t, test.message), response.Body.String())
+				}
+			})
+		}
+	})
+
+	t.Run("a handler of your own asks with any method, such as GET for a download", func(t *testing.T) {
+		api := httpapi.NewAPI(deadStore(t), userFrom)
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /notes/export", func(w http.ResponseWriter, r *http.Request) {
+			notes, err := httpapi.Ask(r, api, toListNotes, answerListNotes)
+			if err != nil {
+				httpapi.RespondError(w, r, api, err)
+				return
+			}
+
+			w.Header().Set("Content-Type", "text/plain")
+			for _, note := range notes {
+				_, _ = fmt.Fprintln(w, note.Text)
+			}
+		})
+
+		request := httptest.NewRequest(http.MethodGet, "/notes/export?limit=2", nil)
+		request.Header.Set("X-User", "golo")
+		response := serve(t, mux, request)
+
+		assert.Equal(t, http.StatusOK, response.Code)
+		assert.Equal(t, "first\nsecond\n", response.Body.String())
+	})
 }

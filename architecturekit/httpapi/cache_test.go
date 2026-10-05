@@ -29,13 +29,13 @@ func TestCacheControl(t *testing.T) {
 		return func(context.Context, countNotes) (int, error) { return 0, err }
 	}
 
-	// queried wires a query at GET /notes, with the given options, and asks
+	// queried wires a query at QUERY /notes, with the given options, and asks
 	// it, with the given headers.
 	queried := func(t *testing.T, answer httpapi.Answer[countNotes, int], headers map[string]string, options ...httpapi.QueryOption) *httptest.ResponseRecorder {
 		t.Helper()
 
 		mux := http.NewServeMux()
-		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&bytes.Buffer{}))), mux, "GET /notes", allNotes, answer, options...)
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&bytes.Buffer{}))), mux, "QUERY /notes", allNotes, answer, options...)
 
 		return askNotes(mux, headers)
 	}
@@ -66,7 +66,7 @@ func TestCacheControl(t *testing.T) {
 		"a query whose caller is unknown": func(t *testing.T) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
 			httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&bytes.Buffer{}))),
-				mux, "GET /notes", allNotes, countNotesIn(noteView()))
+				mux, "QUERY /notes", allNotes, countNotesIn(noteView()))
 
 			return ask(t, mux, "/notes", "")
 		},
@@ -96,7 +96,7 @@ func TestCacheControl(t *testing.T) {
 			mux := http.NewServeMux()
 			view := seenView("4")
 			httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&bytes.Buffer{}))),
-				mux, "GET /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
+				mux, "QUERY /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
 
 			return ask(t, mux, "/notes", "")
 		},
@@ -149,7 +149,7 @@ func TestCacheControl(t *testing.T) {
 	t.Run("a revisioned query that succeeded may be kept, if it is asked about again", func(t *testing.T) {
 		view := seenView("4")
 		mux := http.NewServeMux()
-		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "GET /notes", allNotes, countNotesIn(view),
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes", allNotes, countNotesIn(view),
 			httpapi.Revisioned(view, time.Second))
 
 		first := askNotes(mux, nil)
