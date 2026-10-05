@@ -2,6 +2,7 @@ package architecturekit
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -74,13 +75,8 @@ type ProjectionRun struct {
 //	run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("/books"), catalogProjection,
 //	  architecturekit.Named("catalog"))
 //
-//	select {
-//	case <-run.CaughtUp():
-//	case <-run.Done():
-//	  if err := run.Err(); err != nil {
-//	    return err
-//	  }
-//	  return ctx.Err()
+//	if err := run.WaitCaughtUp(ctx); err != nil {
+//	  return err
 //	}
 //
 // If reading fails, or if the database ends the stream, for example on a
@@ -90,10 +86,10 @@ type ProjectionRun struct {
 // handled the same way, so the event is tried again. Only a failure that
 // trying again will not fix, such as any other error of Apply, ends the run,
 // and Err returns it. Ending the context is how a projection is stopped, so
-// Err returns nil then. That is why the example returns the error of the
-// context if Err returns nil: a run whose context ends before it has caught
-// up, for example on a timeout while the database can not be reached, has not
-// caught up, and returning Err alone would look like success.
+// Err returns nil then. A run whose context ends before it has caught up, for
+// example on a timeout while the database can not be reached, has not caught
+// up all the same, which is why WaitCaughtUp returns an error then, rather
+// than nil, which would look like success.
 //
 // A panic in the projection, such as one in Apply that writes into a nil map,
 // ends the run as well, rather than the whole process. Err then returns an
@@ -174,7 +170,7 @@ func (r *ProjectionRun) Name() string {
 // CaughtUp is closed once the run has applied the events that were stored
 // when it started. It is closed only once, and stays closed while the run
 // reconnects later on. If the run ends before it catches up, it is never
-// closed, so wait for Done as well.
+// closed, so wait for Done as well, or use WaitCaughtUp, which does both.
 func (r *ProjectionRun) CaughtUp() <-chan struct{} {
 	return r.caughtUp
 }
@@ -185,13 +181,61 @@ func (r *ProjectionRun) Done() <-chan struct{} {
 }
 
 // Err returns why the run has ended, once Done is closed, and nil before. It is
-// nil as well if the run ended because its context did, so a caller that waits
-// for CaughtUp takes the error of the context then (see StartProjection).
+// nil as well if the run ended because its context did, since that is how a
+// projection is stopped. A run that ended that way before it caught up has not
+// caught up all the same, which WaitCaughtUp tells.
 func (r *ProjectionRun) Err() error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
 	return r.err
+}
+
+// WaitCaughtUp waits until the run has caught up, and returns nil then. It
+// returns nil only then, so that an error that is nil always means that the
+// run has caught up:
+//
+//   - If the run ends before it catches up, it returns the error the run ended
+//     with (see Err).
+//   - If the run ends without an error before it catches up, because its own
+//     context ended, it returns an error that wraps context.Canceled and says
+//     that the run stopped before it caught up.
+//   - If ctx ends first, it returns the error of ctx.
+//
+// A run that has caught up counts as caught up, even if it has ended since, or
+// ctx has ended. If several of the other cases have happened by the time it
+// looks, the error the run ended with comes first, since it tells why, and the
+// error of ctx comes next, since a run without an error usually ended because
+// the same context did, as on a timeout, whose error tells more than
+// context.Canceled.
+func (r *ProjectionRun) WaitCaughtUp(ctx context.Context) error {
+	select {
+	case <-r.caughtUp:
+	case <-r.done:
+	case <-ctx.Done():
+	}
+
+	// Select picks at random among the cases that are ready, and more than one
+	// may be, so what has happened is looked at again, in a fixed order.
+	select {
+	case <-r.caughtUp:
+		return nil
+	default:
+	}
+
+	if err := r.Err(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	projection := "the projection"
+	if r.name != "" {
+		projection = fmt.Sprintf("the projection %q", r.name)
+	}
+
+	return fmt.Errorf("architecturekit: %s stopped before it caught up: %w", projection, context.Canceled)
 }
 
 // Status returns where the run stands. It is safe to call from any goroutine.

@@ -2,12 +2,14 @@ package architecturekit_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
 // startInBackground starts the projection and returns the run, and a function
@@ -258,5 +260,225 @@ func TestStartTransactionalProjection(t *testing.T) {
 
 		cancel()
 		waitForClosed(t, run.Done(), "Done")
+	})
+}
+
+// waitingContext ends with the test, and after five seconds at the latest, so
+// that a wait that never returns fails the test rather than hang it.
+func waitingContext(t *testing.T) context.Context {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+
+	return ctx
+}
+
+// endedContext is a context that has ended already, on its deadline, so that
+// its error tells it apart from one that was canceled.
+func endedContext(t *testing.T) context.Context {
+	t.Helper()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now())
+	t.Cleanup(cancel)
+
+	return ctx
+}
+
+// waitInBackground starts waiting for the run to catch up, and returns a
+// function that returns what waiting returned.
+func waitInBackground(t *testing.T, ctx context.Context, run *architecturekit.ProjectionRun) func(t *testing.T) error {
+	t.Helper()
+
+	waited := make(chan error, 1)
+	go func() { waited <- run.WaitCaughtUp(ctx) }()
+
+	return func(t *testing.T) error {
+		t.Helper()
+
+		select {
+		case err := <-waited:
+			return err
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "WaitCaughtUp did not return in time")
+			return nil
+		}
+	}
+}
+
+// failingOn applies every event but one, on which it fails in a way that
+// retrying will not fix.
+type failingOn struct {
+	collector
+
+	id string
+}
+
+func (c *failingOn) Apply(ctx context.Context, event eventsourcingdb.Event) error {
+	if event.ID == c.id {
+		return errors.New("the view is broken")
+	}
+
+	return c.collector.Apply(ctx, event)
+}
+
+func TestWaitCaughtUp(t *testing.T) {
+	t.Run("returns nil once the run has caught up", func(t *testing.T) {
+		database := &fakeDatabase{
+			events:       []int{0, 1, 2},
+			endObserving: func(int) bool { return false },
+		}
+		target := &collector{}
+
+		run, stop := startInBackground(t,
+			architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io"), target)
+		defer stop(t)
+
+		require.NoError(t, run.WaitCaughtUp(waitingContext(t)))
+
+		assert.True(t, isClosed(run.CaughtUp()))
+		assert.Equal(t, []string{"0", "1", "2"}, target.IDs(), "everything that was stored at the start has been applied")
+	})
+
+	t.Run("returns nil for a run that has caught up, although it has ended since, and so has the context", func(t *testing.T) {
+		database := &fakeDatabase{
+			events:       []int{0},
+			endObserving: func(int) bool { return false },
+		}
+
+		run, stop := startInBackground(t,
+			architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io"), &collector{})
+
+		waitForClosed(t, run.CaughtUp(), "CaughtUp")
+		stop(t)
+
+		// Select picks at random among the cases that are ready, so a single
+		// attempt could pass by chance.
+		for range 100 {
+			require.NoError(t, run.WaitCaughtUp(waitingContext(t)))
+			require.NoError(t, run.WaitCaughtUp(endedContext(t)))
+		}
+	})
+
+	t.Run("returns nil for a run that has caught up, although it has failed since", func(t *testing.T) {
+		database := &fakeDatabase{
+			events:       []int{0},
+			endObserving: func(int) bool { return false },
+		}
+		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io")
+
+		run := architecturekit.StartProjection(context.Background(), store, architecturekit.ExactSubject("/test"),
+			&failingOn{id: "1"})
+
+		waitForClosed(t, run.CaughtUp(), "CaughtUp")
+		database.add(1)
+		waitForClosed(t, run.Done(), "Done")
+		require.Error(t, run.Err())
+
+		for range 100 {
+			require.NoError(t, run.WaitCaughtUp(waitingContext(t)))
+			require.NoError(t, run.WaitCaughtUp(endedContext(t)))
+		}
+	})
+
+	t.Run("returns the error of a run that ends before it has caught up", func(t *testing.T) {
+		database := &fakeDatabase{
+			events:       []int{0},
+			endObserving: func(int) bool { return true },
+		}
+		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io")
+
+		run := architecturekit.StartProjection(context.Background(), store, architecturekit.ExactSubject("/test"), failingCollector{})
+
+		err := run.WaitCaughtUp(waitingContext(t))
+
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "the view is broken", "expected the failure of Apply")
+		assert.Equal(t, run.Err(), err)
+		assert.False(t, isClosed(run.CaughtUp()))
+	})
+
+	t.Run("returns the error of a run that has ended, although the context has ended as well", func(t *testing.T) {
+		database := &fakeDatabase{
+			events:       []int{0},
+			endObserving: func(int) bool { return true },
+		}
+		store := architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io")
+
+		run := architecturekit.StartProjection(context.Background(), store, architecturekit.ExactSubject("/test"), failingCollector{})
+		waitForClosed(t, run.Done(), "Done")
+
+		for range 100 {
+			err := run.WaitCaughtUp(endedContext(t))
+
+			require.Error(t, err)
+			require.ErrorContains(t, err, "the view is broken", "the failure of the run says more than the end of the context")
+		}
+	})
+
+	t.Run("returns an error that wraps context.Canceled for a run whose context ends before it has caught up", func(t *testing.T) {
+		run, stop := startInBackground(t, reconnectingStore(deadClient(t), &reconnects{}), &collector{})
+
+		waited := waitInBackground(t, waitingContext(t), run)
+		stop(t)
+		err := waited(t)
+
+		require.Error(t, err, "a run that has not caught up must never look like one that has")
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.EqualError(t, err, "architecturekit: the projection stopped before it caught up: context canceled")
+		assert.NoError(t, run.Err(), "ending through the context is not a failure")
+		assert.False(t, isClosed(run.CaughtUp()))
+	})
+
+	t.Run("names the projection that stopped before it caught up", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		run := architecturekit.StartProjection(ctx, reconnectingStore(deadClient(t), &reconnects{}),
+			architecturekit.ExactSubject("/test"), &collector{}, architecturekit.Named("catalog"))
+
+		cancel()
+		waitForClosed(t, run.Done(), "Done")
+
+		err := run.WaitCaughtUp(waitingContext(t))
+
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.EqualError(t, err, `architecturekit: the projection "catalog" stopped before it caught up: context canceled`)
+	})
+
+	t.Run("returns the error of the context if it ends first", func(t *testing.T) {
+		run, stop := startInBackground(t, reconnectingStore(deadClient(t), &reconnects{}), &collector{})
+		defer stop(t)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+
+		err := waitInBackground(t, ctx, run)(t)
+
+		assert.Equal(t, context.DeadlineExceeded, err)
+		assert.False(t, isClosed(run.Done()), "the run goes on, since only waiting for it has ended")
+		assert.False(t, isClosed(run.CaughtUp()))
+	})
+
+	t.Run("returns the error of the context that has ended already", func(t *testing.T) {
+		run, stop := startInBackground(t, reconnectingStore(deadClient(t), &reconnects{}), &collector{})
+		defer stop(t)
+
+		assert.Equal(t, context.DeadlineExceeded, waitInBackground(t, endedContext(t), run)(t))
+	})
+
+	t.Run("returns the error of the context it shares with the run, as on a timeout while the database can not be reached", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+
+		run := architecturekit.StartProjection(ctx, reconnectingStore(deadClient(t), &reconnects{}),
+			architecturekit.ExactSubject("/test"), &collector{})
+		waitForClosed(t, run.Done(), "Done")
+
+		// The run has ended without an error, because its context has, and the
+		// context of waiting is that same one, so its error says why.
+		for range 100 {
+			assert.Equal(t, context.DeadlineExceeded, run.WaitCaughtUp(ctx))
+		}
 	})
 }
