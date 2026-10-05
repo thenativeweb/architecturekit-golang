@@ -2035,10 +2035,13 @@ if err != nil {
 
 *Note that running out of time is an error here. The `Await` function of the `httpapi` package, which waits for the revision an HTTP request asks for, takes it for none instead, and returns `nil`, so that the handler answers with what the view holds (see [Waiting for a Revision in a Handler of Your Own](#waiting-for-a-revision-in-a-handler-of-your-own)).*
 
-To get the current revision of a view, call the `Revision` function. It returns an empty string as long as the view has not seen any event:
+To get the current revision of a view, call the `Revision` function with a context. It returns an empty string as long as the view has not seen any event, and an error if it can not read the revision, which may happen to a view of your own that keeps its revision in a database. `InMemoryView` keeps its revision in memory, so it never fails:
 
 ```go
-current := catalog.Revision()
+current, err := catalog.Revision(ctx)
+if err != nil {
+  // ...
+}
 ```
 
 Both functions form the `Revisioned` interface, which `InMemoryView` implements. To wait for revisions of a view of your own, implement it as well.
@@ -2273,7 +2276,7 @@ The route then answers with both:
 { "id": "…", "revision": "1" }
 ```
 
-The function is only called if the command has succeeded. A value that encodes to `null` adds no fields. That is `nil`, and also a `nil` pointer of a concrete type, which an interface does not count as `nil`, such as the one that `return findShelf(handled)` hands back if `findShelf` returns a `*Shelf` and an error, and fails.
+The function is only called if the command has succeeded. A value that encodes to `null` adds no fields. That is `nil`, and also a `nil` pointer of a concrete type, which an interface does not count as `nil`, such as the one that `return findShelf(handled)` hands back if `findShelf` returns a `*Shelf` and an error, and fails. The fields are encoded as the result of a query is, so a `nil` slice or map in them is answered as `[]` or `{}` (see [Handling Queries over HTTP](#handling-queries-over-http)).
 
 If the function returns an error, the events are written all the same, so the route still answers with `200 OK` and the revision, which the caller needs to read its own writes, and must not take for a reason to send the command again, whatever is wrong with the fields the function returned along with the error. The answer then holds these fields if they can be used, and none otherwise. The error is logged through the logger of the API, with the route, and so is why the fields were dropped, if they were.
 
@@ -2338,11 +2341,11 @@ Before the function that returns the command receives the body, the request is v
 
 - The `Content-Type` header must be `application/json`, otherwise the request is answered with `415 Unsupported Media Type`, and the error is `httpapi.ErrUnsupportedMediaType`.
 - The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`. The same goes for a body that a middleware cuts off at a lower limit with `http.MaxBytesReader`.
-- The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`, which wraps the error of decoding, so that `errors.As` finds it. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case.
+- The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`, which wraps the error of decoding, so that `errors.As` finds it. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case. The body must not be `null`, which `encoding/json` would turn into the zero value of the request type, unless the request type decodes itself, and so decides itself what `null` means, while `null` for a field still leaves the field as it is. And an array must have as many elements as the Go array it is decoded into, such as a `[2]int`, which `encoding/json` would otherwise fill up with zeros, or cut off.
 
 *Note that parsers disagree on what a name that occurs twice means, and on data after the value: one takes the first value, another the last, and one stops after the value, while another reads on. A filter or a proxy in front of the application might then check another value than the one the application uses, which is why both are refused.*
 
-If the body can not be decoded, the message says what is wrong in words of its own, rather than in those of the decoder, which name the types of Go. After `malformed request: `, it says, for example, `empty body`, `invalid JSON`, `unknown field "borowedUntil"`, `duplicate field "expectedEventId"`, or `"borrowedUntil" must be a string`. A nested value is named by its path, such as `"items.0.bookId"`. For a failure that it has no words of its own for, such as a value of a type that JSON has no kind for, it says that the value can not be decoded, as in `"rating" can not be decoded`, or `the body can not be decoded`. A body that can not even be read, for example because a middleware fails to decompress it, gives `the body could not be read`, without the words of the middleware. The error of a type that decodes itself, on the other hand, keeps its own text, as it is, also for a type of a library, such as `netip.Addr`, as long as it can tell its text. If its `Error` function panics, as that of a `*json.UnmarshalTypeError` without a type does, the message says that the value can not be decoded instead. For the full list, see the documentation of `BodyOf`.
+If the body can not be decoded, the message says what is wrong in words of its own, rather than in those of the decoder, which name the types of Go. After `malformed request: `, it says, for example, `empty body`, `invalid JSON`, `unknown field "borowedUntil"`, `duplicate field "expectedEventId"`, `"borrowedUntil" must be a string`, `the body must be an object`, for a body of `null` as well, or `"pair" must have 2 elements`. A nested value is named by its path, such as `"items.0.bookId"`. For a failure that it has no words of its own for, such as a value of a type that JSON has no kind for, it says that the value can not be decoded, as in `"rating" can not be decoded`, or `the body can not be decoded`. A body that can not even be read, for example because a middleware fails to decompress it, gives `the body could not be read`, without the words of the middleware. The error of a type that decodes itself, on the other hand, keeps its own text, as it is, also for a type of a library, such as `netip.Addr`, as long as it can tell its text. If its `Error` function panics, as that of a `*json.UnmarshalTypeError` without a type does, the message says that the value can not be decoded instead. For the full list, see the documentation of `BodyOf`.
 
 If the request type is `httpapi.NoBody`, the request is validated differently (see [Handling Commands Without a Body](#handling-commands-without-a-body)): a request that a browser sends from another origin is answered with `403 Forbidden` first, and the error is `httpapi.ErrForbidden`. The `Content-Type` header is not required, and the body must be empty or `{}`, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. A body larger than `httpapi.MaxRequestBody` is still answered with `413 Request Entity Too Large`.
 
@@ -2418,7 +2421,7 @@ Then call the `Query` function with the API, the mux, a pattern, the function th
 httpapi.Query(api, mux, "QUERY /api/books", toListBooks, answerBooks(listBooks(catalog)))
 ```
 
-The pattern names the method `QUERY`. A pattern without a method, which accepts every method, or with another method, makes `Query` panic. A handler of your own that answers with `Ask` may use another method, though, for example `GET` for a download or a CSV export (see [Answering Queries in Your Own Format](#answering-queries-in-your-own-format)).
+The pattern names the method `QUERY`. A pattern without a method, which accepts every method, or with another method, makes `Query` panic. `net/http` does not name the method yet, so the constant `httpapi.MethodQuery` does, as `http.MethodGet` names `GET`, for example for a request in a test. A handler of your own that answers with `Ask` may use another method, though, for example `GET` for a download or a CSV export (see [Answering Queries in Your Own Format](#answering-queries-in-your-own-format)).
 
 The caller sends the input as JSON, as for a command:
 
@@ -2438,9 +2441,11 @@ func toGetBook(r *http.Request, _ httpapi.NoBody, user User) (GetBook, error) {
 }
 ```
 
-The route answers with `200 OK` and the result as JSON, with `Cache-Control: no-store`, so that no cache keeps it (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)). A result without items is answered with an empty list, `[]`, even as the `nil` slice that `query.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
+The route answers with `200 OK` and the result as JSON, with `Cache-Control: no-store`, so that no cache keeps it (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)). The result is encoded as `encoding/json` encodes it, except that a `nil` slice is answered as an empty list, `[]`, and a `nil` map as an empty object, `{}`, at every depth, such as the `nil` slice that `query.Collect` returns when there are no items, or a field of a response type that holds a `nil` slice. So a caller gets a list or an object, whether it holds anything or not. A `nil` pointer, on the other hand, is answered as `null`. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
 
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error. As with `Respond`, an error without a status code of its own is answered with `500 Internal Server Error`, so wrap a mistake in the request that the handler finds itself with `httpapi.ErrMalformed` (see [Handling Commands over HTTP](#handling-commands-over-http)). To answer an error without a result, call the `RespondError` function (see [Answering Queries in Your Own Format](#answering-queries-in-your-own-format)).
+
+*Note that a `nil` slice of bytes is answered as an empty string, `""`, since a slice of bytes is encoded as a string in base64, and that a `nil` `json.RawMessage` is answered as `null`, since it holds JSON text.*
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 
@@ -2595,7 +2600,7 @@ curl -X QUERY http://localhost:8080/api/books \
   -d '{}'
 ```
 
-The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. Without the header, it does not wait at all. If the header holds something that is not a revision, the request is answered with `400 Bad Request`.
+The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. Without the header, it does not wait at all. If the header holds something that is not a revision, the request is answered with `400 Bad Request`. If the view can not read its revision once it has waited, the request is answered with the error, as with any other error, for example with `503 Service Unavailable` for an error of the category `ErrTransient` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
 Once the view has seen at least one event, the response contains the revision it shows in the `Revision` header, as well as an `ETag` header and `Cache-Control: private, no-cache`. `no-cache` makes a cache ask again before it hands out the answer, and `private` keeps shared caches, such as proxies, from keeping it at all. If the caller sends the `ETag` in the `If-None-Match` header, asks the same, and the view has not changed since, the request is answered with `304 Not Modified`, which carries the same headers, and no body.
 
@@ -2612,6 +2617,8 @@ This holds as long as the answer depends on nothing but the query and the view, 
 - The clock, or anything else outside the events. See [Depending on More Than the Read Model](#depending-on-more-than-the-read-model).
 - Another view. The revision is that of the view handed over, so an answer that also reads from another view does not notice when that one changes.
 - The context. A value that a middleware puts into the context, such as the user, never shows up in the `ETag`. Put it into the query instead.
+
+For an answer that depends on more than the query and `Varying` can capture, wait without a tag (see [Waiting for a Revision Without a Tag](#waiting-for-a-revision-without-a-tag)).
 
 A query that holds a function or a channel can not be written into an `ETag`, and its answer goes without one.
 
@@ -2664,6 +2671,50 @@ Here, `listBooksDueToday` answers like `listOverdueBooks`, but takes the current
 
 *Note that `Varying` panics for `nil`, and so does giving it twice, or without `Revisioned`.*
 
+#### Waiting for a Revision Without a Tag
+
+Some answers depend on more than the query and `Varying` can capture, for example on the instant, on the configuration, or on another view. A tag would then tell a caller that nothing has changed when it has. To let the caller read its own writes all the same, hand over the `Awaiting` option instead of `Revisioned`. It waits exactly as `Revisioned` does, but tags nothing: the answer carries neither a `Revision` header nor an `ETag`, says `Cache-Control: no-store`, as every answer without a revision does, and is never `304 Not Modified`. As with `Revisioned`, the query is built before the route waits, so a body that does not fit is refused at once.
+
+For example, a preview of borrowing a book tells whether the book is available, which the caller wants to see right after returning it, and until when the book would be borrowed, which depends on the current time and on the loan period, which comes from the configuration:
+
+```go
+type PreviewLoan struct {
+  BookID string
+}
+
+type loanPreviewBody struct {
+  IsAvailable   bool   `json:"isAvailable"`
+  BorrowedUntil string `json:"borrowedUntil"`
+}
+
+func previewLoan(catalog architecturekit.KeyedView[string, BookItem], loanPeriod time.Duration) func(context.Context, PreviewLoan) (loanPreviewBody, error) {
+  return func(ctx context.Context, q PreviewLoan) (loanPreviewBody, error) {
+    book, isFound, err := catalog.Get(ctx, q.BookID)
+    if err != nil {
+      return loanPreviewBody{}, err
+    }
+    if !isFound {
+      return loanPreviewBody{}, fmt.Errorf("%w: book %s", httpapi.ErrNotFound, q.BookID)
+    }
+
+    return loanPreviewBody{
+      IsAvailable:   !book.IsBorrowed,
+      BorrowedUntil: time.Now().Add(loanPeriod).Format(time.DateOnly),
+    }, nil
+  }
+}
+
+httpapi.Query(api, mux, "QUERY /api/books/{id}/loan-preview", toPreviewLoan, previewLoan(catalog, loanPeriod),
+  httpapi.Awaiting(catalog, httpapi.DefaultWait),
+)
+```
+
+Here, `toPreviewLoan` has the request type `httpapi.NoBody`, and takes the ID of the book from the path.
+
+So use `Revisioned` while the answer depends on nothing but the query and the view, plus what `Varying` adds, since the `ETag` then saves sending an answer that has not changed. Use `Awaiting` for an answer that depends on more, and neither for a query whose caller never needs to read its own writes.
+
+*Note that `Awaiting` panics for a `nil` view or a negative wait, and so does giving it twice, or along with `Revisioned`. A `nil` pointer counts as a `nil` view, such as a view that was declared but never created with `NewInMemoryView`. Since only a query with `Revisioned` has a tag, `Varying` panics along with `Awaiting` as well.*
+
 #### Waiting for a Revision in a Handler of Your Own
 
 To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error, and neither is the end of the context of the request, for example because the caller went away: in both cases, `Await` stops waiting and returns `nil`, so the handler answers with what the view holds. It returns an error if the header holds something that is not a revision, which wraps `httpapi.ErrMalformed` as well as `architecturekit.ErrNotARevision`, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
@@ -2684,7 +2735,7 @@ mux.HandleFunc("GET /api/books.csv", func(w http.ResponseWriter, r *http.Request
 })
 ```
 
-*Note that such a handler answers with neither an `ETag` nor `304 Not Modified`. Those come with the `Revisioned` option of `Query`, which ties the `ETag` to the query, so that callers never share one by accident.*
+*Note that such a handler answers with neither an `ETag` nor `304 Not Modified`. Those come with the `Revisioned` option of `Query`, which ties the `ETag` to the query, so that callers never share one by accident. For a query that answers in the default format, the `Awaiting` option of `Query` waits the same way (see [Waiting for a Revision Without a Tag](#waiting-for-a-revision-without-a-tag)).*
 
 ### Checking Health over HTTP
 

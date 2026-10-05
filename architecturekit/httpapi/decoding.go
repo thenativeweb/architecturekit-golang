@@ -176,10 +176,10 @@ func describeNamesake(bodyType reflect.Type, body []byte, syntax *json.SyntaxErr
 
 // describeMismatch says which value does not fit its type, and why: it is of
 // another kind than the one its type takes, a number out of the range of its
-// type, one that is no integer for an integer, or a string that is no base64
-// for a slice of bytes. A field with the option string takes its number,
-// boolean, or string in a string, and the key of a map whose keys are numbers
-// has to be one.
+// type, one that is no integer for an integer, a string that is no base64 for
+// a slice of bytes, or an array of another length than its Go array. A field
+// with the option string takes its number, boolean, or string in a string,
+// and the key of a map whose keys are numbers has to be one.
 //
 // A value of a type that takes more than one kind of value, or none, has no
 // words of its own, and neither has the key of a map whose keys are booleans,
@@ -259,6 +259,10 @@ func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.Unmarsh
 			text:   fmt.Sprintf("%s must be %s", subject, expected),
 			causes: []error{err},
 		}
+	// An array that fails for the Go array as a whole, rather than for one of
+	// its items, has another length than the Go array (see strictJSON).
+	case mismatch.Type.Kind() == reflect.Array:
+		return describeLength(subject, mismatch.Type.Len(), err)
 	case isNumber:
 		return describeNumber(subject, mismatch.Type, text, err)
 	case errors.As(err, new(base64.CorruptInputError)):
@@ -298,6 +302,46 @@ func describeNumber(subject string, numberType reflect.Type, text string, err er
 	}
 
 	return &decodeFailure{text: subject + " must be an integer", causes: []error{err}}
+}
+
+// describeLength says how many elements an array has to have, given the
+// length of the Go array that it is decoded into.
+func describeLength(subject string, length int, err error) error {
+	elements := strconv.Itoa(length) + " elements"
+
+	switch length {
+	case 0:
+		elements = "no elements"
+	case 1:
+		elements = "1 element"
+	}
+
+	return &decodeFailure{
+		text:   fmt.Sprintf("%s must have %s", subject, elements),
+		causes: []error{err},
+	}
+}
+
+// refuseNull refuses a body of null, given bodyType, the type that the body
+// is decoded into, and says which kind the body has to be. encoding/json
+// takes null for no value at all, and leaves the value as it is, so the body
+// would come out as the zero value of bodyType, while any other value of the
+// wrong kind is refused.
+//
+// A type whose kind it can not tell, such as one that decodes itself, gets
+// null as any other value, and decides itself what it means, as it does for
+// every other value. So does an interface, which takes it for nil.
+func refuseNull(bodyType reflect.Type, body []byte) error {
+	if !bytes.Equal(bytes.Trim(body, " \t\r\n"), []byte("null")) {
+		return nil
+	}
+
+	expected, isKnown := kindOf(bodyType)
+	if !isKnown {
+		return nil
+	}
+
+	return &decodeFailure{text: fmt.Sprintf("%s must be %s", subjectOf(""), expected)}
 }
 
 // describeKey says that the keys of the map have to be numbers, given the

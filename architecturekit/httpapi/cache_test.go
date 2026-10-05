@@ -92,6 +92,20 @@ func TestCacheControl(t *testing.T) {
 			return queried(t, func(context.Context, countNotes) (int, error) { panic("the index is broken") }, nil,
 				httpapi.Revisioned(seenView("4"), time.Second))
 		},
+		"an awaiting query that succeeded": func(t *testing.T) *httptest.ResponseRecorder {
+			view := seenView("4")
+
+			return queried(t, countNotesIn(view), map[string]string{httpapi.HeaderWaitFor: "4"}, httpapi.Awaiting(view, time.Second))
+		},
+		"an awaiting query that is asked about a tag": func(t *testing.T) *httptest.ResponseRecorder {
+			view := seenView("4")
+
+			return queried(t, countNotesIn(view), map[string]string{"If-None-Match": "*"}, httpapi.Awaiting(view, time.Second))
+		},
+		"an awaiting query that failed": func(t *testing.T) *httptest.ResponseRecorder {
+			return queried(t, failingWith(architecturekit.NewDomainError("nothing to count")), nil,
+				httpapi.Awaiting(seenView("4"), time.Second))
+		},
 		"a revisioned query whose caller is unknown": func(t *testing.T) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
 			view := seenView("4")

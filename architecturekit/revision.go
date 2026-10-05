@@ -28,8 +28,11 @@ var ErrNotARevision = errors.New("not a revision")
 // polling. InMemoryView does.
 type Revisioned interface {
 	// Revision is the last event the view has seen, or the empty string while
-	// it has seen none.
-	Revision() string
+	// it has seen none. A view that keeps its revision elsewhere, such as in a
+	// database, reads it within the context. An error means that it could not
+	// be read, so a reader fails rather than taking the empty string for a view
+	// that has seen nothing.
+	Revision(ctx context.Context) (string, error)
 
 	// WaitFor returns nil once the view has reached the revision, at once if
 	// it has already. If the context ends first, it returns the error of the

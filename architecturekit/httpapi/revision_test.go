@@ -1,11 +1,15 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -126,6 +130,46 @@ func TestQueryOptions(t *testing.T) {
 			"architecturekit/httpapi: Varying needs Revisioned, since only a revisioned query has a tag",
 			func() { wire(httpapi.Varying(day)) },
 		},
+		"Awaiting without a view": {
+			"architecturekit/httpapi: Awaiting needs a view, not nil",
+			func() { httpapi.Awaiting(nil, time.Second) },
+		},
+		"Awaiting with a view that was never created": {
+			"architecturekit/httpapi: Awaiting needs a view, not nil",
+			func() {
+				var catalog *architecturekit.InMemoryView[string, noteItem]
+				httpapi.Awaiting(catalog, time.Second)
+			},
+		},
+		"Awaiting with a nil function as the view": {
+			"architecturekit/httpapi: Awaiting needs a view, not nil",
+			func() { httpapi.Awaiting(revisionFunc(nil), time.Second) },
+		},
+		"Awaiting with a negative wait": {
+			"architecturekit/httpapi: Awaiting needs a wait that is not negative, not -1s",
+			func() { httpapi.Awaiting(noteView(), -time.Second) },
+		},
+		"Awaiting twice": {
+			"architecturekit/httpapi: Awaiting is given twice",
+			func() { wire(httpapi.Awaiting(noteView(), time.Second), httpapi.Awaiting(noteView(), time.Second)) },
+		},
+		"Awaiting after Revisioned": {
+			"architecturekit/httpapi: Awaiting is given along with Revisioned, which waits as well",
+			func() { wire(httpapi.Revisioned(noteView(), time.Second), httpapi.Awaiting(noteView(), time.Second)) },
+		},
+		"Revisioned after Awaiting": {
+			"architecturekit/httpapi: Awaiting is given along with Revisioned, which waits as well",
+			func() { wire(httpapi.Awaiting(noteView(), time.Second), httpapi.Revisioned(noteView(), time.Second)) },
+		},
+		// Only a revisioned query has a tag that Varying could add to.
+		"Varying with Awaiting": {
+			"architecturekit/httpapi: Varying needs Revisioned, since only a revisioned query has a tag",
+			func() { wire(httpapi.Awaiting(noteView(), time.Second), httpapi.Varying(day)) },
+		},
+		"Varying before Awaiting": {
+			"architecturekit/httpapi: Varying needs Revisioned, since only a revisioned query has a tag",
+			func() { wire(httpapi.Varying(day), httpapi.Awaiting(noteView(), time.Second)) },
+		},
 	} {
 		t.Run(name+" panics", func(t *testing.T) {
 			assert.PanicsWithValue(t, test.message, test.wire)
@@ -146,11 +190,15 @@ func TestQueryOptions(t *testing.T) {
 		assert.Empty(t, response.Header().Get("ETag"))
 	})
 
+	t.Run("Varying before Revisioned is fine", func(t *testing.T) {
+		assert.NotPanics(t, func() { wire(httpapi.Varying(day), httpapi.Revisioned(noteView(), time.Second)) })
+	})
+
 	t.Run("a view that is a function is revisioned", func(t *testing.T) {
 		// It is not nil, so the check has to let it through.
 		mux := http.NewServeMux()
 		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes", allNotes, answer,
-			httpapi.Revisioned(revisionFunc(func() string { return "7" }), time.Second))
+			httpapi.Revisioned(revisionFunc(func(context.Context) (string, error) { return "7", nil }), time.Second))
 
 		response := askNotes(mux, nil)
 
@@ -161,9 +209,9 @@ func TestQueryOptions(t *testing.T) {
 
 // revisionFunc is a view that is a function, so that a nil one can be handed
 // to Revisioned. It has reached every revision it is asked for.
-type revisionFunc func() string
+type revisionFunc func(ctx context.Context) (string, error)
 
-func (f revisionFunc) Revision() string { return f() }
+func (f revisionFunc) Revision(ctx context.Context) (string, error) { return f(ctx) }
 
 func (revisionFunc) WaitFor(context.Context, string) error { return nil }
 
@@ -331,6 +379,65 @@ func TestRevisioned(t *testing.T) {
 		assert.Equal(t, http.StatusUnprocessableEntity, response.Code)
 
 		assert.Empty(t, response.Header().Get("ETag"), "a failed answer was tagged")
+	})
+
+	for _, test := range []struct {
+		label   string
+		err     error
+		status  int
+		message string
+	}{
+		{"an internal failure", errors.New("the revisions are gone"), http.StatusInternalServerError, "internal server error"},
+		{"a transient failure", fmt.Errorf("%w: the revisions are down", architecturekit.ErrTransient), http.StatusServiceUnavailable,
+			"internal server error"},
+		{"a failure the caller can fix", fmt.Errorf("%w: the revisions are elsewhere", httpapi.ErrNotFound), http.StatusNotFound,
+			"not found: the revisions are elsewhere"},
+	} {
+		t.Run("a view that fails to read its revision answers "+test.label+" as every other error, without answering the query", func(t *testing.T) {
+			var logs bytes.Buffer
+			var isAnswered atomic.Bool
+			mux := http.NewServeMux()
+			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
+
+			unreadable := revisionFunc(func(context.Context) (string, error) { return "", test.err })
+			httpapi.Query(api, mux, "QUERY /notes", allNotes, answering(&isAnswered, countNotesIn(noteView())),
+				httpapi.Revisioned(unreadable, time.Second))
+
+			response := askNotes(mux, nil)
+
+			assert.Equal(t, test.status, response.Code)
+			assert.JSONEq(t, messageOf(t, test.message), response.Body.String())
+			assert.Empty(t, response.Header().Get("ETag"), "a failure was tagged")
+			assert.Empty(t, response.Header().Get(httpapi.HeaderRevision), "a failure carries a revision")
+			assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+			assert.False(t, isAnswered.Load(), "the query must not be answered without its revision")
+
+			if test.status >= http.StatusInternalServerError {
+				assert.Contains(t, logs.String(), `msg="httpapi: internal failure"`)
+				assert.Contains(t, logs.String(), `route="QUERY /notes"`)
+				assert.Contains(t, logs.String(), test.err.Error())
+			}
+		})
+	}
+
+	t.Run("a view reads its revision within the context of the request", func(t *testing.T) {
+		type key struct{}
+
+		var asked context.Context
+		mux := http.NewServeMux()
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes", allNotes, countNotesIn(noteView()),
+			httpapi.Revisioned(revisionFunc(func(ctx context.Context) (string, error) {
+				asked = ctx
+				return "7", nil
+			}), time.Second))
+
+		request := httptest.NewRequestWithContext(context.WithValue(t.Context(), key{}, "the request"), "QUERY", "/notes", nil)
+		request.Header.Set("X-User", "someone")
+		response := serve(t, mux, request)
+
+		require.Equal(t, http.StatusOK, response.Code)
+		require.NotNil(t, asked, "the revision was not read")
+		assert.Equal(t, "the request", asked.Value(key{}))
 	})
 
 	// The plain case stays honest: an answer that follows from the read model
@@ -775,7 +882,7 @@ func TestAwait(t *testing.T) {
 
 type refusingView struct{}
 
-func (refusingView) Revision() string { return "" }
+func (refusingView) Revision(context.Context) (string, error) { return "", nil }
 
 func (refusingView) WaitFor(context.Context, string) error {
 	return architecturekit.ErrNotARevision
@@ -824,5 +931,185 @@ func TestVarying(t *testing.T) {
 		assert.Equal(t, http.StatusOK, tomorrow.Code, "the day turned over")
 
 		assert.NotEqual(t, tag, tomorrow.Header().Get("ETag"), "the tag is the same on the next day, so the caller keeps yesterday's answer")
+	})
+}
+
+// TestAwaiting covers a query that waits for the revision a caller asks for,
+// as a revisioned one does, but tags nothing, since its answer depends on more
+// than the query and the view.
+func TestAwaiting(t *testing.T) {
+	// awaitingNotes wires one awaiting query onto a mux.
+	awaitingNotes := func(t *testing.T, view architecturekit.Revisioned, answer httpapi.Answer[countNotes, int], wait time.Duration) *http.ServeMux {
+		t.Helper()
+
+		mux := http.NewServeMux()
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&bytes.Buffer{}))), mux, "QUERY /notes",
+			allNotes, answer, httpapi.Awaiting(view, wait))
+
+		return mux
+	}
+
+	// assertUntagged asserts that an answer carries nothing that a cache could
+	// ask about again.
+	assertUntagged := func(t *testing.T, response *httptest.ResponseRecorder) {
+		t.Helper()
+
+		assert.Empty(t, response.Header().Get(httpapi.HeaderRevision), "the answer carries a revision")
+		assert.NotContains(t, response.Header(), "Etag", "the answer is tagged")
+		assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+	}
+
+	t.Run("waits for the revision it was asked for, and tags nothing", func(t *testing.T) {
+		view := noteView()
+		view.Seen("1")
+
+		// The revision arrives only after the request is already waiting.
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			insertNote(t, view, "2", noteItem{Text: "late"})
+			view.Seen("5")
+		}()
+
+		started := time.Now()
+		response := askNotes(awaitingNotes(t, view, countNotesIn(view), 10*time.Second), map[string]string{
+			httpapi.HeaderWaitFor: "5",
+		})
+
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.GreaterOrEqual(t, time.Since(started), 100*time.Millisecond, "answered too early, so it cannot have waited")
+		assert.Equal(t, "1\n", response.Body.String(), "want the late item to be counted")
+		assertUntagged(t, response)
+	})
+
+	t.Run("answers with what it has when the wait runs out", func(t *testing.T) {
+		view := noteView()
+		insertNote(t, view, "3", noteItem{Text: "one"})
+		view.Seen("3")
+
+		response := askNotes(awaitingNotes(t, view, countNotesIn(view), 50*time.Millisecond), map[string]string{
+			httpapi.HeaderWaitFor: "99",
+		})
+
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.Equal(t, "1\n", response.Body.String())
+		assertUntagged(t, response)
+	})
+
+	t.Run("answers at once with no wait at all", func(t *testing.T) {
+		view := seenView("1")
+
+		started := time.Now()
+		response := askNotes(awaitingNotes(t, view, countNotesIn(view), 0), map[string]string{httpapi.HeaderWaitFor: "99"})
+
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.Less(t, time.Since(started), time.Second, "waited although it was not to wait at all")
+		assertUntagged(t, response)
+	})
+
+	t.Run("answers within the context of the request", func(t *testing.T) {
+		type key struct{}
+
+		var asked context.Context
+		mux := awaitingNotes(t, seenView("1"), func(ctx context.Context, _ countNotes) (int, error) {
+			asked = ctx
+			return 0, nil
+		}, time.Second)
+
+		request := httptest.NewRequestWithContext(context.WithValue(t.Context(), key{}, "the request"), "QUERY", "/notes", nil)
+		request.Header.Set("X-User", "someone")
+		response := serve(t, mux, request)
+
+		require.Equal(t, http.StatusOK, response.Code)
+		require.NotNil(t, asked, "the query was not answered")
+		assert.Equal(t, "the request", asked.Value(key{}))
+	})
+
+	t.Run("answers at once without a wanted revision", func(t *testing.T) {
+		var isWaitedFor atomic.Bool
+		view := waitedView{isWaitedFor: &isWaitedFor}
+
+		response := askNotes(awaitingNotes(t, view, countNotesIn(noteView()), 10*time.Second), nil)
+
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.False(t, isWaitedFor.Load(), "waited although nothing was asked for")
+		assertUntagged(t, response)
+	})
+
+	t.Run("refuses a wanted revision that is not one", func(t *testing.T) {
+		var isAnswered atomic.Bool
+
+		response := askNotes(awaitingNotes(t, seenView("1"), answering(&isAnswered, countNotesIn(noteView())), 10*time.Second),
+			map[string]string{httpapi.HeaderWaitFor: "soon"})
+
+		assert.Equal(t, http.StatusBadRequest, response.Code)
+		assert.JSONEq(t, messageOf(t, `malformed request: not a revision: "soon"`), response.Body.String())
+		assert.False(t, isAnswered.Load(), "a query that asked for something that is not a revision was answered")
+		assertUntagged(t, response)
+	})
+
+	t.Run("answers a failure while waiting as every other error", func(t *testing.T) {
+		response := askNotes(awaitingNotes(t, brokenView{}, countNotesIn(noteView()), time.Second),
+			map[string]string{httpapi.HeaderWaitFor: "7"})
+
+		assert.Equal(t, http.StatusInternalServerError, response.Code)
+		assert.JSONEq(t, messageOf(t, "internal server error"), response.Body.String())
+		assertUntagged(t, response)
+	})
+
+	t.Run("is never answered with 304", func(t *testing.T) {
+		view := seenView("4")
+		mux := awaitingNotes(t, view, countNotesIn(view), time.Second)
+
+		for _, tag := range []string{"*", `"4"`, `W/"4"`} {
+			response := askNotes(mux, map[string]string{"If-None-Match": tag})
+
+			require.Equal(t, http.StatusOK, response.Code, "with %s", tag)
+			assert.Equal(t, "0\n", response.Body.String(), "with %s", tag)
+			assertUntagged(t, response)
+		}
+	})
+
+	t.Run("never reads the revision of the view, since it tags nothing", func(t *testing.T) {
+		unreadable := revisionFunc(func(context.Context) (string, error) { return "", errors.New("the revisions are gone") })
+
+		response := askNotes(awaitingNotes(t, unreadable, countNotesIn(noteView()), time.Second), nil)
+
+		require.Equal(t, http.StatusOK, response.Code)
+		assertUntagged(t, response)
+	})
+
+	t.Run("answers a failure of the query as every other error", func(t *testing.T) {
+		failing := func(context.Context, countNotes) (int, error) {
+			return 0, architecturekit.NewDomainError("nothing to count")
+		}
+
+		response := askNotes(awaitingNotes(t, seenView("4"), failing, time.Second), nil)
+
+		assert.Equal(t, http.StatusUnprocessableEntity, response.Code)
+		assert.JSONEq(t, messageOf(t, "nothing to count"), response.Body.String())
+		assertUntagged(t, response)
+	})
+
+	t.Run("answers a panic with 500", func(t *testing.T) {
+		panicking := func(context.Context, countNotes) (int, error) { panic("the index is broken") }
+
+		response := askNotes(awaitingNotes(t, seenView("4"), panicking, time.Second), nil)
+
+		assert.Equal(t, http.StatusInternalServerError, response.Code)
+		assertUntagged(t, response)
+	})
+
+	t.Run("nobody can make the server wait without being let in", func(t *testing.T) {
+		view := seenView("1")
+
+		// No X-User header, so the request never gets as far as waiting.
+		request := httptest.NewRequest("QUERY", "/notes", nil)
+		request.Header.Set(httpapi.HeaderWaitFor, "99")
+
+		started := time.Now()
+		response := serve(t, awaitingNotes(t, view, countNotesIn(view), 10*time.Second), request)
+
+		assert.Equal(t, http.StatusUnauthorized, response.Code)
+		assert.LessOrEqual(t, time.Since(started), time.Second, "waited before refusing")
 	})
 }
