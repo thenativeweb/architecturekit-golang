@@ -189,6 +189,6 @@ func (s readSettings) invalidBound() string {
 // isEventID tells whether the ID can be the one of an event, which, unlike a
 // revision, an empty ID can not.
 func isEventID(id string) bool {
-	_, isSet, err := revisionNumber(id)
-	return err == nil && isSet
+	_, err := ParseRevision(id)
+	return err == nil
 }

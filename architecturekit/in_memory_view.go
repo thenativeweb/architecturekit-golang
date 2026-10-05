@@ -782,14 +782,13 @@ type appliedEvent struct {
 }
 
 // appliedEventOf reads the event a change of the view applies from its ID and
-// the context. It refuses an ID that CompareRevisions would refuse, so that the
-// view never keeps an ID it can not compare with the next one, and fails where
-// the mistake is made. Unlike a revision, the ID must not be empty either,
-// since an empty one would come before every revision, so that every change
-// with it would be skipped silently.
+// the context. It refuses an ID that ParseRevision refuses, so that the view
+// never keeps an ID it can not compare with the next one, and fails where the
+// mistake is made. That includes the empty ID, which would come before every
+// revision, so that every change with it would be skipped silently.
 func appliedEventOf(ctx context.Context, eventID string) (appliedEvent, error) {
-	number, isSet, err := revisionNumber(eventID)
-	if err != nil || !isSet {
+	number, err := ParseRevision(eventID)
+	if err != nil {
 		return appliedEvent{}, fmt.Errorf("%w: %w: an operation on a view needs the ID of the event it applies, not %q",
 			ErrPermanent, ErrNotARevision, eventID)
 	}
