@@ -421,6 +421,19 @@ func seenView(revision string) *architecturekit.InMemoryView[string, noteItem] {
 // nothing (RFC 10008).
 
 func TestQueryMethod(t *testing.T) {
+	t.Run("is named, since net/http does not name it yet", func(t *testing.T) {
+		assert.Equal(t, "QUERY", httpapi.MethodQuery)
+
+		mux := http.NewServeMux()
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, httpapi.MethodQuery+" /notes", allNotes, countNotesIn(noteView()))
+
+		request := httptest.NewRequest(httpapi.MethodQuery, "/notes", nil)
+		request.Header.Set("X-User", "golo")
+		response := serve(t, mux, request)
+
+		assert.Equal(t, http.StatusOK, response.Code)
+	})
+
 	for kind, options := range map[string]func() []httpapi.QueryOption{
 		"a query": func() []httpapi.QueryOption { return nil },
 		"a revisioned query": func() []httpapi.QueryOption {

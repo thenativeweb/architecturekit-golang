@@ -16,9 +16,10 @@ import (
 // ErrNotFound means the query asked for something that does not exist.
 var ErrNotFound = errors.New("not found")
 
-// methodQuery is QUERY, the method that a query is asked with (see Query).
-// net/http has no name for it yet.
-const methodQuery = "QUERY"
+// MethodQuery is QUERY, the method of RFC 10008 that a query is asked with
+// (see Query). It is named like http.MethodGet, since net/http does not
+// define it yet.
+const MethodQuery = "QUERY"
 
 // ToQuery turns a request, its body, and the user into a query. It is the
 // read side's counterpart to ToCommand, and gets the same: the body comes
@@ -303,7 +304,7 @@ func Query[TUser any, TRequest any, TQuery any, TResult any](
 	}
 
 	switch method := methodOf(pattern); method {
-	case methodQuery:
+	case MethodQuery:
 	case "":
 		panic(fmt.Sprintf("architecturekit/httpapi: Query needs a pattern that names the method QUERY, not %q, "+
 			"which accepts every method", pattern))

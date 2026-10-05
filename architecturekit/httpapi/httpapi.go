@@ -521,7 +521,7 @@ func Route[
 	case "":
 		panic(fmt.Sprintf("architecturekit/httpapi: Route needs a pattern that names a method, such as POST, not %q, "+
 			"which accepts every method, GET included", pattern))
-	case http.MethodGet, http.MethodHead, http.MethodOptions, methodQuery:
+	case http.MethodGet, http.MethodHead, http.MethodOptions, MethodQuery:
 		panic(fmt.Sprintf("architecturekit/httpapi: Route needs a pattern whose method may change something, such as POST, not %q, "+
 			"since %s must not change anything", pattern, method))
 	}

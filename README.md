@@ -2403,7 +2403,7 @@ Then call the `Query` function with the API, the mux, a pattern, the function th
 httpapi.Query(api, mux, "QUERY /api/books", toListBooks, answerBooks(listBooks(catalog)))
 ```
 
-The pattern names the method `QUERY`. A pattern without a method, which accepts every method, or with another method, makes `Query` panic. A handler of your own that answers with `Ask` may use another method, though, for example `GET` for a download or a CSV export (see [Answering Queries in Your Own Format](#answering-queries-in-your-own-format)).
+The pattern names the method `QUERY`. A pattern without a method, which accepts every method, or with another method, makes `Query` panic. `net/http` does not name the method yet, so the constant `httpapi.MethodQuery` does, as `http.MethodGet` names `GET`, for example for a request in a test. A handler of your own that answers with `Ask` may use another method, though, for example `GET` for a download or a CSV export (see [Answering Queries in Your Own Format](#answering-queries-in-your-own-format)).
 
 The caller sends the input as JSON, as for a command:
 
