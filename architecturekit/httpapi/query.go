@@ -86,10 +86,15 @@ func Ask[TUser any, TRequest any, TQuery any, TResult any](
 type QueryOption func(*querySettings)
 
 type querySettings struct {
-	view   architecturekit.Revisioned
-	wait   time.Duration
-	varies Volatile
+	view     architecturekit.Revisioned
+	wait     time.Duration
+	isTagged bool
+	varies   Volatile
 }
+
+// givenTogether is what Revisioned and Awaiting panic with, in either order,
+// since both wait.
+const givenTogether = "architecturekit/httpapi: Awaiting is given along with Revisioned, which waits as well"
 
 // Revisioned has a query wait for the revision a caller asks for, for at most
 // the given time (DefaultWait, unless there is a reason for another), answer
@@ -121,6 +126,10 @@ type querySettings struct {
 //   - The context: a value that a middleware put into the context, such as the
 //     user, never shows up in the tag. Put it into the query instead.
 //
+// An answer for which none of that works, such as one that depends on the
+// instant, or on another view, waits with Awaiting instead, which tags
+// nothing.
+//
 // The query is built before anything waits or is answered, since building it
 // determines the caller, decodes the body, and checks what they may ask:
 // nobody can make the server wait, or learn that an answer is unchanged,
@@ -135,9 +144,9 @@ type querySettings struct {
 // a view that has seen nothing, says no-store, as every other answer of the
 // kit does.
 //
-// A nil view, a negative wait, or giving Revisioned twice, is a programming
-// error, so it panics. A nil pointer counts as a nil view, such as a view that
-// was declared but never created.
+// A nil view, a negative wait, giving Revisioned twice, or along with
+// Awaiting, is a programming error, so it panics. A nil pointer counts as a
+// nil view, such as a view that was declared but never created.
 func Revisioned(view architecturekit.Revisioned, wait time.Duration) QueryOption {
 	if isNil(view) {
 		panic("architecturekit/httpapi: Revisioned needs a view, not nil")
@@ -147,8 +156,53 @@ func Revisioned(view architecturekit.Revisioned, wait time.Duration) QueryOption
 	}
 
 	return func(settings *querySettings) {
-		if settings.view != nil {
+		switch {
+		case settings.view != nil && settings.isTagged:
 			panic("architecturekit/httpapi: Revisioned is given twice")
+		case settings.view != nil:
+			panic(givenTogether)
+		}
+
+		settings.view = view
+		settings.wait = wait
+		settings.isTagged = true
+	}
+}
+
+// Awaiting has a query wait for the revision a caller asks for, for at most
+// the given time (DefaultWait, unless there is a reason for another), as
+// Revisioned does, but tags nothing: the answer carries neither a revision
+// nor an ETag, is never 304, and says Cache-Control: no-store, as every answer
+// without a revision does.
+//
+// Use it for an answer that depends on more than the query and the view, such
+// as on the instant, on the configuration, or on another view, for which a
+// tag could tell a caller, wrongly, that nothing has changed (see Revisioned).
+// The caller still reads its own writes.
+//
+// It waits as Revisioned does (see Await): a revision that is not one is
+// answered with 400, and once the time has run out, the query is answered with
+// what the view holds. The query is built before anything waits, so a body
+// that does not fit is refused at once, and nobody can make the server wait
+// without being allowed to ask.
+//
+// A nil view, a negative wait, giving Awaiting twice, or along with
+// Revisioned, is a programming error, so it panics. A nil pointer counts as a
+// nil view, such as a view that was declared but never created.
+func Awaiting(view architecturekit.Revisioned, wait time.Duration) QueryOption {
+	if isNil(view) {
+		panic("architecturekit/httpapi: Awaiting needs a view, not nil")
+	}
+	if wait < 0 {
+		panic(fmt.Sprintf("architecturekit/httpapi: Awaiting needs a wait that is not negative, not %s", wait))
+	}
+
+	return func(settings *querySettings) {
+		switch {
+		case settings.view != nil && !settings.isTagged:
+			panic("architecturekit/httpapi: Awaiting is given twice")
+		case settings.view != nil:
+			panic(givenTogether)
 		}
 
 		settings.view = view
@@ -182,8 +236,9 @@ func isNil(value any) bool {
 // besides the view and the query, such as the current day, which the answer
 // takes from the clock itself (see Volatile).
 //
-// A nil function, giving Varying twice, or Varying without Revisioned, is a
-// programming error, so it panics; the last one when Query wires the query.
+// A nil function, giving Varying twice, or Varying without Revisioned, also
+// with Awaiting, is a programming error, so it panics; the last one when Query
+// wires the query.
 func Varying(varies Volatile) QueryOption {
 	if varies == nil {
 		panic("architecturekit/httpapi: Varying needs a function, not nil")
@@ -203,6 +258,7 @@ func Varying(varies Volatile) QueryOption {
 // Cache-Control: no-store, so that no cache keeps it. With Revisioned, it
 // reads its own writes and answers 304 when nothing has changed; with Varying
 // in addition, its tag changes with what the answer takes from elsewhere.
+// With Awaiting, it reads its own writes, but tags nothing.
 //
 // A query is asked with QUERY, the method that HTTP defines in RFC 10008.
 // Like GET, it is safe, so it changes nothing, but like POST, it carries a
@@ -261,11 +317,11 @@ func Query[TUser any, TRequest any, TQuery any, TResult any](
 		option(&settings)
 	}
 
-	if settings.view == nil {
-		if settings.varies != nil {
-			panic("architecturekit/httpapi: Varying needs Revisioned, since only a revisioned query has a tag")
-		}
+	if settings.varies != nil && !settings.isTagged {
+		panic("architecturekit/httpapi: Varying needs Revisioned, since only a revisioned query has a tag")
+	}
 
+	if settings.view == nil {
 		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer api.answerPanic(w, r)
 

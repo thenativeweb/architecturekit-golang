@@ -61,6 +61,7 @@ func TestNilSlicesAndMapsInAnswers(t *testing.T) {
 	for kind, options := range map[string][]httpapi.QueryOption{
 		"a query":            nil,
 		"a revisioned query": {httpapi.Revisioned(seenView("4"), time.Second)},
+		"an awaiting query":  {httpapi.Awaiting(seenView("4"), time.Second)},
 	} {
 		t.Run(kind+" answers a nil slice as [] and a nil map as {} at every depth, and a nil pointer as null", func(t *testing.T) {
 			mux := http.NewServeMux()

@@ -369,6 +369,7 @@ func TestResultsThatCanNotBeEncoded(t *testing.T) {
 	for name, options := range map[string][]httpapi.QueryOption{
 		"a query":            nil,
 		"a revisioned query": {httpapi.Revisioned(seenView("4"), time.Second)},
+		"an awaiting query":  {httpapi.Awaiting(seenView("4"), time.Second)},
 	} {
 		for result, answer := range results {
 			t.Run(name+" answers a result with "+result+" with 500, and logs why", func(t *testing.T) {
@@ -424,6 +425,9 @@ func TestQueryMethod(t *testing.T) {
 		"a query": func() []httpapi.QueryOption { return nil },
 		"a revisioned query": func() []httpapi.QueryOption {
 			return []httpapi.QueryOption{httpapi.Revisioned(seenView("4"), time.Second)}
+		},
+		"an awaiting query": func() []httpapi.QueryOption {
+			return []httpapi.QueryOption{httpapi.Awaiting(seenView("4"), time.Second)}
 		},
 	} {
 		wire := func(pattern string) func() {

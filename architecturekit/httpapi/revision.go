@@ -136,7 +136,7 @@ func holdsTag(r *http.Request, tag string) bool {
 }
 
 // answerRevisioned answers a query that can be asked for a revision (see
-// Revisioned).
+// Revisioned and Awaiting), and tags its answer, unless it is Awaiting.
 func answerRevisioned[TUser any, TRequest any, TQuery any, TResult any](
 	api *API[TUser],
 	toQuery ToQuery[TUser, TRequest, TQuery],
@@ -156,6 +156,14 @@ func answerRevisioned[TUser any, TRequest any, TQuery any, TResult any](
 
 		if err := Await(r, settings.view, settings.wait); err != nil {
 			respondResult(w, struct{}{}, err, explain)
+			return
+		}
+
+		// A query with Awaiting tags nothing, so it answers as a query that does
+		// not wait does, without reading the revision.
+		if !settings.isTagged {
+			result, err := answer(r.Context(), query)
+			respondResult(w, result, err, explain)
 			return
 		}
 

@@ -45,12 +45,15 @@ func (view waitedView) WaitFor(context.Context, string) error {
 	return nil
 }
 
-// queryKinds are the ways that Query wires a query: as it is, and revisioned,
-// with a view that records whether anything waited for it.
+// queryKinds are the ways that Query wires a query: as it is, revisioned, and
+// awaiting, with a view that records whether anything waited for it.
 var queryKinds = map[string]func(isWaitedFor *atomic.Bool) []httpapi.QueryOption{
 	"a query": func(*atomic.Bool) []httpapi.QueryOption { return nil },
 	"a revisioned query": func(isWaitedFor *atomic.Bool) []httpapi.QueryOption {
 		return []httpapi.QueryOption{httpapi.Revisioned(waitedView{isWaitedFor: isWaitedFor}, time.Second)}
+	},
+	"an awaiting query": func(isWaitedFor *atomic.Bool) []httpapi.QueryOption {
+		return []httpapi.QueryOption{httpapi.Awaiting(waitedView{isWaitedFor: isWaitedFor}, time.Second)}
 	},
 }
 

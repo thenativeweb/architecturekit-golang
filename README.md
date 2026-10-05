@@ -2600,6 +2600,8 @@ This holds as long as the answer depends on nothing but the query and the view, 
 - Another view. The revision is that of the view handed over, so an answer that also reads from another view does not notice when that one changes.
 - The context. A value that a middleware puts into the context, such as the user, never shows up in the `ETag`. Put it into the query instead.
 
+For an answer that depends on more than the query and `Varying` can capture, wait without a tag (see [Waiting for a Revision Without a Tag](#waiting-for-a-revision-without-a-tag)).
+
 A query that holds a function or a channel can not be written into an `ETag`, and its answer goes without one.
 
 *Note that the constants `httpapi.HeaderWaitFor` and `httpapi.HeaderRevision` contain the names of the two headers.*
@@ -2651,6 +2653,50 @@ Here, `listBooksDueToday` answers like `listOverdueBooks`, but takes the current
 
 *Note that `Varying` panics for `nil`, and so does giving it twice, or without `Revisioned`.*
 
+#### Waiting for a Revision Without a Tag
+
+Some answers depend on more than the query and `Varying` can capture, for example on the instant, on the configuration, or on another view. A tag would then tell a caller that nothing has changed when it has. To let the caller read its own writes all the same, hand over the `Awaiting` option instead of `Revisioned`. It waits exactly as `Revisioned` does, but tags nothing: the answer carries neither a `Revision` header nor an `ETag`, says `Cache-Control: no-store`, as every answer without a revision does, and is never `304 Not Modified`. As with `Revisioned`, the query is built before the route waits, so a body that does not fit is refused at once.
+
+For example, a preview of borrowing a book tells whether the book is available, which the caller wants to see right after returning it, and until when the book would be borrowed, which depends on the current time and on the loan period, which comes from the configuration:
+
+```go
+type PreviewLoan struct {
+  BookID string
+}
+
+type loanPreviewBody struct {
+  IsAvailable   bool   `json:"isAvailable"`
+  BorrowedUntil string `json:"borrowedUntil"`
+}
+
+func previewLoan(catalog architecturekit.KeyedView[string, BookItem], loanPeriod time.Duration) func(context.Context, PreviewLoan) (loanPreviewBody, error) {
+  return func(ctx context.Context, q PreviewLoan) (loanPreviewBody, error) {
+    book, isFound, err := catalog.Get(ctx, q.BookID)
+    if err != nil {
+      return loanPreviewBody{}, err
+    }
+    if !isFound {
+      return loanPreviewBody{}, fmt.Errorf("%w: book %s", httpapi.ErrNotFound, q.BookID)
+    }
+
+    return loanPreviewBody{
+      IsAvailable:   !book.IsBorrowed,
+      BorrowedUntil: time.Now().Add(loanPeriod).Format(time.DateOnly),
+    }, nil
+  }
+}
+
+httpapi.Query(api, mux, "QUERY /api/books/{id}/loan-preview", toPreviewLoan, previewLoan(catalog, loanPeriod),
+  httpapi.Awaiting(catalog, httpapi.DefaultWait),
+)
+```
+
+Here, `toPreviewLoan` has the request type `httpapi.NoBody`, and takes the ID of the book from the path.
+
+So use `Revisioned` while the answer depends on nothing but the query and the view, plus what `Varying` adds, since the `ETag` then saves sending an answer that has not changed. Use `Awaiting` for an answer that depends on more, and neither for a query whose caller never needs to read its own writes.
+
+*Note that `Awaiting` panics for a `nil` view or a negative wait, and so does giving it twice, or along with `Revisioned`. A `nil` pointer counts as a `nil` view, such as a view that was declared but never created with `NewInMemoryView`. Since only a query with `Revisioned` has a tag, `Varying` panics along with `Awaiting` as well.*
+
 #### Waiting for a Revision in a Handler of Your Own
 
 To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error, and neither is the end of the context of the request, for example because the caller went away: in both cases, `Await` stops waiting and returns `nil`, so the handler answers with what the view holds. It returns an error if the header holds something that is not a revision, which wraps `httpapi.ErrMalformed` as well as `architecturekit.ErrNotARevision`, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
@@ -2671,7 +2717,7 @@ mux.HandleFunc("GET /api/books.csv", func(w http.ResponseWriter, r *http.Request
 })
 ```
 
-*Note that such a handler answers with neither an `ETag` nor `304 Not Modified`. Those come with the `Revisioned` option of `Query`, which ties the `ETag` to the query, so that callers never share one by accident.*
+*Note that such a handler answers with neither an `ETag` nor `304 Not Modified`. Those come with the `Revisioned` option of `Query`, which ties the `ETag` to the query, so that callers never share one by accident. For a query that answers in the default format, the `Awaiting` option of `Query` waits the same way (see [Waiting for a Revision Without a Tag](#waiting-for-a-revision-without-a-tag)).*
 
 ### Checking Health over HTTP
 
