@@ -31,7 +31,7 @@ type noteResponse struct {
 	Text string `json:"text"`
 }
 
-func toListNotes(r *http.Request, _ user) (listNotes, error) {
+func toListNotes(r *http.Request, _ httpapi.NoBody, _ user) (listNotes, error) {
 	ask := listNotes{}
 
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -135,7 +135,7 @@ func TestQuery(t *testing.T) {
 		mux := http.NewServeMux()
 
 		httpapi.Query(api, mux, "QUERY /restricted",
-			func(*http.Request, user) (listNotes, error) {
+			func(*http.Request, httpapi.NoBody, user) (listNotes, error) {
 				return listNotes{}, errors.Join(httpapi.ErrForbidden, errors.New("not for you"))
 			},
 			answerListNotes)
@@ -150,7 +150,7 @@ func TestQuery(t *testing.T) {
 		mux := http.NewServeMux()
 
 		httpapi.Query(api, mux, "QUERY /rule",
-			func(*http.Request, user) (listNotes, error) {
+			func(*http.Request, httpapi.NoBody, user) (listNotes, error) {
 				return listNotes{}, architecturekit.NewDomainError("that combination makes no sense")
 			},
 			answerListNotes)
@@ -162,7 +162,7 @@ func TestQuery(t *testing.T) {
 
 	var (
 		noAPI     *httpapi.API[user]
-		toNothing httpapi.ToQuery[user, listNotes]
+		toNothing httpapi.ToQuery[user, httpapi.NoBody, listNotes]
 		noAnswer  httpapi.Answer[listNotes, []noteResponse]
 	)
 
@@ -266,7 +266,7 @@ func TestPublicAPI(t *testing.T) {
 		mux := http.NewServeMux()
 
 		httpapi.Query(api, mux, "QUERY /public",
-			func(r *http.Request, _ httpapi.NoUser) (listNotes, error) {
+			func(*http.Request, httpapi.NoBody, httpapi.NoUser) (listNotes, error) {
 				return listNotes{}, nil
 			},
 			answerListNotes)
@@ -469,7 +469,7 @@ func TestQueryMethod(t *testing.T) {
 		})
 
 		t.Run(kind+" panics for a nil function first, as for every other mistake in the wiring", func(t *testing.T) {
-			var toNothing httpapi.ToQuery[user, countNotes]
+			var toNothing httpapi.ToQuery[user, httpapi.NoBody, countNotes]
 
 			assert.PanicsWithValue(t, "architecturekit/httpapi: Query needs a function that turns the request into a query, not nil", func() {
 				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "GET /notes", toNothing, countNotesIn(noteView()), options()...)
@@ -513,51 +513,6 @@ func TestQueryMethod(t *testing.T) {
 			assert.False(t, isAsked, "the query must only be asked with QUERY")
 		})
 	}
-
-	t.Run("a query without input accepts a body that is empty, or {}", func(t *testing.T) {
-		// A query without input reads its body with BodyOf, as NoBody, so that a
-		// body that asks for something it does not do is refused.
-		mux := http.NewServeMux()
-		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes",
-			func(r *http.Request, _ user) (httpapi.NoBody, error) {
-				return httpapi.BodyOf[httpapi.NoBody](r)
-			},
-			func(context.Context, httpapi.NoBody) ([]noteResponse, error) {
-				return []noteResponse{{Text: "first"}}, nil
-			})
-
-		for label, test := range map[string]struct {
-			body, contentType string
-			status            int
-			message           string
-		}{
-			"an empty body":                  {body: "", contentType: "", status: http.StatusOK},
-			"an empty body, said to be JSON": {body: "", contentType: "application/json", status: http.StatusOK},
-			"{}":                             {body: "{}", contentType: "application/json", status: http.StatusOK},
-			"{}, without a Content-Type":     {body: "{}", contentType: "", status: http.StatusOK},
-			"a body that asks for something": {
-				body: `{"limit":2}`, contentType: "application/json", status: http.StatusBadRequest,
-				message: "malformed request: this route takes no body, so the body has to be empty, or {}",
-			},
-		} {
-			t.Run(label, func(t *testing.T) {
-				request := httptest.NewRequest("QUERY", "/notes", strings.NewReader(test.body))
-				request.Header.Set("X-User", "golo")
-				if test.contentType != "" {
-					request.Header.Set("Content-Type", test.contentType)
-				}
-
-				response := serve(t, mux, request)
-
-				require.Equal(t, test.status, response.Code, response.Body.String())
-				if test.status == http.StatusOK {
-					assert.JSONEq(t, `[{"text": "first"}]`, response.Body.String())
-				} else {
-					assert.JSONEq(t, messageOf(t, test.message), response.Body.String())
-				}
-			})
-		}
-	})
 
 	t.Run("a handler of your own asks with any method, such as GET for a download", func(t *testing.T) {
 		api := httpapi.NewAPI(deadStore(t), userFrom)

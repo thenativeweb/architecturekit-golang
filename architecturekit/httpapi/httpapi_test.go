@@ -1019,8 +1019,8 @@ func failingToCommand(err error) httpapi.ToCommand[user, noteRequest, note] {
 
 // failingToQuery returns a function that fails to build a query, with the
 // given error.
-func failingToQuery(err error) httpapi.ToQuery[user, listNotes] {
-	return func(*http.Request, user) (listNotes, error) { return listNotes{}, err }
+func failingToQuery(err error) httpapi.ToQuery[user, httpapi.NoBody, listNotes] {
+	return func(*http.Request, httpapi.NoBody, user) (listNotes, error) { return listNotes{}, err }
 }
 
 func TestFailingToCommandAndToQuery(t *testing.T) {

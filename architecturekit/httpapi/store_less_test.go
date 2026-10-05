@@ -17,7 +17,7 @@ func TestAPIWithoutStore(t *testing.T) {
 		api := httpapi.NewAPI(nil, userFrom)
 		mux := http.NewServeMux()
 		httpapi.Query(api, mux, "QUERY /notes",
-			func(*http.Request, user) (string, error) { return "all", nil },
+			func(*http.Request, httpapi.NoBody, user) (string, error) { return "all", nil },
 			func(context.Context, string) ([]string, error) { return []string{"first", "second"}, nil },
 		)
 

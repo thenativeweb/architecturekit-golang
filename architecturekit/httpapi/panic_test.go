@@ -326,8 +326,8 @@ func TestPanicsInHandleAndAsk(t *testing.T) {
 			`architecturekit: value for "id" in "/note/{id}" must not be empty`, "httpapi_test.uncheckedNote.Subject")
 	})
 
-	for name, toQuery := range map[string]httpapi.ToQuery[user, listNotes]{
-		"while building the query": func(*http.Request, user) (listNotes, error) { panic("the query is broken") },
+	for name, toQuery := range map[string]httpapi.ToQuery[user, httpapi.NoBody, listNotes]{
+		"while building the query": func(*http.Request, httpapi.NoBody, user) (listNotes, error) { panic("the query is broken") },
 		"while answering":          toListNotes,
 	} {
 		t.Run("Ask returns a panic "+name+" as an internal failure", func(t *testing.T) {
@@ -379,7 +379,7 @@ func TestMissingPartsInHandleAndAsk(t *testing.T) {
 	var (
 		noAPI       *httpapi.API[user]
 		toNoCommand httpapi.ToCommand[user, noteRequest, note]
-		toNoQuery   httpapi.ToQuery[user, listNotes]
+		toNoQuery   httpapi.ToQuery[user, httpapi.NoBody, listNotes]
 		noAnswer    httpapi.Answer[listNotes, []noteResponse]
 	)
 
@@ -404,7 +404,7 @@ func TestMissingPartsInHandleAndAsk(t *testing.T) {
 	// askWithout lists the ways to give Ask a nil function, with the message
 	// it fails with.
 	askWithout := map[string]struct {
-		toQuery httpapi.ToQuery[user, listNotes]
+		toQuery httpapi.ToQuery[user, httpapi.NoBody, listNotes]
 		answer  httpapi.Answer[listNotes, []noteResponse]
 		message string
 	}{

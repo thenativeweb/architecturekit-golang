@@ -49,7 +49,7 @@ func countNotesIn(view *architecturekit.InMemoryView[string, noteItem]) httpapi.
 	}
 }
 
-func allNotes(*http.Request, user) (countNotes, error) { return countNotes{}, nil }
+func allNotes(*http.Request, httpapi.NoBody, user) (countNotes, error) { return countNotes{}, nil }
 
 // servingNotes wires one revisioned query onto a mux.
 func servingNotes(t *testing.T, view *architecturekit.InMemoryView[string, noteItem], wait time.Duration) *http.ServeMux {
@@ -404,16 +404,19 @@ func TestIfNoneMatch(t *testing.T) {
 	})
 }
 
-// The read side for a query whose input does not fit into the query string,
-// so that it is sent as the body of the request, which QUERY allows: it counts
-// how many of the given notes there are.
+// The read side for a query whose input is a list, which the body of the
+// request holds: it counts how many of the given notes there are.
 
-type findNotes struct {
+type findNotesRequest struct {
 	Texts []string `json:"texts"`
 }
 
-func toFindNotes(r *http.Request, _ user) (findNotes, error) {
-	return httpapi.BodyOf[findNotes](r)
+type findNotes struct {
+	Texts []string
+}
+
+func toFindNotes(_ *http.Request, request findNotesRequest, _ user) (findNotes, error) {
+	return findNotes(request), nil
 }
 
 func answerFindNotes(view *architecturekit.InMemoryView[string, noteItem]) httpapi.Answer[findNotes, int] {
@@ -449,10 +452,11 @@ func askWith(mux *http.ServeMux, method, target, body string, lines ...string) *
 	return recorder
 }
 
-// TestIfNoneMatchWithABody covers a query that asks with a body, since its
-// input does not fit into the query string. HTTP has 304 for QUERY, which it
-// treats like GET (draft-ietf-httpbis-safe-method-w-body), and the tag holds
-// the query, so a body that asks something else does not match.
+// TestIfNoneMatchWithABody covers a query that asks with a body. HTTP has 304
+// for QUERY, which it treats like GET (draft-ietf-httpbis-safe-method-w-body),
+// and the tag holds the query that the body is turned into, so a body that
+// asks something else does not match, while one that asks the same in other
+// words does.
 func TestIfNoneMatchWithABody(t *testing.T) {
 	const found = `{"texts":["one","two"]}`
 
@@ -530,6 +534,19 @@ func TestIfNoneMatchWithABody(t *testing.T) {
 		assert.Equal(t, "1\n", response.Body.String())
 	})
 
+	t.Run("that asks the same in other words is answered with 304", func(t *testing.T) {
+		tag := tagOf(t, found)
+
+		// Names match fields regardless of case, so both decode into the same
+		// query as found.
+		for _, body := range []string{`{ "texts" : [ "one", "two" ] }`, `{"Texts":["one","two"]}`} {
+			response := askWith(mux, "QUERY", "/notes/found", body, tag)
+
+			require.Equal(t, http.StatusNotModified, response.Code, "with %s", body)
+			assert.Equal(t, tag, response.Header().Get("ETag"), "with %s", body)
+		}
+	})
+
 	t.Run("with * is answered in full if the answer has no tag", func(t *testing.T) {
 		empty := http.NewServeMux()
 		nothing := noteView()
@@ -561,7 +578,7 @@ func ownedNoteView() *architecturekit.InMemoryView[string, ownedNote] {
 
 // askOwnNotes builds the query from the caller, and refuses the one caller who
 // may not read notes at all.
-func askOwnNotes(_ *http.Request, caller user) (ownNotes, error) {
+func askOwnNotes(_ *http.Request, _ httpapi.NoBody, caller user) (ownNotes, error) {
 	if caller.UserID == "mallory" {
 		return ownNotes{}, httpapi.ErrForbidden
 	}
@@ -693,7 +710,7 @@ func TestTagsOfCallers(t *testing.T) {
 		type filtered struct{ Keep func(noteItem) bool }
 
 		httpapi.Query(api, mux, "QUERY /notes",
-			func(*http.Request, user) (filtered, error) {
+			func(*http.Request, httpapi.NoBody, user) (filtered, error) {
 				return filtered{Keep: func(noteItem) bool { return true }}, nil
 			},
 			func(context.Context, filtered) (int, error) { return 0, nil },

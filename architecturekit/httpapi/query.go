@@ -20,23 +20,32 @@ var ErrNotFound = errors.New("not found")
 // net/http has no name for it yet.
 const methodQuery = "QUERY"
 
-// ToQuery turns request data and the user into a query. It is the read
-// side's counterpart to ToCommand, without a decoded body, since a query
-// usually reads from the URL. One whose input does not fit there reads the
-// body itself, with BodyOf.
+// ToQuery turns a request, its body, and the user into a query. It is the
+// read side's counterpart to ToCommand, and gets the same: the body comes
+// decoded into TRequest, by the rules of BodyOf, while the request holds what
+// the body does not, such as a value of the path, which r.PathValue returns,
+// a header, or the context of the request.
+//
+// TRequest only describes the body, as for a command, so the query itself
+// needs no json tags. For a query without input, it is NoBody.
 //
 // Its errors are treated as those of ToCommand: one that StatusFor maps to a
 // status of its own keeps it, and so does one of the category
 // architecturekit.ErrPermanent, while any other error comes back wrapped with
 // ErrMalformed, and is answered with 400.
-type ToQuery[TUser any, TQuery any] func(r *http.Request, user TUser) (TQuery, error)
+type ToQuery[TUser any, TRequest any, TQuery any] func(r *http.Request, request TRequest, user TUser) (TQuery, error)
 
 // Answer answers a query. It sees neither the request nor HTTP, which is the
 // whole point of splitting it from ToQuery.
 type Answer[TQuery any, TResult any] func(ctx context.Context, query TQuery) (TResult, error)
 
-// Ask determines the caller, builds the query and answers it, without writing
-// anything to the response. Use it to answer in a format of your own.
+// Ask determines the caller, decodes the body of the request into TRequest
+// (see BodyOf), turns both into a query with toQuery, and answers it, without
+// writing anything to the response. Use it to answer in a format of your own.
+//
+// It answers any method, such as GET for a download. A request with GET
+// carries no body, so its request type is NoBody, which lets GET pass from
+// any origin, since it must not change anything (see NoBody).
 //
 // A panic on the way comes back as an error that StatusFor maps to 500, and
 // that RespondResult logs with the value and the stack of the panic. Only
@@ -47,10 +56,10 @@ type Answer[TQuery any, TResult any] func(ctx context.Context, query TQuery) (TR
 // does so first, on every request, also one whose caller is unknown. Like any
 // other panic, that comes back as an error, which names the mistake rather
 // than a nil pointer.
-func Ask[TUser any, TQuery any, TResult any](
+func Ask[TUser any, TRequest any, TQuery any, TResult any](
 	r *http.Request,
 	api *API[TUser],
-	toQuery ToQuery[TUser, TQuery],
+	toQuery ToQuery[TUser, TRequest, TQuery],
 	answer Answer[TQuery, TResult],
 ) (result TResult, err error) {
 	defer recoverInto(&err)
@@ -65,14 +74,9 @@ func Ask[TUser any, TQuery any, TResult any](
 		panic("architecturekit/httpapi: Ask needs a function that answers the query, not nil")
 	}
 
-	user, err := UserOf(r, api)
+	query, err := build(r, api, toQuery)
 	if err != nil {
 		return result, err
-	}
-
-	query, err := toQuery(r, user)
-	if err != nil {
-		return result, categorise(err)
 	}
 
 	return answer(r.Context(), query)
@@ -118,9 +122,9 @@ type querySettings struct {
 //     user, never shows up in the tag. Put it into the query instead.
 //
 // The query is built before anything waits or is answered, since building it
-// determines the caller and checks what they may ask: nobody can make the
-// server wait, or learn that an answer is unchanged, without being allowed to
-// ask.
+// determines the caller, decodes the body, and checks what they may ask:
+// nobody can make the server wait, or learn that an answer is unchanged,
+// without being allowed to ask.
 //
 // An answer that carries a revision, a success or one that says that nothing
 // has changed, says Cache-Control: private, no-cache: a cache asks again
@@ -199,15 +203,20 @@ func Varying(varies Volatile) QueryOption {
 // answer takes from elsewhere.
 //
 // A query is asked with QUERY, a method that changes nothing, like GET, but
-// may carry a body (draft-ietf-httpbis-safe-method-w-body), as in the API of
-// EventSourcingDB. So the pattern names it, as in QUERY /api/books, and
-// toQuery reads the input of the query from the path, the query string, or
-// the body, with BodyOf. A query without input that refuses a body reads it
-// as NoBody, which accepts one that is empty, or {} (see NoBody). A pattern
+// carries a body (draft-ietf-httpbis-safe-method-w-body), as in the API of
+// EventSourcingDB. So the pattern names it, as in QUERY /api/books. A pattern
 // without a method, which accepts every method, or with another method than
 // QUERY, is a programming error, so Query panics, as Route does for a method
 // that must not change anything. A handler of your own that asks with Ask may
 // use any method, such as GET for a download.
+//
+// The body holds the input of the query, which is decoded into TRequest as
+// for a command, after the caller is determined, and before toQuery gets it
+// (see BodyOf). So a body that is not JSON, that is too large, or that does
+// not fit TRequest is answered with 415, 413, or 400, as for a command. A
+// query without input has the request type NoBody, which accepts a body that
+// is empty, or {}, and refuses a request that a browser sends from another
+// origin (see NoBody).
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack, as with Route.
@@ -217,11 +226,11 @@ func Varying(varies Volatile) QueryOption {
 // A nil API, toQuery, or answer is a programming error, so Query panics, as
 // Route does, rather than failing every request, with 500, or for a nil API,
 // with no answer at all.
-func Query[TUser any, TQuery any, TResult any](
+func Query[TUser any, TRequest any, TQuery any, TResult any](
 	api *API[TUser],
 	mux *http.ServeMux,
 	pattern string,
-	toQuery ToQuery[TUser, TQuery],
+	toQuery ToQuery[TUser, TRequest, TQuery],
 	answer Answer[TQuery, TResult],
 	options ...QueryOption,
 ) {

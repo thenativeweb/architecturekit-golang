@@ -2107,7 +2107,7 @@ mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
 
 ### Handling Commands over HTTP
 
-To accept a command over HTTP, define a request type with JSON annotations for the body, and a function that returns the command. Like the function that returns a query (see [Handling Queries over HTTP](#handling-queries-over-http)), it receives the request and the user, and in addition the body, decoded into the request type. So it takes from the request what the body does not hold, such as a value of the path, a header, or the context. For example, for the `BorrowBook` that checks the revision of the caller (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)), with the ID of the book in the path:
+To accept a command over HTTP, define a request type with JSON annotations for the body, and a function that returns the command. It receives the request, the body, decoded into the request type, and the user, as the function that returns a query does (see [Handling Queries over HTTP](#handling-queries-over-http)). So it takes from the request what the body does not hold, such as a value of the path, a header, or the context. For example, for the `BorrowBook` that checks the revision of the caller (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)), with the ID of the book in the path:
 
 ```go
 type borrowBookRequest struct {
@@ -2315,7 +2315,7 @@ Any other error returned from the function is answered with `400 Bad Request`, w
 
 #### Validating Requests
 
-Before the function that returns the command receives the body, the request is validated:
+Before the function that returns the command receives the body, the request is validated, as it is for a query (see [Handling Queries over HTTP](#handling-queries-over-http)):
 
 - The `Content-Type` header must be `application/json`, otherwise the request is answered with `415 Unsupported Media Type`, and the error is `httpapi.ErrUnsupportedMediaType`.
 - The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`.
@@ -2327,11 +2327,11 @@ If the body can not be decoded, the message says what is wrong in words of its o
 
 If the request type is `httpapi.NoBody`, the request is validated differently (see [Handling Commands Without a Body](#handling-commands-without-a-body)): a request that a browser sends from another origin is answered with `403 Forbidden` first, and the error is `httpapi.ErrForbidden`. The `Content-Type` header is not required, and the body must be empty or `{}`, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. A body larger than `httpapi.MaxRequestBody` is still answered with `413 Request Entity Too Large`.
 
-To read a body by the same rules elsewhere, call the `BodyOf` function (see [Reading Queries from the Body](#reading-queries-from-the-body)). With `httpapi.NoBody`, it checks that a request has no body, as the route does.
+To read a body by the same rules in a handler of your own, call the `BodyOf` function with the request type as its type parameter, as in `httpapi.BodyOf[borrowBookRequest](r)`. With `httpapi.NoBody`, it checks that a request has no body, as the route does.
 
 ### Handling Queries over HTTP
 
-A query is asked with the method `QUERY`, as in the v2 API of EventSourcingDB. Like `GET`, it changes nothing, but like `POST`, it carries a body, so a query takes its input from the body, as a command does. To answer a query over HTTP, define a request type with JSON annotations for the body, and a function that receives the request and the user, reads the body with the `BodyOf` function, and returns the query:
+A query is asked with the method `QUERY`, as in the v2 API of EventSourcingDB. Like `GET`, it changes nothing, but like `POST`, it carries a body, so a query takes its input from the body, as a command does. To answer a query over HTTP, define a request type with JSON annotations for the body, and a function that returns the query. Like the function that returns a command, it receives the request, the body, decoded into the request type, and the user:
 
 ```go
 type listBooksRequest struct {
@@ -2339,12 +2339,7 @@ type listBooksRequest struct {
   Limit         int  `json:"limit"`
 }
 
-func toListBooks(r *http.Request, user User) (ListBooks, error) {
-  request, err := httpapi.BodyOf[listBooksRequest](r)
-  if err != nil {
-    return ListBooks{}, err
-  }
-
+func toListBooks(r *http.Request, request listBooksRequest, user User) (ListBooks, error) {
   return ListBooks{
     OnlyAvailable: request.OnlyAvailable,
     Limit:         request.Limit,
@@ -2352,7 +2347,7 @@ func toListBooks(r *http.Request, user User) (ListBooks, error) {
 }
 ```
 
-The query itself needs no JSON annotations, since the function builds it from the request type, as the function that returns a command builds the command (see [Reading Queries from the Body](#reading-queries-from-the-body)).
+As for a command, the request type describes the body, and the query is what the application works with, so the query needs no JSON annotations. The function builds the query from the request type, so it may check the input, and add what the body does not hold, such as the user or a value of the path, as `toBorrowBook` adds the reader to the command (see [Handling Commands over HTTP](#handling-commands-over-http)).
 
 Items carry no JSON annotations (see [Defining Views](#defining-views)). So to answer with JSON, define a response type with JSON annotations, as the counterpart of the request types that commands use (see [Handling Commands over HTTP](#handling-commands-over-http)), and map the items to it. Here, the revision of a book goes along as `eventId`, so that a caller can send it back as `expectedEventId`:
 
@@ -2414,14 +2409,12 @@ curl -X QUERY http://localhost:8080/api/books \
   -d '{"onlyAvailable":true}'
 ```
 
-A query without input, such as one that takes everything it needs from the path, reads the body as `httpapi.NoBody`, so that the caller sends no body, or `{}`. As for a command without a body, a request that a browser sends from another origin is then answered with `403 Forbidden` (see [Handling Commands Without a Body](#handling-commands-without-a-body)):
+The route determines the user, and then decodes the body by the same rules as for a command (see [Validating Requests](#validating-requests)), before it calls the function that returns the query. So a body that is not JSON, that is too large, or that does not fit the request type is answered with `415`, `413`, or `400`, and the same message as for a command.
+
+A query without input, such as one that takes everything it needs from the path, has the request type `httpapi.NoBody`, so that the caller sends no body, or `{}`. As for a command without a body, a request that a browser sends from another origin is then answered with `403 Forbidden` (see [Handling Commands Without a Body](#handling-commands-without-a-body)):
 
 ```go
-func toGetBook(r *http.Request, user User) (GetBook, error) {
-  if _, err := httpapi.BodyOf[httpapi.NoBody](r); err != nil {
-    return GetBook{}, err
-  }
-
+func toGetBook(r *http.Request, _ httpapi.NoBody, user User) (GetBook, error) {
   return GetBook{BookID: r.PathValue("id")}, nil
 }
 ```
@@ -2436,10 +2429,10 @@ To answer this way in a handler of your own, call the `RespondResult` function w
 
 #### Answering Queries in Your Own Format
 
-To answer in a format of your own, call the `Ask` function in a handler of your own. It does the same as a route, but writes nothing to the response. Instead, it returns the result. Such a handler may use another method than `QUERY`, for example `GET` for a CSV export that a browser can download from a link. A `GET` request carries no body, so its function takes the input from the URL instead:
+To answer in a format of your own, call the `Ask` function in a handler of your own. It does the same as a route, but writes nothing to the response. Instead, it returns the result. Such a handler may use another method than `QUERY`, for example `GET` for a CSV export that a browser can download from a link. A `GET` request carries no body, so its function has the request type `httpapi.NoBody`, and takes the input from the URL instead:
 
 ```go
-toExportBooks := func(r *http.Request, user User) (ListBooks, error) {
+toExportBooks := func(r *http.Request, _ httpapi.NoBody, user User) (ListBooks, error) {
   return ListBooks{
     OnlyAvailable: r.URL.Query().Get("available") == "true",
   }, nil
@@ -2459,15 +2452,17 @@ mux.HandleFunc("GET /api/books.csv", func(w http.ResponseWriter, r *http.Request
 
 To answer an error the way a route does, call the `RespondError` function with the response writer, the request, the API, and the error, as above. It answers with the same status codes and messages as `RespondResult`, says `Cache-Control: no-store`, and logs the same way, but needs no result. As with `RespondResult`, an error without a status code of its own is answered with `500 Internal Server Error`.
 
+*Note that a `GET` request without a body passes from any origin, unlike a `QUERY` request without one, since `GET` must not change anything (see [Handling Commands Without a Body](#handling-commands-without-a-body)).*
+
 *Note that calling `RespondError` with `nil` as the API, or with a `nil` error, panics.*
 
 *Note that `Ask` returns a panic as an error, as `Handle` does (see [Answering Commands in Your Own Format](#answering-commands-in-your-own-format)).*
 
 *Note that calling `Ask` with `nil` as the API, or for either function, panics, as with `Query`, but on every request, even one whose caller is unknown. That panic, too, comes back as an error, which names the mistake.*
 
-#### Reading Queries from the Body
+#### Asking for Several Items at Once
 
-A query reads its input from the body with the `BodyOf` function, which takes the request type as its type parameter. Since a `QUERY` request carries a body, the input may hold more than a URL could, for example a list of books to check at once. Here, the answer tells for every book whether it is available:
+Since a `QUERY` request carries a body, the input of a query may hold more than a URL could, for example a list of books to check at once. Here, the answer tells for every book whether it is available:
 
 ```go
 type CheckAvailability struct {
@@ -2494,21 +2489,12 @@ type checkAvailabilityRequest struct {
   BookIDs []string `json:"bookIds"`
 }
 
-func toCheckAvailability(r *http.Request, user User) (CheckAvailability, error) {
-  request, err := httpapi.BodyOf[checkAvailabilityRequest](r)
-  if err != nil {
-    return CheckAvailability{}, err
-  }
-
+func toCheckAvailability(r *http.Request, request checkAvailabilityRequest, user User) (CheckAvailability, error) {
   return CheckAvailability{BookIDs: request.BookIDs}, nil
 }
 
 httpapi.Query(api, mux, "QUERY /api/check-availability", toCheckAvailability, checkAvailability(catalog))
 ```
-
-As for a command, the request type describes the body, and the query is what the application works with, so the query needs no JSON annotations. The function builds the query from the request type, so it may check the input, and add what the body does not hold, such as the user or a value of the path, as `toBorrowBook` adds the reader to the command (see [Handling Commands over HTTP](#handling-commands-over-http)).
-
-`BodyOf` reads the body by the same rules as for a command (see [Validating Requests](#validating-requests)), and returns the same errors, so the request is answered with `415`, `413`, or `400` as a command would be. It works in a handler of your own as well.
 
 #### Reporting Missing Items
 
@@ -2529,7 +2515,7 @@ func answerBook[TQuery any](ask httpapi.Answer[TQuery, BookItem]) httpapi.Answer
 httpapi.Query(api, mux, "QUERY /api/books/{id}", toGetBook, answerBook(getBook(catalog)))
 ```
 
-Here, `toGetBook` is the function that reads the body as `httpapi.NoBody` (see [Handling Queries over HTTP](#handling-queries-over-http)).
+Here, `toGetBook` is the function of a query without input, whose request type is `httpapi.NoBody` (see [Handling Queries over HTTP](#handling-queries-over-http)).
 
 To report a missing item yourself, return `httpapi.ErrNotFound`, or an error that wraps it, such as `fmt.Errorf("%w: book %s", httpapi.ErrNotFound, q.BookID)`. Such an error is written for the caller, so it is the message, here `not found: book 42`.
 
@@ -2632,11 +2618,7 @@ func listOverdueBooks(catalog architecturekit.View[BookItem]) func(context.Conte
 }
 
 httpapi.Query(api, mux, "QUERY /api/overdue-books",
-  func(r *http.Request, user User) (ListOverdueBooks, error) {
-    if _, err := httpapi.BodyOf[httpapi.NoBody](r); err != nil {
-      return ListOverdueBooks{}, err
-    }
-
+  func(r *http.Request, _ httpapi.NoBody, user User) (ListOverdueBooks, error) {
     return ListOverdueBooks{Today: time.Now().Format(time.DateOnly)}, nil
   },
   answerBooks(listOverdueBooks(catalog)),
@@ -2657,7 +2639,7 @@ httpapi.Query(api, mux, "QUERY /api/books-due-today", toListBooksDueToday, answe
 )
 ```
 
-Here, `listBooksDueToday` answers like `listOverdueBooks`, but takes the current day from `time.Now` itself, rather than from its query, and `toListBooksDueToday` reads the body as `httpapi.NoBody` and returns that query.
+Here, `listBooksDueToday` answers like `listOverdueBooks`, but takes the current day from `time.Now` itself, rather than from its query, and `toListBooksDueToday` has the request type `httpapi.NoBody` and returns that query.
 
 *Note that such a value, whether it is part of the query or comes from `Varying`, holds the time only as precisely as the answer depends on it, such as the day or the hour, never as an instant. An instant, such as `time.Now()` itself, differs on every request, and so does every `ETag`, so the answer is never `304 Not Modified`.*
 

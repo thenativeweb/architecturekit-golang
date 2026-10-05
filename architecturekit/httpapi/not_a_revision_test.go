@@ -29,7 +29,7 @@ type pageOfNotes struct {
 }
 
 // toPageOfNotes takes the event from the query string, without checking it.
-func toPageOfNotes(r *http.Request, _ user) (pageOfNotes, error) {
+func toPageOfNotes(r *http.Request, _ httpapi.NoBody, _ user) (pageOfNotes, error) {
 	return pageOfNotes{After: r.URL.Query().Get("after")}, nil
 }
 

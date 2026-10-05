@@ -137,9 +137,9 @@ func holdsTag(r *http.Request, tag string) bool {
 
 // answerRevisioned answers a query that can be asked for a revision (see
 // Revisioned).
-func answerRevisioned[TUser any, TQuery any, TResult any](
+func answerRevisioned[TUser any, TRequest any, TQuery any, TResult any](
 	api *API[TUser],
-	toQuery ToQuery[TUser, TQuery],
+	toQuery ToQuery[TUser, TRequest, TQuery],
 	answer Answer[TQuery, TResult],
 	settings querySettings,
 ) http.Handler {
@@ -148,15 +148,9 @@ func answerRevisioned[TUser any, TQuery any, TResult any](
 
 		explain := api.explain(r)
 
-		user, err := UserOf(r, api)
+		query, err := build(r, api, toQuery)
 		if err != nil {
 			respondResult(w, struct{}{}, err, explain)
-			return
-		}
-
-		query, err := toQuery(r, user)
-		if err != nil {
-			respondResult(w, struct{}{}, categorise(err), explain)
 			return
 		}
 

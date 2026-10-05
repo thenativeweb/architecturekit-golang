@@ -270,12 +270,13 @@ func UserOf[TUser any](r *http.Request, api *API[TUser]) (TUser, error) {
 // the same as one whose users are unknown.
 type NoUser struct{}
 
-// NoBody is the request type of a command that takes no body, since everything
-// it needs comes from the path, a header, or the user, such as
-// POST /api/books/{id}/return. Its route requires no Content-Type, and accepts
-// a body that is empty, or {}, which a caller may send out of habit. Any other
-// body is ErrMalformed (see BodyOf). Unlike http.NoBody, which is an empty
-// body to send, it is a type to hand to Route, Handle, and BodyOf.
+// NoBody is the request type of a command or a query that takes no body,
+// since everything it needs comes from the path, a header, or the user, such
+// as POST /api/books/{id}/return, or QUERY /api/books/{id}. Its route requires
+// no Content-Type, and accepts a body that is empty, or {}, which a caller may
+// send out of habit. Any other body is ErrMalformed (see BodyOf). Unlike
+// http.NoBody, which is an empty body to send, it is a type to hand to Route,
+// Handle, Query, Ask, and BodyOf.
 //
 // Requiring JSON is what keeps a browser from sending a command from another
 // site without asking the server first, since a form can not send JSON. A
@@ -291,7 +292,9 @@ type NoUser struct{}
 // since these methods must not change anything. That is why Route refuses a
 // pattern with one of them, or without a method, which accepts every method
 // (see Route). Wire a handler of your own that executes a command to a method
-// that may change something as well, such as POST.
+// that may change something as well, such as POST. A handler of your own that
+// answers a query with GET, such as a download, passes from any origin, which
+// is fine, since it changes nothing.
 type NoBody struct{}
 
 // NewPublicAPI creates an API for an application without authentication.
@@ -348,19 +351,9 @@ func Handle[
 		panic("architecturekit/httpapi: Handle needs a decider made with NewDecider, not the zero Decider")
 	}
 
-	user, err := UserOf(r, api)
+	cmd, err := build(r, api, toCommand)
 	if err != nil {
 		return handled, err
-	}
-
-	request, err := BodyOf[TRequest](r)
-	if err != nil {
-		return handled, err
-	}
-
-	cmd, err := toCommand(r, request, user)
-	if err != nil {
-		return handled, categorise(err)
 	}
 
 	// The command is handed back even when executing it fails, because a
@@ -374,6 +367,36 @@ func Handle[
 	handled.Events, err = architecturekit.Execute(r.Context(), api.store, decider, cmd)
 
 	return handled, err
+}
+
+// build turns a request into a command or a query, the same way for Handle,
+// Ask, and Query: it determines the caller (see UserOf), decodes the body into
+// TRequest (see BodyOf), and hands both to to. So an unknown caller is refused
+// before the body is read, and to only gets a body that fits. An error of to
+// is categorised (see categorise).
+func build[TUser any, TRequest any, TBuilt any](
+	r *http.Request,
+	api *API[TUser],
+	to func(r *http.Request, request TRequest, user TUser) (TBuilt, error),
+) (TBuilt, error) {
+	var none TBuilt
+
+	user, err := UserOf(r, api)
+	if err != nil {
+		return none, err
+	}
+
+	request, err := BodyOf[TRequest](r)
+	if err != nil {
+		return none, err
+	}
+
+	built, err := to(r, request, user)
+	if err != nil {
+		return none, categorise(err)
+	}
+
+	return built, nil
 }
 
 // RouteOption configures a route that Route wires up.
@@ -806,9 +829,9 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// BodyOf decodes the JSON body of a request by the rules that Route applies to
-// a command, for a handler of your own or a query whose input does not fit
-// into the query string. The Content-Type has to be application/json, or it is
+// BodyOf decodes the JSON body of a request by the rules that Route and Query
+// apply to the body of a command or a query, for a handler of your own that
+// reads the body itself. The Content-Type has to be application/json, or it is
 // ErrUnsupportedMediaType. The body may hold at most MaxRequestBody bytes, or
 // it is ErrTooLarge. JSON that does not fit TBody, including a field that TBody
 // does not have, is ErrMalformed.
