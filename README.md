@@ -789,6 +789,20 @@ if err != nil {
 
 `RegisterSchemas` accepts the schemas of several states at once. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code. If the context ends first, it returns the error of the context. Since the client registers a schema without a context, a registration that has begun is finished, but none begins once the context has ended.
 
+An event that no state has a rule for, such as `InventoryTaken`, which only `Write` writes (see [Writing to Several Subjects](#writing-to-several-subjects)), is part of no `Schemas`. To register its schema as well, call the `SchemaOf` function with the type of the event. It returns an `EventSchema` by the rule that `Evolve` applies, the event's own schema or the derived one. Since `RegisterSchemas` takes slices of them, hand it over in a slice of its own:
+
+```go
+err := architecturekit.RegisterSchemas(context.TODO(), store,
+  bookState.Schemas(),
+  []architecturekit.EventSchema{architecturekit.SchemaOf[InventoryTaken]()},
+)
+if err != nil {
+  // ...
+}
+```
+
+*Note that `SchemaOf` panics where `Evolve` would, for example for an event that has its `Schema` function only from an embedded field, or for a pointer as the event type.*
+
 A registered schema can not change. If it differs from the one from the code, `RegisterSchemas` returns an error of the category `ErrPermanent`, and so it does if the database refuses a schema, for example because stored events of the type do not match it. To change the shape of an event, introduce a new event type instead (see [Versioning Events](#versioning-events)).
 
 *Note that this also holds if you remove the `Schema` function of an event whose schema is registered already: the derived schema has to be exactly the registered one, or `RegisterSchemas` fails. Keep the `Schema` function of such an event, unless you have compared both.*

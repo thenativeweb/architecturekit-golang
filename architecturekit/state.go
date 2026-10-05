@@ -163,9 +163,9 @@ func (s *State[TState]) Ignore[TEvent Event]() *State[TState] {
 	return s
 }
 
-// schemaFor returns the schema of an event type for registration. An event
-// type whose schema can not be derived is a programming error, so it panics
-// while the state is being built.
+// schemaFor returns the schema of an event type for registration, for Evolve,
+// Ignore and SchemaOf alike, so that they can not drift apart. An event type
+// whose schema can not be derived is a programming error, so it panics.
 func schemaFor[TEvent Event](eventType string) EventSchema {
 	schema, err := eventSchemaOf[TEvent]()
 	if err != nil {
