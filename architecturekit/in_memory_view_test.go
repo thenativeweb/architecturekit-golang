@@ -535,7 +535,7 @@ func (f *viewFixture) state(t *testing.T) viewState {
 		shelves[shelf] = lookedUp(t, f.byShelf, shelf)
 	}
 
-	return viewState{Items: items, Revision: f.view.Revision(), Shelves: shelves}
+	return viewState{Items: items, Revision: currentRevision(t, f.view), Shelves: shelves}
 }
 
 // viewTarget is the item a change is about, by its key and its shelf. The

@@ -53,8 +53,13 @@ func readingNotesAfter(store *architecturekit.Store) httpapi.Answer[pageOfNotes,
 // comparingWith answers with whether the view has seen the event of the
 // page, which it compares with the revision of the view.
 func comparingWith(view architecturekit.Revisioned) httpapi.Answer[pageOfNotes, bool] {
-	return func(_ context.Context, page pageOfNotes) (bool, error) {
-		reached, err := architecturekit.CompareRevisions(view.Revision(), page.After)
+	return func(ctx context.Context, page pageOfNotes) (bool, error) {
+		revision, err := view.Revision(ctx)
+		if err != nil {
+			return false, err
+		}
+
+		reached, err := architecturekit.CompareRevisions(revision, page.After)
 		if err != nil {
 			return false, err
 		}

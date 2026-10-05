@@ -124,7 +124,9 @@ type querySettings struct {
 // The query is built before anything waits or is answered, since building it
 // determines the caller, decodes the body, and checks what they may ask:
 // nobody can make the server wait, or learn that an answer is unchanged,
-// without being allowed to ask.
+// without being allowed to ask. Once it has waited, it reads the revision of
+// the view, and a view that fails to read it fails the query with its error,
+// which is answered as every other error is (see StatusFor).
 //
 // An answer that carries a revision, a success or one that says that nothing
 // has changed, says Cache-Control: private, no-cache: a cache asks again

@@ -2017,10 +2017,13 @@ if err != nil {
 
 *Note that running out of time is an error here. The `Await` function of the `httpapi` package, which waits for the revision an HTTP request asks for, takes it for none instead, and returns `nil`, so that the handler answers with what the view holds (see [Waiting for a Revision in a Handler of Your Own](#waiting-for-a-revision-in-a-handler-of-your-own)).*
 
-To get the current revision of a view, call the `Revision` function. It returns an empty string as long as the view has not seen any event:
+To get the current revision of a view, call the `Revision` function with a context. It returns an empty string as long as the view has not seen any event, and an error if it can not read the revision, which may happen to a view of your own that keeps its revision in a database. `InMemoryView` keeps its revision in memory, so it never fails:
 
 ```go
-current := catalog.Revision()
+current, err := catalog.Revision(ctx)
+if err != nil {
+  // ...
+}
 ```
 
 Both functions form the `Revisioned` interface, which `InMemoryView` implements. To wait for revisions of a view of your own, implement it as well.
@@ -2579,7 +2582,7 @@ curl -X QUERY http://localhost:8080/api/books \
   -d '{}'
 ```
 
-The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. Without the header, it does not wait at all. If the header holds something that is not a revision, the request is answered with `400 Bad Request`.
+The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. Without the header, it does not wait at all. If the header holds something that is not a revision, the request is answered with `400 Bad Request`. If the view can not read its revision once it has waited, the request is answered with the error, as with any other error, for example with `503 Service Unavailable` for an error of the category `ErrTransient` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
 Once the view has seen at least one event, the response contains the revision it shows in the `Revision` header, as well as an `ETag` header and `Cache-Control: private, no-cache`. `no-cache` makes a cache ask again before it hands out the answer, and `private` keeps shared caches, such as proxies, from keeping it at all. If the caller sends the `ETag` in the `If-None-Match` header, asks the same, and the view has not changed since, the request is answered with `304 Not Modified`, which carries the same headers, and no body.
 

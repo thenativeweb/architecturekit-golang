@@ -521,7 +521,7 @@ func TestWithLogger(t *testing.T) {
 // not told about.
 type brokenView struct{}
 
-func (brokenView) Revision() string { return "" }
+func (brokenView) Revision(context.Context) (string, error) { return "", nil }
 
 func (brokenView) WaitFor(context.Context, string) error { return errors.New("the view is broken") }
 

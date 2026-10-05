@@ -37,7 +37,7 @@ type waitedView struct {
 	isWaitedFor *atomic.Bool
 }
 
-func (waitedView) Revision() string { return "4" }
+func (waitedView) Revision(context.Context) (string, error) { return "4", nil }
 
 func (view waitedView) WaitFor(context.Context, string) error {
 	view.isWaitedFor.Store(true)

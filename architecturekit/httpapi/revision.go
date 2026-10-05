@@ -161,7 +161,12 @@ func answerRevisioned[TUser any, TRequest any, TQuery any, TResult any](
 
 		// The revision is read once, after waiting, so that the answer and its
 		// tag describe the same state even if the projection moves on.
-		revision := settings.view.Revision()
+		revision, err := settings.view.Revision(r.Context())
+		if err != nil {
+			respondResult(w, struct{}{}, err, explain)
+			return
+		}
+
 		tag := etagOf(r, revision, query, settings.varies)
 
 		if serveUnchanged(w, r, revision, tag) {

@@ -1,11 +1,15 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -150,7 +154,7 @@ func TestQueryOptions(t *testing.T) {
 		// It is not nil, so the check has to let it through.
 		mux := http.NewServeMux()
 		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes", allNotes, answer,
-			httpapi.Revisioned(revisionFunc(func() string { return "7" }), time.Second))
+			httpapi.Revisioned(revisionFunc(func(context.Context) (string, error) { return "7", nil }), time.Second))
 
 		response := askNotes(mux, nil)
 
@@ -161,9 +165,9 @@ func TestQueryOptions(t *testing.T) {
 
 // revisionFunc is a view that is a function, so that a nil one can be handed
 // to Revisioned. It has reached every revision it is asked for.
-type revisionFunc func() string
+type revisionFunc func(ctx context.Context) (string, error)
 
-func (f revisionFunc) Revision() string { return f() }
+func (f revisionFunc) Revision(ctx context.Context) (string, error) { return f(ctx) }
 
 func (revisionFunc) WaitFor(context.Context, string) error { return nil }
 
@@ -331,6 +335,65 @@ func TestRevisioned(t *testing.T) {
 		assert.Equal(t, http.StatusUnprocessableEntity, response.Code)
 
 		assert.Empty(t, response.Header().Get("ETag"), "a failed answer was tagged")
+	})
+
+	for _, test := range []struct {
+		label   string
+		err     error
+		status  int
+		message string
+	}{
+		{"an internal failure", errors.New("the revisions are gone"), http.StatusInternalServerError, "internal server error"},
+		{"a transient failure", fmt.Errorf("%w: the revisions are down", architecturekit.ErrTransient), http.StatusServiceUnavailable,
+			"internal server error"},
+		{"a failure the caller can fix", fmt.Errorf("%w: the revisions are elsewhere", httpapi.ErrNotFound), http.StatusNotFound,
+			"not found: the revisions are elsewhere"},
+	} {
+		t.Run("a view that fails to read its revision answers "+test.label+" as every other error, without answering the query", func(t *testing.T) {
+			var logs bytes.Buffer
+			var isAnswered atomic.Bool
+			mux := http.NewServeMux()
+			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
+
+			unreadable := revisionFunc(func(context.Context) (string, error) { return "", test.err })
+			httpapi.Query(api, mux, "QUERY /notes", allNotes, answering(&isAnswered, countNotesIn(noteView())),
+				httpapi.Revisioned(unreadable, time.Second))
+
+			response := askNotes(mux, nil)
+
+			assert.Equal(t, test.status, response.Code)
+			assert.JSONEq(t, messageOf(t, test.message), response.Body.String())
+			assert.Empty(t, response.Header().Get("ETag"), "a failure was tagged")
+			assert.Empty(t, response.Header().Get(httpapi.HeaderRevision), "a failure carries a revision")
+			assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+			assert.False(t, isAnswered.Load(), "the query must not be answered without its revision")
+
+			if test.status >= http.StatusInternalServerError {
+				assert.Contains(t, logs.String(), `msg="httpapi: internal failure"`)
+				assert.Contains(t, logs.String(), `route="QUERY /notes"`)
+				assert.Contains(t, logs.String(), test.err.Error())
+			}
+		})
+	}
+
+	t.Run("a view reads its revision within the context of the request", func(t *testing.T) {
+		type key struct{}
+
+		var asked context.Context
+		mux := http.NewServeMux()
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes", allNotes, countNotesIn(noteView()),
+			httpapi.Revisioned(revisionFunc(func(ctx context.Context) (string, error) {
+				asked = ctx
+				return "7", nil
+			}), time.Second))
+
+		request := httptest.NewRequestWithContext(context.WithValue(t.Context(), key{}, "the request"), "QUERY", "/notes", nil)
+		request.Header.Set("X-User", "someone")
+		response := serve(t, mux, request)
+
+		require.Equal(t, http.StatusOK, response.Code)
+		require.NotNil(t, asked, "the revision was not read")
+		assert.Equal(t, "the request", asked.Value(key{}))
 	})
 
 	// The plain case stays honest: an answer that follows from the read model
@@ -775,7 +838,7 @@ func TestAwait(t *testing.T) {
 
 type refusingView struct{}
 
-func (refusingView) Revision() string { return "" }
+func (refusingView) Revision(context.Context) (string, error) { return "", nil }
 
 func (refusingView) WaitFor(context.Context, string) error {
 	return architecturekit.ErrNotARevision

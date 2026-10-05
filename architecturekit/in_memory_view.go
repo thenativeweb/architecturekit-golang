@@ -201,12 +201,13 @@ func NewInMemoryView[TKey comparable, TItem any](
 	}
 }
 
-// Revision is the last event the view has seen.
-func (v *InMemoryView[TKey, TItem]) Revision() string {
+// Revision is the last event the view has seen. The view keeps it in
+// memory, so it ignores the context and never fails.
+func (v *InMemoryView[TKey, TItem]) Revision(context.Context) (string, error) {
 	v.mutex.RLock()
 	defer v.mutex.RUnlock()
 
-	return v.revision
+	return v.revision, nil
 }
 
 // Seen records an event as processed. An event the view has already passed
