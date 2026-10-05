@@ -103,11 +103,15 @@ func describeSyntax(body []byte, syntax *json.SyntaxError, err, detailed error) 
 }
 
 // describeDuplicate says which name occurs twice, which encoding/json does
-// not say, but found, an error for a name that occurs twice, does.
+// not say, but found, an error for a name that occurs twice, does. An error
+// that does not point to the name comes back as it is.
 func describeDuplicate(err, found error) error {
 	// jsontext wraps ErrDuplicateName in a *jsontext.SyntacticError, which
 	// points to the name.
 	duplicate, _ := errors.AsType[*jsontext.SyntacticError](found)
+	if duplicate == nil {
+		return err
+	}
 
 	return &decodeFailure{
 		text:   fmt.Sprintf("duplicate field %q", duplicate.JSONPointer.LastToken()),
@@ -121,21 +125,25 @@ func describeDuplicate(err, found error) error {
 // them only while decoding, which encoding/json/v2 points to, unless it
 // stopped at an earlier failure that encoding/json passes over, such as a
 // value of the wrong kind. Then the name is where the error of encoding/json
-// says that it starts.
+// says that it starts, if a name starts there that repeats an earlier one of
+// its object, regardless of case.
 //
 // Any other error comes back as it is, such as a *json.SyntaxError of a type
-// that decodes itself, which points into JSON text of its own.
+// that decodes itself, which points into JSON text of its own. If that type is
+// where encoding/json/v2 stopped, its failure points into that text as well,
+// and if it failed with a syntax error at the very offset, the error is its.
 func describeNamesake(body []byte, syntax *json.SyntaxError, err, detailed error) error {
-	if errors.Is(detailed, jsontext.ErrDuplicateName) {
-		return describeDuplicate(err, detailed)
-	}
+	own, isOwn := ownFailureOf(detailed)
 
-	if syntax.Error() != jsontext.ErrDuplicateName.Error() {
+	switch {
+	case !isOwn && errors.Is(detailed, jsontext.ErrDuplicateName):
+		return describeDuplicate(err, detailed)
+	case syntax.Error() != jsontext.ErrDuplicateName.Error(), isOwn && pointsTo(own.Err, syntax.Offset):
 		return err
 	}
 
-	name, isName := nameAt(body, syntax.Offset)
-	if !isName {
+	name, isRepeated := repeatedNameAt(body, syntax.Offset)
+	if !isRepeated {
 		return err
 	}
 
@@ -155,8 +163,18 @@ func describeNamesake(body []byte, syntax *json.SyntaxError, err, detailed error
 // A value of a type that takes more than one kind of value, or none, has no
 // words of its own, and neither has the key of a map whose keys are booleans,
 // which encoding/json takes for no key at all. Their errors come back as they
-// are.
+// are, and so does the error of a type that decodes itself, which may decode
+// JSON text of its own with encoding/json, whose path then points into that
+// text rather than into the body.
 func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.UnmarshalTypeError, err, detailed error) error {
+	// encoding/json/v2 points to the type that decodes itself instead, unless
+	// encoding/json refused the value for that very type, before the type
+	// decoded anything, such as a number for a type that decodes itself from
+	// text, which JSON holds as a string.
+	if own, isOwn := ownFailureOf(detailed); isOwn && own.GoType != mismatch.Type {
+		return err
+	}
+
 	failure, isFailure := errors.AsType[*jsonv2.SemanticError](detailed)
 
 	// encoding/json takes the key of a map for a value, while encoding/json/v2
@@ -165,16 +183,20 @@ func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.Unmarsh
 		return describeKey(failure.JSONPointer.Parent(), mismatch.Type, err)
 	}
 
-	path := mismatch.Field
-	if path == "" {
-		// encoding/json has no path for the body as a whole, and leaves it out
-		// for a json.Number, wherever it is. encoding/json/v2 points to both,
-		// as long as it reports a failure of the same type.
-		if !isFailure || failure.GoType != mismatch.Type {
-			return err
-		}
+	// encoding/json writes the path that encoding/json/v2 points to with dots
+	// for slashes, so a dot in a name is taken for a slash, and it has no path
+	// for the body as a whole, nor for a json.Number, wherever it is. So the
+	// path is that of encoding/json/v2, as long as it reports a failure of the
+	// same type, and else that of encoding/json, if there is one.
+	var pointer jsontext.Pointer
 
-		path = pathOf(failure.JSONPointer)
+	switch {
+	case isFailure && failure.GoType == mismatch.Type:
+		pointer = failure.JSONPointer
+	case mismatch.Field != "":
+		pointer = jsontext.Pointer("/" + strings.ReplaceAll(mismatch.Field, ".", "/"))
+	default:
+		return err
 	}
 
 	expected, isKnown := kindOf(mismatch.Type)
@@ -187,9 +209,9 @@ func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.Unmarsh
 	// with the option string, which it writes as if it were a number.
 	found, text, _ := strings.Cut(mismatch.Value, " ")
 	isNumber := isNumberText(text)
-	subject := subjectOf(path)
+	subject := subjectOf(pointer)
 
-	if isQuoted(bodyType, path) && isQuotable(mismatch.Type) {
+	if isQuoted(bodyType, pointer) && isQuotable(mismatch.Type) {
 		if isNumber {
 			return describeNumber(subject, mismatch.Type, text, err)
 		}
@@ -256,7 +278,7 @@ func describeKey(mapPointer jsontext.Pointer, keyType reflect.Type, err error) e
 	}
 
 	return &decodeFailure{
-		text:   fmt.Sprintf("the keys of %s must be numbers", subjectOf(pathOf(mapPointer))),
+		text:   fmt.Sprintf("the keys of %s must be numbers", subjectOf(mapPointer)),
 		causes: []error{err},
 	}
 }
@@ -266,37 +288,73 @@ func describeKey(mapPointer jsontext.Pointer, keyType reflect.Type, err error) e
 // encoding/json/v2 reports, which points to the value. The value may also be
 // the key of a map.
 func describeTime(body []byte, failure *jsonv2.SemanticError, err error) error {
-	text := fmt.Sprintf("%s must be a time such as %q", subjectOf(pathOf(failure.JSONPointer)), exampleTime)
+	text := fmt.Sprintf("%s must be a time such as %q", subjectOf(failure.JSONPointer), exampleTime)
 	if isNameAt(body, failure.ByteOffset) {
-		text = fmt.Sprintf("the keys of %s must be times such as %q", subjectOf(pathOf(failure.JSONPointer.Parent())), exampleTime)
+		text = fmt.Sprintf("the keys of %s must be times such as %q", subjectOf(failure.JSONPointer.Parent()), exampleTime)
 	}
 
 	return &decodeFailure{text: text, causes: []error{err, failure}}
 }
 
-// nameAt returns the name of a member that starts at the offset of the body,
-// and reports whether there is one, which a colon follows. The offset may lie
-// beyond the body, if it comes from an error of a type that decodes itself.
-func nameAt(body []byte, offset int64) (string, bool) {
+// repeatedNameAt returns the name of a member that starts at the offset of
+// the body, and reports whether there is one that repeats an earlier name of
+// its object, regardless of case, as two names do that match the same field.
+// The offset may point anywhere, even beyond the body, if it comes from an
+// error of a type that decodes itself.
+func repeatedNameAt(body []byte, offset int64) (string, bool) {
+	reader := jsontext.NewDecoder(bytes.NewReader(body), strictJSON)
+
+	// The names that the objects around the next token hold so far, those of
+	// the innermost one last.
+	var names [][]string
+
+	for {
+		// A token starts after the whitespace, comma, or colon before it.
+		rest := body[reader.InputOffset():]
+		start := reader.InputOffset() + int64(len(rest)-len(bytes.TrimLeft(rest, " \t\r\n,:")))
+
+		token, err := reader.ReadToken()
+		if err != nil {
+			return "", false
+		}
+
+		// In an object, every name comes before its value, so the length of
+		// the object is odd right after a name.
+		kind, length := reader.StackIndex(reader.StackDepth())
+
+		switch {
+		case token.Kind() == '{':
+			names = append(names, nil)
+		case token.Kind() == '}':
+			names = names[:len(names)-1]
+		case token.Kind() == '"' && kind == '{' && length%2 == 1:
+			name := token.String()
+			earlier := names[len(names)-1]
+
+			if start == offset {
+				return name, slices.ContainsFunc(earlier, func(earlierName string) bool {
+					return strings.EqualFold(earlierName, name)
+				})
+			}
+
+			names[len(names)-1] = append(earlier, name)
+		}
+	}
+}
+
+// isNameAt reports whether the name of a member starts at the offset of the
+// body, which a colon follows. The offset may lie beyond the body.
+func isNameAt(body []byte, offset int64) bool {
 	rest := body[min(offset, int64(len(body))):]
 
 	reader := jsontext.NewDecoder(bytes.NewReader(rest), strictJSON)
-	token, err := reader.ReadToken()
-	if err != nil {
-		return "", false
+	if _, err := reader.ReadToken(); err != nil {
+		return false
 	}
 
 	after := bytes.TrimLeft(rest[reader.InputOffset():], " \t\r\n")
 
-	return token.String(), bytes.HasPrefix(after, []byte(":"))
-}
-
-// isNameAt reports whether the name of a member starts at the offset of the
-// body.
-func isNameAt(body []byte, offset int64) bool {
-	_, isName := nameAt(body, offset)
-
-	return isName
+	return bytes.HasPrefix(after, []byte(":"))
 }
 
 // isNumberText reports whether text is a number, written as JSON writes one,
@@ -307,21 +365,17 @@ func isNumberText(text string) bool {
 	return value.Kind() == '0' && value.IsValid() && strings.TrimSpace(text) == text
 }
 
-// pathOf returns the path that the pointer points to, the way encoding/json
-// names it, with a dot between the names of fields and the indexes of items,
-// such as "items.0.bookId".
-func pathOf(pointer jsontext.Pointer) string {
-	return strings.Join(slices.Collect(pointer.Tokens()), ".")
-}
-
-// subjectOf names the value at the path, in quotes, or as the body, if the
-// path is empty.
-func subjectOf(path string) string {
-	if path == "" {
+// subjectOf names the value that the pointer points to by its path, the way
+// encoding/json names it, with a dot between the names of fields and the
+// indexes of items, such as "items.0.bookId", in quotes, or as the body, if
+// the pointer is empty. A pointer to a member whose name is empty is not, and
+// its path is "".
+func subjectOf(pointer jsontext.Pointer) string {
+	if pointer == "" {
 		return "the body"
 	}
 
-	return strconv.Quote(path)
+	return strconv.Quote(strings.Join(slices.Collect(pointer.Tokens()), "."))
 }
 
 // The kinds of JSON values, as the texts of decodeFailure name them.
@@ -391,15 +445,14 @@ func kindOf(valueType reflect.Type) (string, bool) {
 	}
 }
 
-// isQuoted reports whether the field at the path, which names it the way a
-// *json.UnmarshalTypeError does, has the option string in its json tag, and
-// reports false for a path that it can not follow. The option applies to the
-// field itself only, not to the items of a list or the values of a map that
-// it holds.
-func isQuoted(valueType reflect.Type, path string) bool {
+// isQuoted reports whether the field that the pointer points to has the
+// option string in its json tag, and reports false for a pointer that it can
+// not follow. The option applies to the field itself only, not to the items
+// of a list or the values of a map that it holds.
+func isQuoted(valueType reflect.Type, pointer jsontext.Pointer) bool {
 	hasOption := false
 
-	for name := range strings.SplitSeq(path, ".") {
+	for name := range pointer.Tokens() {
 		for valueType.Kind() == reflect.Pointer {
 			valueType = valueType.Elem()
 		}
@@ -473,4 +526,37 @@ func fieldNamed(structType reflect.Type, name string) (reflect.StructField, bool
 // the methods of the interface TMethods.
 func hasMethodsOf[TMethods any](valueType reflect.Type) bool {
 	return reflect.PointerTo(valueType).Implements(reflect.TypeFor[TMethods]())
+}
+
+// ownFailureOf returns the failure that encoding/json/v2 reports, given
+// detailed, if it is that of a type that decodes itself, from JSON or from
+// text, and reports whether it is. A time does not count, since
+// encoding/json/v2 decodes it itself, as encoding/json does, and neither does
+// a failure that does not name its type.
+func ownFailureOf(detailed error) (*jsonv2.SemanticError, bool) {
+	failure, isFailure := errors.AsType[*jsonv2.SemanticError](detailed)
+	if !isFailure || failure.GoType == nil || failure.GoType == reflect.TypeFor[time.Time]() {
+		return nil, false
+	}
+
+	decodesItself := hasMethodsOf[json.Unmarshaler](failure.GoType) ||
+		hasMethodsOf[jsonv2.UnmarshalerFrom](failure.GoType) ||
+		hasMethodsOf[encoding.TextUnmarshaler](failure.GoType)
+	if !decodesItself {
+		return nil, false
+	}
+
+	return failure, true
+}
+
+// pointsTo reports whether err holds a syntax error that points to the
+// offset, as one of encoding/json or of encoding/json/jsontext does.
+func pointsTo(err error, offset int64) bool {
+	if syntax, isSyntax := errors.AsType[*json.SyntaxError](err); isSyntax {
+		return syntax.Offset == offset
+	}
+
+	syntactic, isSyntactic := errors.AsType[*jsontext.SyntacticError](err)
+
+	return isSyntactic && syntactic.ByteOffset == offset
 }

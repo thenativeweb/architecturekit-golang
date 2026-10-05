@@ -86,6 +86,81 @@ type catalogEntry struct {
 	Annotations annotations     `json:"annotations"`
 }
 
+// price decodes itself with encoding/json, as a type does that checks its
+// fields once they are decoded, and fails with the error of encoding/json,
+// whose path points into the JSON text of the price rather than into the
+// body.
+type price struct {
+	Amount   int    `json:"amount"`
+	Currency string `json:"currency"`
+}
+
+func (value *price) UnmarshalJSON(data []byte) error {
+	type plain price
+
+	return json.Unmarshal(data, (*plain)(value))
+}
+
+// shelfMark decodes itself from text, which holds JSON text of its own, and
+// fails with the error of encoding/json as well.
+type shelfMark struct {
+	Row int `json:"row"`
+}
+
+func (value *shelfMark) UnmarshalText(text []byte) error {
+	type plain shelfMark
+
+	return json.Unmarshal(text, (*plain)(value))
+}
+
+// keywords decodes itself from JSON text in a string, in which it refuses a
+// name that occurs twice, with the error of encoding/json, whose offset points
+// into the string rather than into the body.
+type keywords map[string]int
+
+func (value *keywords) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+
+	return jsonv2.Unmarshal([]byte(text), (*map[string]int)(value), json.DefaultOptionsV1(), jsontext.AllowDuplicateNames(false))
+}
+
+// ratings does the same as keywords, by the rules of encoding/json/v2, whose
+// error is one of encoding/json/jsontext.
+type ratings map[string]int
+
+func (value *ratings) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+
+	return jsonv2.Unmarshal([]byte(text), (*map[string]int)(value))
+}
+
+// labels refuses any list of labels, with an error that is a syntax error
+// and says that a name occurs twice, without pointing to one.
+type labels []string
+
+func (*labels) UnmarshalJSON([]byte) error {
+	return errors.Join(&json.SyntaxError{Offset: 1}, jsontext.ErrDuplicateName)
+}
+
+// stockEntry holds types that decode themselves next to fields whose names
+// they use as well, one of which takes its number in a string.
+type stockEntry struct {
+	Price    price          `json:"price"`
+	Amount   int            `json:"amount,string"`
+	Mark     shelfMark      `json:"mark"`
+	Keywords keywords       `json:"keywords"`
+	Ratings  ratings        `json:"ratings"`
+	Labels   labels         `json:"labels"`
+	ByName   map[string]int `json:"byName"`
+	Count    int            `json:"count"`
+}
+
 func bodyRequest(contentType string, body io.Reader) *http.Request {
 	request := httptest.NewRequest(http.MethodPost, "/preview", body)
 	if contentType != "" {
@@ -501,9 +576,114 @@ func TestBodyOf(t *testing.T) {
 		}{
 			{body: `{"publishedOn":"yesterday"}`, text: `parsing time "yesterday" as "2006-01-02": cannot parse "yesterday" as "2006"`},
 			{body: `{"annotations":"x"}`, text: "invalid character 'x' looking for beginning of value"},
+			{body: `{"annotations":"{\"a\":1}"}`, text: "json: cannot unmarshal number into Go struct field .a of type string"},
 		} {
 			t.Run(test.body, func(t *testing.T) {
 				assertMalformed(t, bodyErrorOf[catalogEntry](test.body), test.text)
+			})
+		}
+
+		// A value that does not fit names the path in the JSON text of the
+		// type, which is no path in the body, and may even be the path of
+		// another field, which takes its number in a string.
+		for _, test := range []struct {
+			body string
+			text string
+		}{
+			{body: `{"price":{"amount":"x"}}`, text: "json: cannot unmarshal string into Go struct field plain.amount of type int"},
+			{body: `{"price":{"currency":5}}`, text: "json: cannot unmarshal number into Go struct field plain.currency of type string"},
+			{body: `{"mark":"{\"row\":\"x\"}"}`, text: "json: cannot unmarshal string into Go struct field plain.row of type int"},
+		} {
+			t.Run(test.body, func(t *testing.T) {
+				err := bodyErrorOf[stockEntry](test.body)
+
+				assertMalformed(t, err, test.text)
+
+				_, isMismatch := errors.AsType[*json.UnmarshalTypeError](err)
+				assert.True(t, isMismatch, "the error of the type has to stay inspectable")
+			})
+		}
+
+		t.Run("in a list", func(t *testing.T) {
+			assertMalformed(t, bodyErrorOf[[]stockEntry](`[{"price":{"currency":5}}]`),
+				"json: cannot unmarshal number into Go struct field plain.currency of type string")
+		})
+
+		// So does a name that occurs twice in the JSON text of the type, whose
+		// offset points to anything in the body, even to the name of a field.
+		for _, test := range []struct {
+			label string
+			body  string
+			text  string
+		}{
+			{label: "at the name of a field", body: `{"count":1,"keywords":"{\"a\":1,` + strings.Repeat(" ", 3) + `\"a\":2}"}`, text: "duplicate object member name"},
+			{label: "with an error of encoding/json/jsontext", body: `{"ratings":"{\"a\":1,\"a\":2}"}`, text: "duplicate object member name"},
+			{label: "with a syntax error that says so without pointing to a name", body: `{"labels":["a","a"]}`, text: "\nduplicate object member name"},
+			// The offset points to a name that occurs twice in another case, in
+			// an object that is decoded into a map, which takes both.
+			{label: "at a name that occurs twice in a map", body: `{"byName":{"x":1,"X":2},"keywords":"{\"a\":1,` + strings.Repeat(" ", 9) + `\"a\":2}"}`,
+				text: "duplicate object member name"},
+			{label: "at a name that occurs twice in a map, with an error of encoding/json/jsontext", body: `{"byName":{"x":1,"X":2},"ratings":"{\"a\":1,` + strings.Repeat(" ", 10) + `\"a\":2}"}`,
+				text: "duplicate object member name"},
+		} {
+			t.Run(test.label, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[stockEntry](test.body), test.text)
+			})
+		}
+	})
+
+	t.Run("still says what a type that decodes itself from text takes", func(t *testing.T) {
+		// encoding/json refuses anything but a string for it, before the type
+		// decodes anything.
+		assertMalformed(t, bodyErrorOf[stockEntry](`{"mark":1}`), `"mark" must be a string`)
+	})
+
+	t.Run("still names a value after a time with the option string", func(t *testing.T) {
+		// encoding/json ignores the option for a time, which encoding/json/v2
+		// refuses, so the second decoding fails at the time, which decodes
+		// itself, but is no type of the application.
+		type delivery struct {
+			//lint:ignore SA5008 the test is about the option on a type that it does not apply to
+			ArrivedAt time.Time `json:"arrivedAt,string"`
+			Count     int       `json:"count"`
+		}
+
+		assertMalformed(t, bodyErrorOf[delivery](`{"arrivedAt":"2026-10-05T12:00:00Z","count":"x"}`), `"count" must be a number`)
+	})
+
+	t.Run("names a value by the names in its path, even if they hold a dot, or are empty", func(t *testing.T) {
+		type dotted struct {
+			ShelfRow int `json:"shelf.row,string"`
+		}
+
+		// The name of a field has a dot in it, and looks like the path to
+		// another field, which takes its number in a string.
+		type collision struct {
+			Shelf struct {
+				Row int `json:"row,string"`
+			} `json:"shelf"`
+			IsLent bool `json:"shelf.row"`
+		}
+
+		for _, test := range []struct {
+			label string
+			err   error
+			text  string
+		}{
+			{label: "a field with a dot", err: bodyErrorOf[dotted](`{"shelf.row":true}`), text: `"shelf.row" must be a string that holds a number`},
+			{label: "a field with a dot that looks like a path", err: bodyErrorOf[collision](`{"shelf.row":1}`), text: `"shelf.row" must be a boolean`},
+			{label: "a key with a slash", err: bodyErrorOf[map[string]int](`{"a/b":"x"}`), text: `"a/b" must be a number`},
+			{label: "a key with a tilde", err: bodyErrorOf[map[string]int](`{"a~b":"x"}`), text: `"a~b" must be a number`},
+			{label: "an empty key", err: bodyErrorOf[map[string]int](`{"":"x"}`), text: `"" must be a number`},
+			{label: "an empty key of a map whose keys are numbers", err: bodyErrorOf[map[string]map[int]int](`{"":{"x":1}}`),
+				text: `the keys of "" must be numbers`},
+			{label: "an empty key of a map of times", err: bodyErrorOf[map[string]time.Time](`{"":"x"}`),
+				text: `"" must be a time such as "2026-10-05T12:00:00Z"`},
+			{label: "an empty key of a map whose keys are times", err: bodyErrorOf[map[string]map[time.Time]int](`{"":{"x":1}}`),
+				text: `the keys of "" must be times such as "2026-10-05T12:00:00Z"`},
+		} {
+			t.Run(test.label, func(t *testing.T) {
+				assertMalformed(t, test.err, test.text)
 			})
 		}
 	})
@@ -587,6 +767,10 @@ func TestBodyOf(t *testing.T) {
 				assertMalformed(t, bodyErrorOf[catalogEntry](test.body), `duplicate field "`+test.name+`"`)
 			})
 		}
+
+		t.Run("in a different case, after a name that occurs twice in the JSON text of a type that decodes itself", func(t *testing.T) {
+			assertMalformed(t, bodyErrorOf[stockEntry](`{"keywords":"{\"a\":1,\"a\":2}","count":1,"COUNT":2}`), `duplicate field "COUNT"`)
+		})
 
 		t.Run("in a different case, after a time that does not parse", func(t *testing.T) {
 			type loan struct {
