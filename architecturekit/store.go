@@ -273,11 +273,12 @@ func Load[TState any](
 // iteration with the error of ParseRevision, which wraps ErrNotARevision and
 // names the ID, before the database is asked. It names neither the subjects
 // nor the option, since the ID usually comes from a request. Bounds that
-// leave no room for an event, such as BeforeEvent("0"), or AfterEvent("0")
-// together with BeforeEvent("1"), end the iteration before the database is
-// asked as well, with an error that wraps ErrEmptyRange and names the values
-// only. A range that is only empty for now, such as the one after the last
-// event, hands out no events, without an error. Otherwise, the iteration ends
+// leave no room for an event, such as BeforeEvent("0"), AfterEvent("0")
+// together with BeforeEvent("1"), or AfterEvent of the largest revision,
+// 2^63-1, end the iteration before the database is asked as well, with an
+// error that wraps ErrEmptyRange and names the values only. A range that is
+// only empty for now, such as the one after the last event written so far,
+// hands out no events, without an error. Otherwise, the iteration ends
 // with the first error, and stops reading as soon as the caller stops
 // iterating. If the context ends first, it ends with the context's error, so
 // that a read that was cut short never looks complete.

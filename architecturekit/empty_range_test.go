@@ -33,9 +33,12 @@ type boundedRead struct {
 // together, in arrangements that leave room for an event and ones that do
 // not.
 var boundedReads = []boundedRead{
-	// A lower bound alone always leaves room, since events can still come.
+	// A lower bound alone leaves room, since events can still come, unless it
+	// is after the largest revision, which no event can ever come after.
 	{"FromEvent alone", []architecturekit.ReadOption{architecturekit.FromEvent("2")}, ""},
 	{"AfterEvent alone", []architecturekit.ReadOption{architecturekit.AfterEvent("2")}, ""},
+	{"AfterEvent of the largest revision alone", []architecturekit.ReadOption{architecturekit.AfterEvent(largestRevision)},
+		`empty range: no event can lie after "9223372036854775807"`},
 
 	// An upper bound alone leaves no room only before the first event.
 	{"UpToEvent of the first event", []architecturekit.ReadOption{architecturekit.UpToEvent("0")}, ""},
@@ -182,9 +185,15 @@ func TestReadEmptyRanges(t *testing.T) {
 
 func TestReadEmptyRangesAtTheLargestRevision(t *testing.T) {
 	// ParseRevision accepts IDs up to 2^63-1, so the range after the largest one
-	// starts at 2^63, which still fits the numbers the bounds are compared as.
+	// starts at 2^63, which still fits the numbers the bounds are compared as,
+	// but which no event can ever reach.
 	for _, read := range []boundedRead{
-		{"AfterEvent alone", []architecturekit.ReadOption{architecturekit.AfterEvent(largestRevision)}, ""},
+		{"AfterEvent alone", []architecturekit.ReadOption{architecturekit.AfterEvent(largestRevision)},
+			`empty range: no event can lie after "9223372036854775807"`},
+		{"AfterEvent alone, given with a leading zero", []architecturekit.ReadOption{architecturekit.AfterEvent("0" + largestRevision)},
+			`empty range: no event can lie after "09223372036854775807"`},
+		{"AfterEvent of the one before alone", []architecturekit.ReadOption{architecturekit.AfterEvent("9223372036854775806")}, ""},
+		{"FromEvent alone", []architecturekit.ReadOption{architecturekit.FromEvent(largestRevision)}, ""},
 		{"UpToEvent alone", []architecturekit.ReadOption{architecturekit.UpToEvent(largestRevision)}, ""},
 		{"BeforeEvent alone", []architecturekit.ReadOption{architecturekit.BeforeEvent(largestRevision)}, ""},
 		{"FromEvent and UpToEvent of it",
@@ -270,6 +279,21 @@ func TestReadEmptyRangesAgainstTheDatabase(t *testing.T) {
 		events, errs = readAll(t, store, architecturekit.ExactSubject(subject), architecturekit.AfterEvent(ids[4]))
 		require.Empty(t, errs)
 		assert.Equal(t, later, idsOf(events))
+	})
+
+	t.Run("refuses a read after the largest revision rather than hand out every event", func(t *testing.T) {
+		// EventSourcingDB 1.2.0 counts past the largest revision, and so hands
+		// out every event after it, while later versions refuse the read as a
+		// malformed request. Neither answer is asked for here, since the kit
+		// does not ask the database at all.
+		subject, _ := fiveIn(t)
+
+		events, errs := readAll(t, requireStore(t), architecturekit.ExactSubject(subject), architecturekit.AfterEvent(largestRevision))
+
+		assert.Empty(t, events)
+		require.Len(t, errs, 1)
+		assert.ErrorIs(t, errs[0], architecturekit.ErrEmptyRange)
+		assert.EqualError(t, errs[0], `empty range: no event can lie after "9223372036854775807"`)
 	})
 
 	t.Run("refuses exactly the bounds the database would refuse", func(t *testing.T) {
