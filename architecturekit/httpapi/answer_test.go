@@ -212,8 +212,8 @@ func TestRouteAnswers(t *testing.T) {
 		{"a nil pointer of a concrete type", (*struct {
 			ID string `json:"id"`
 		})(nil)},
+		// A nil map encodes to {}, which holds no fields either.
 		{"a nil map", map[string]any(nil)},
-		{"a nil slice", []string(nil)},
 		{"a MarshalJSON function that returns null", nothingToAdd{}},
 	} {
 		t.Run("with the revision alone, and without a log entry, for "+test.name, func(t *testing.T) {
@@ -225,7 +225,7 @@ func TestRouteAnswers(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, response.Code)
 			assert.JSONEq(t, `{"revision": "0"}`, response.Body.String())
-			assert.Empty(t, logs.String(), "a value that encodes to null adds no fields, which is no failure")
+			assert.Empty(t, logs.String(), "a value without fields adds none, which is no failure")
 		})
 	}
 
@@ -380,6 +380,8 @@ var unusableFields = []struct {
 	}{"mine"}, "must not contain a revision"},
 	{"fields that are no JSON object", "just text", "must encode to a JSON object"},
 	{"fields that are an empty list", []string{}, "must encode to a JSON object"},
+	// A nil slice encodes to [], as anywhere in an answer, rather than to null.
+	{"fields that are a nil list", []string(nil), "must encode to a JSON object, not []"},
 	{"fields that can not be encoded", struct{ Callback func() }{func() {}}, "encoding the fields of the answer"},
 	{"fields that hold NaN", struct {
 		Score float64 `json:"score"`

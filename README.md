@@ -2255,7 +2255,7 @@ The route then answers with both:
 { "id": "…", "revision": "1" }
 ```
 
-The function is only called if the command has succeeded. A value that encodes to `null` adds no fields. That is `nil`, and also a `nil` pointer of a concrete type, which an interface does not count as `nil`, such as the one that `return findShelf(handled)` hands back if `findShelf` returns a `*Shelf` and an error, and fails.
+The function is only called if the command has succeeded. A value that encodes to `null` adds no fields. That is `nil`, and also a `nil` pointer of a concrete type, which an interface does not count as `nil`, such as the one that `return findShelf(handled)` hands back if `findShelf` returns a `*Shelf` and an error, and fails. The fields are encoded as the result of a query is, so a `nil` slice or map in them is answered as `[]` or `{}` (see [Handling Queries over HTTP](#handling-queries-over-http)).
 
 If the function returns an error, the events are written all the same, so the route still answers with `200 OK` and the revision, which the caller needs to read its own writes, and must not take for a reason to send the command again, whatever is wrong with the fields the function returned along with the error. The answer then holds these fields if they can be used, and none otherwise. The error is logged through the logger of the API, with the route, and so is why the fields were dropped, if they were.
 
@@ -2420,9 +2420,11 @@ func toGetBook(r *http.Request, _ httpapi.NoBody, user User) (GetBook, error) {
 }
 ```
 
-The route answers with `200 OK` and the result as JSON, with `Cache-Control: no-store`, so that no cache keeps it (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)). A result without items is answered with an empty list, `[]`, even as the `nil` slice that `query.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
+The route answers with `200 OK` and the result as JSON, with `Cache-Control: no-store`, so that no cache keeps it (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)). The result is encoded as `encoding/json` encodes it, except that a `nil` slice is answered as an empty list, `[]`, and a `nil` map as an empty object, `{}`, at every depth, such as the `nil` slice that `query.Collect` returns when there are no items, or a field of a response type that holds a `nil` slice. So a caller gets a list or an object, whether it holds anything or not. A `nil` pointer, on the other hand, is answered as `null`. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
 
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error. As with `Respond`, an error without a status code of its own is answered with `500 Internal Server Error`, so wrap a mistake in the request that the handler finds itself with `httpapi.ErrMalformed` (see [Handling Commands over HTTP](#handling-commands-over-http)). To answer an error without a result, call the `RespondError` function (see [Answering Queries in Your Own Format](#answering-queries-in-your-own-format)).
+
+*Note that a `nil` slice of bytes is answered as an empty string, `""`, since a slice of bytes is encoded as a string in base64, and that a `nil` `json.RawMessage` is answered as `null`, since it holds JSON text.*
 
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 

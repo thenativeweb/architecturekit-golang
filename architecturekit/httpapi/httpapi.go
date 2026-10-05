@@ -428,7 +428,8 @@ type routeSettings[TCommand any] struct {
 // A value that encodes to null adds no fields. That is nil, and also a nil
 // pointer of a concrete type, which an interface does not count as nil, such
 // as the one that return lookup(handled) hands back if lookup returns a *T and
-// an error, and fails.
+// an error, and fails. The value is encoded as a result is (see
+// RespondResult), so a nil slice or map in it is [] or {}.
 //
 // If the function fails, the command has succeeded all the same, and its
 // events are written. So the answer stays a success, with the revision, which
@@ -749,8 +750,9 @@ func respond(
 // fieldsOf turns what the function of Adding returned into the fields of the
 // answer. A value that encodes to null holds no fields, such as nil, and also
 // a nil pointer of a concrete type, which an interface does not count as nil.
-// The fields are decoded with numbers kept as they are, so that a large
-// integer does not lose digits on its way through a float.
+// The value is encoded as a result is (see answerJSON), so a nil slice or map
+// in it is [] or {}, and the fields are decoded with numbers kept as they are,
+// so that a large integer does not lose digits on its way through a float.
 //
 // A value that can not be encoded, also because a MarshalJSON function
 // panics, that does not encode to a JSON object, or that holds a revision,
@@ -761,7 +763,7 @@ func fieldsOf(value any) (fields map[string]any, err error) {
 	// The error is wrapped with %v rather than %w, since fields that can not
 	// be encoded are a mistake in the code, which has to be answered with 500,
 	// whatever category the error of a MarshalJSON function has.
-	encoded, err := json.Marshal(value)
+	encoded, err := jsonv2.Marshal(value, answerJSON)
 	if err != nil {
 		return nil, fmt.Errorf("httpapi: encoding the fields of the answer: %v", err)
 	}

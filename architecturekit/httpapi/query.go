@@ -1,9 +1,9 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -197,10 +197,10 @@ func Varying(varies Volatile) QueryOption {
 }
 
 // Query wires a query to the mux and answers in the kit's default format,
-// which is the result itself, with Cache-Control: no-store, so that no cache
-// keeps it. With Revisioned, it reads its own writes and answers 304 when
-// nothing has changed; with Varying in addition, its tag changes with what the
-// answer takes from elsewhere.
+// which is the result itself, encoded as RespondResult encodes it, with
+// Cache-Control: no-store, so that no cache keeps it. With Revisioned, it
+// reads its own writes and answers 304 when nothing has changed; with Varying
+// in addition, its tag changes with what the answer takes from elsewhere.
 //
 // A query is asked with QUERY, the method that HTTP defines in RFC 10008.
 // Like GET, it is safe, so it changes nothing, but like POST, it carries a
@@ -285,6 +285,12 @@ func Query[TUser any, TRequest any, TQuery any, TResult any](
 // encoded, such as one that holds NaN, is answered with 500 as well. Like
 // Respond, it says Cache-Control: no-store, so that no cache keeps the answer.
 //
+// The result is encoded as encoding/json encodes it, except that a nil slice
+// is [] and a nil map is {}, at every depth, rather than null, so that a
+// caller gets a list or an object, whether it holds anything or not. A nil
+// pointer is still null, and a nil slice of bytes is "", since a slice of
+// bytes is a string in base64.
+//
 // As with Respond, an error without a status of its own is answered with 500,
 // so wrap a mistake in the request that a handler of your own has found with
 // ErrMalformed, to answer it with 400.
@@ -332,20 +338,25 @@ func respondResultAt[TResult any](
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 
-	var body bytes.Buffer
+	var body []byte
 	if err == nil {
 		// The error is wrapped with %v rather than %w, since a result that can not
 		// be encoded is a mistake in the code, which has to be answered with 500,
 		// whatever category the error of a MarshalJSON function has.
-		if failure := json.NewEncoder(&body).Encode(listOf(result)); failure != nil {
+		encoded, failure := jsonv2.Marshal(result, answerJSON)
+		if failure != nil {
 			err = fmt.Errorf("httpapi: encoding the result: %v", failure)
 		}
+
+		// The answer ends with a newline, as what an Encoder of encoding/json
+		// writes does.
+		body = append(encoded, '\n')
 	}
 
 	if err == nil {
 		writeRevision(w, revision, tag)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(body.Bytes())
+		_, _ = w.Write(body)
 		return
 	}
 
@@ -356,14 +367,17 @@ func respondResultAt[TResult any](
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": message})
 }
 
-// listOf turns a nil slice into an empty one, so that a query that finds
-// nothing answers with [] rather than null. query.Collect, which the kit
-// suggests for turning items into a slice, returns nil when there are none.
-func listOf(result any) any {
-	value := reflect.ValueOf(result)
-	if value.Kind() == reflect.Slice && value.IsNil() {
-		return []any{}
-	}
-
-	return result
-}
+// answerJSON are the rules that results and the fields of Adding are encoded
+// by: those of encoding/json, except that a nil slice is written as [], and a
+// nil map as {}, at every depth, rather than as null, so that a caller gets a
+// list or an object, whether it holds anything or not, such as for the nil
+// slice that query.Collect returns when there are no items.
+//
+// A nil pointer and a nil interface are still null, and so is a nil
+// json.RawMessage, which holds JSON text. A nil slice of bytes is "", since a
+// slice of bytes is written as a string in base64.
+var answerJSON = jsonv2.JoinOptions(
+	json.DefaultOptionsV1(),
+	jsonv2.FormatNilSliceAsNull(false),
+	jsonv2.FormatNilMapAsNull(false),
+)
