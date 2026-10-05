@@ -159,7 +159,7 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, httpapi.StatusFor(err))
 	})
 
-	t.Run("Respond and RespondResult answer it with 400 and the error, without logging it", func(t *testing.T) {
+	t.Run("Respond, RespondResult, and RespondError answer it with 400 and the error, without logging it", func(t *testing.T) {
 		_, refused := architecturekit.CompareRevisions("abc", "")
 		require.ErrorIs(t, refused, architecturekit.ErrNotARevision)
 
@@ -169,6 +169,9 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 			},
 			"RespondResult": func(w http.ResponseWriter, r *http.Request, api *httpapi.API[user]) {
 				httpapi.RespondResult(w, r, api, []noteResponse(nil), refused)
+			},
+			"RespondError": func(w http.ResponseWriter, r *http.Request, api *httpapi.API[user]) {
+				httpapi.RespondError(w, r, api, refused)
 			},
 		}
 

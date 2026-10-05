@@ -95,12 +95,12 @@ type apiSettings struct {
 // WithLogger has everything that answers through the API log every error it
 // does not explain to the caller in full through the given logger, once, with
 // the method and the route of the request: the routes the API wires up, and
-// Respond and RespondResult in a handler of your own. A failure of the server
-// is logged as an error, which for a panic includes its value and its stack,
-// and a refusal whose details the caller is not told, such as one with 401 or
-// 409 (see Respond), as information. The same goes for an answer that Adding
-// could not complete, which is logged as an error. Without it, they log
-// through the default logger of log/slog.
+// Respond, RespondResult, and RespondError in a handler of your own. A failure
+// of the server is logged as an error, which for a panic includes its value
+// and its stack, and a refusal whose details the caller is not told, such as
+// one with 401 or 409 (see Respond), as information. The same goes for an
+// answer that Adding could not complete, which is logged as an error. Without
+// it, they log through the default logger of log/slog.
 //
 // A nil logger is a programming error, so WithLogger panics.
 func WithLogger(logger *slog.Logger) APIOption {
@@ -567,10 +567,10 @@ const statusClientClosedRequest = 499
 // is not logged, since nothing failed. If its deadline ran out, the server
 // took too long, which maps to 503 and is logged.
 //
-// The status says nothing about what to tell the caller. Respond and
-// RespondResult explain only an error that is written for the caller, and an
-// answer in a format of your own should do the same: the error of a 401, a
-// 409, or a status of 500 and above may name internals.
+// The status says nothing about what to tell the caller. Respond,
+// RespondResult, and RespondError explain only an error that is written for
+// the caller, and an answer in a format of your own should do the same: the
+// error of a 401, a 409, or a status of 500 and above may name internals.
 func StatusFor(err error) int {
 	switch {
 	case err == nil:
@@ -651,6 +651,34 @@ func Respond[TUser any](
 	err error,
 ) {
 	respond(w, written, nil, err, api.explain(r))
+}
+
+// RespondError answers an error without a result, exactly as Respond and
+// RespondResult answer one: with the status that StatusFor maps it to, the
+// same messages, and the same logging (see WithLogger). Use it in a handler of
+// your own that answers a success in a format of its own, such as a download,
+// and a failure in the kit's, such as one of UserOf or Ask.
+//
+// As with Respond, an error without a status of its own is answered with 500,
+// so wrap a mistake in the request that a handler of your own has found with
+// ErrMalformed, to answer it with 400.
+//
+// A nil API is a programming error, so RespondError panics, as Respond and
+// RespondResult do, and so is a nil error, since there is nothing to answer.
+// The API is checked first.
+func RespondError[TUser any](
+	w http.ResponseWriter,
+	r *http.Request,
+	api *API[TUser],
+	err error,
+) {
+	explain := api.explain(r)
+
+	if err == nil {
+		panic("architecturekit/httpapi: RespondError needs an error, not nil")
+	}
+
+	respondResult(w, struct{}{}, err, explain)
 }
 
 // respond writes the answer to a command, with the given fields next to the
