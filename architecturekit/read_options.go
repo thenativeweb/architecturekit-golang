@@ -8,11 +8,12 @@ import (
 )
 
 // ErrEmptyRange means that the bounds of a read leave no room for an event,
-// such as one before "0", or one after "0" and before "1". No event can ever
-// lie in such a range, so it is a mistake of whoever chose the bounds, which
-// usually come from a request. A range that is only empty for now, such as
-// the one after the last event, is no such mistake, since events can still
-// come there, so Read hands out no events for it, without an error.
+// such as one before "0", one after "0" and before "1", or one after the
+// largest revision, 2^63-1. No event can ever lie in such a range, so it is a
+// mistake of whoever chose the bounds, which usually come from a request. A
+// range that is only empty for now, such as the one after the last event
+// written so far, is no such mistake, since events can still come there, so
+// Read hands out no events for it, without an error.
 var ErrEmptyRange = errors.New("empty range")
 
 // ReadOption narrows down which events Read hands out, or turns around the
@@ -184,10 +185,11 @@ func readSettingsOf(subjects Subjects, options []ReadOption) readSettings {
 // checkBounds returns the error of ParseRevision for the first bound whose ID
 // is not the ID of an event, which, unlike a revision, an empty ID is not, the
 // lower bound first. If both IDs are fine, it fails with ErrEmptyRange if the
-// bounds leave no room for an event, and returns nil otherwise. FromLatestEvent
-// has no ID, and leaves the lower bound of the database empty, so that the
-// lower bound is not known, and only an upper bound that leaves no room for an
-// event on its own, before "0", is refused then.
+// bounds leave no room for an event, which includes the range after the
+// largest revision without an upper bound, and returns nil otherwise.
+// FromLatestEvent has no ID, and leaves the lower bound of the database empty,
+// so that the lower bound is not known, and only an upper bound that leaves no
+// room for an event on its own, before "0", is refused then.
 func (s readSettings) checkBounds() error {
 	lower, upper := s.database.LowerBound, s.database.UpperBound
 
@@ -195,8 +197,10 @@ func (s readSettings) checkBounds() error {
 	// end. FromEvent(n) starts it at n and AfterEvent(n) at n+1, and
 	// UpToEvent(n) ends it after n and BeforeEvent(n) at n. Counting the end
 	// that way needs no number below 0 for BeforeEvent("0"), and ParseRevision
-	// ends at 2^63-1, so n+1 always fits.
-	var first, end uint64
+	// ends at 2^63-1, so n+1 always fits. Without an upper bound, the range
+	// ends after the largest revision, so that no event can lie after it.
+	var first uint64
+	end := uint64(1) << 63
 
 	if lower != nil {
 		id, err := ParseRevision(lower.ID)
@@ -210,18 +214,16 @@ func (s readSettings) checkBounds() error {
 		}
 	}
 
-	if upper == nil {
-		return nil
-	}
+	if upper != nil {
+		id, err := ParseRevision(upper.ID)
+		if err != nil {
+			return err
+		}
 
-	id, err := ParseRevision(upper.ID)
-	if err != nil {
-		return err
-	}
-
-	end = id
-	if upper.Type == eventsourcingdb.BoundTypeInclusive {
-		end++
+		end = id
+		if upper.Type == eventsourcingdb.BoundTypeInclusive {
+			end++
+		}
 	}
 
 	if first >= end {
@@ -234,8 +236,13 @@ func (s readSettings) checkBounds() error {
 // describeRange names the bounds of a range by their values only, since they
 // usually come from a request, whose caller knows neither the options of Read
 // nor the subjects: from "2" up to "1", from "1" and before "1", or after "0"
-// and before "1", and before "0" without a lower bound.
+// and before "1", before "0" without a lower bound, and after the largest
+// revision without an upper bound, the only range that is empty then.
 func describeRange(lower, upper *eventsourcingdb.Bound) string {
+	if upper == nil {
+		return fmt.Sprintf("after %q", lower.ID)
+	}
+
 	ending := fmt.Sprintf("before %q", upper.ID)
 	if upper.Type == eventsourcingdb.BoundTypeInclusive {
 		ending = fmt.Sprintf("up to %q", upper.ID)
