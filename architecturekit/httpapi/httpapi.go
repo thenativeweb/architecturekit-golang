@@ -977,7 +977,7 @@ var crossOrigin = http.NewCrossOriginProtection()
 // it is empty, or {}.
 func requireNoBody(r *http.Request) error {
 	if crossOrigin.Check(r) != nil {
-		return fmt.Errorf("%w: a command without a body is not accepted from another origin", ErrForbidden)
+		return fmt.Errorf("%w: a request without a body is not accepted from another origin", ErrForbidden)
 	}
 
 	// A request that a server receives always has a body, which is empty if

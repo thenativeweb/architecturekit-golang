@@ -286,7 +286,7 @@ var sameOrigins = []struct {
 	{label: "an old browser on the same host", secFetchSite: "", origin: "http://example.com"},
 }
 
-const fromAnotherOrigin = "forbidden: a command without a body is not accepted from another origin"
+const fromAnotherOrigin = "forbidden: a request without a body is not accepted from another origin"
 
 func TestNoBodyFromAnotherOrigin(t *testing.T) {
 	for _, test := range crossOrigins {
