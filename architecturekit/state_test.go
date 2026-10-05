@@ -190,12 +190,22 @@ func TestDecider(t *testing.T) {
 		assert.Nil(t, decider.State())
 	})
 
-	t.Run("panics in Execute as the zero value, as a decider without a state did", func(t *testing.T) {
+	t.Run("panics in Execute as the zero value, naming the mistake", func(t *testing.T) {
 		var decider architecturekit.Decider[increment, counter]
 		store := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
 
-		assert.Panics(t, func() {
+		assert.PanicsWithValue(t, "architecturekit: Execute needs a decider made with NewDecider, not the zero Decider", func() {
 			_, _ = architecturekit.Execute(context.Background(), store, decider, increment{subject: "/counter/1", By: 1})
+		})
+	})
+
+	t.Run("panics in Execute as the zero value before it checks the command", func(t *testing.T) {
+		var decider architecturekit.Decider[increment, counter]
+		store := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
+
+		// The command declares no precondition, which Execute refuses.
+		assert.PanicsWithValue(t, "architecturekit: Execute needs a decider made with NewDecider, not the zero Decider", func() {
+			_, _ = architecturekit.Execute(context.Background(), store, decider, increment{subject: "/counter/1", By: 1}.declaring())
 		})
 	})
 }

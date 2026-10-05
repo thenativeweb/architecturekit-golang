@@ -269,10 +269,10 @@ func TestGiven(t *testing.T) {
 		recorder.expectFailure(t, "given:")
 	})
 
-	t.Run("panics for the zero Decider, as for a decider without a state", func(t *testing.T) {
+	t.Run("panics for the zero Decider, naming the mistake", func(t *testing.T) {
 		var zeroDecider architecturekit.Decider[open, account]
 
-		assert.Panics(t, func() {
+		assert.PanicsWithValue(t, "architecturekittest: Given needs a decider made with NewDecider, not the zero Decider", func() {
 			architecturekittest.Given(t, zeroDecider)
 		})
 	})
@@ -426,10 +426,10 @@ func TestGivenStored(t *testing.T) {
 		recorder.expectFailure(t, "given stored:")
 	})
 
-	t.Run("panics for the zero Decider, as for a decider without a state", func(t *testing.T) {
+	t.Run("panics for the zero Decider, naming the mistake", func(t *testing.T) {
 		var zeroDecider architecturekit.Decider[open, account]
 
-		assert.Panics(t, func() {
+		assert.PanicsWithValue(t, "architecturekittest: GivenStored needs a decider made with NewDecider, not the zero Decider", func() {
 			architecturekittest.GivenStored(t, zeroDecider)
 		})
 	})

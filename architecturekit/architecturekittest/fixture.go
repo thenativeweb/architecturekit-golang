@@ -30,12 +30,20 @@ type Fixture[TCommand architecturekit.Command, TState any] struct {
 
 // Given builds the state from typed events, which is how a test usually
 // spells out a history.
+//
+// The zero Decider, one that was not made with architecturekit.NewDecider, is
+// a programming error, so Given panics, and names the mistake rather than a
+// nil pointer.
 func Given[TCommand architecturekit.Command, TState any](
 	t testing.TB,
 	decider architecturekit.Decider[TCommand, TState],
 	history ...architecturekit.Event,
 ) *Fixture[TCommand, TState] {
 	t.Helper()
+
+	if decider.State() == nil {
+		panic("architecturekittest: Given needs a decider made with NewDecider, not the zero Decider")
+	}
 
 	state, err := architecturekit.Replay(decider.State(), history...)
 	if err != nil {
@@ -48,12 +56,18 @@ func Given[TCommand architecturekit.Command, TState any](
 // GivenStored builds the state from events in their stored shape, running the
 // upcasters on the way. Use it to test that an older event type still arrives
 // correctly, which typed events cannot show.
+//
+// Like Given, it panics for the zero Decider.
 func GivenStored[TCommand architecturekit.Command, TState any](
 	t testing.TB,
 	decider architecturekit.Decider[TCommand, TState],
 	history ...eventsourcingdb.Event,
 ) *Fixture[TCommand, TState] {
 	t.Helper()
+
+	if decider.State() == nil {
+		panic("architecturekittest: GivenStored needs a decider made with NewDecider, not the zero Decider")
+	}
 
 	state, err := architecturekit.ReplayStored(decider.State(), history...)
 	if err != nil {

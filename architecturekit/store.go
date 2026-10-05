@@ -644,12 +644,20 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // and fails with the context's error, also if it ends while the decider
 // decides. Once the write has begun, it is finished, since the client writes
 // without a context.
+//
+// The zero Decider, one that was not made with NewDecider, is a programming
+// error, so Execute panics, before it looks at the command, and names the
+// mistake rather than a nil pointer.
 func Execute[TCommand Command, TState any](
 	ctx context.Context,
 	store *Store,
 	decider Decider[TCommand, TState],
 	cmd TCommand,
 ) ([]eventsourcingdb.Event, error) {
+	if decider.State() == nil {
+		panic("architecturekit: Execute needs a decider made with NewDecider, not the zero Decider")
+	}
+
 	declared, err := checkPreconditions(cmd)
 	if err != nil {
 		return nil, err

@@ -330,9 +330,9 @@ func (s *State[TState]) checkRules(subject string, events []Event) error {
 //
 // The zero value, such as a variable that was declared but never set, has
 // neither a state nor a decision, so its State returns nil. Handing it to
-// Execute or to the test fixture of architecturekittest is a programming
-// error and panics, and so does handing it to Route of httpapi, while Handle
-// fails with an error that names the mistake.
+// Execute, to the test fixture of architecturekittest, or to Route of httpapi
+// is a programming error, so they panic, while Handle fails with an error.
+// Either way, the text names the mistake rather than a nil pointer.
 type Decider[TCommand Command, TState any] struct {
 	state  *State[TState]
 	decide func(ctx context.Context, cmd TCommand, state TState) ([]Event, error)

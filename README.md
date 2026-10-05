@@ -313,7 +313,7 @@ var acquireBook = architecturekit.NewDecider(bookState,
 
 The types of the command and the state are taken from the function, so they do not have to be repeated. `NewDecider` returns a `Decider`. Its `State` function returns the state, and its `Decide` function decides on a command, given the state, with the function you handed over.
 
-*Note that calling `NewDecider` with `nil` as the state or as the function panics. A `Decider` that was declared but never created with `NewDecider` has neither, so handing it to `Execute`, to the test fixture, or to `Route` panics as well, and `Handle` fails with an error that names the mistake (see [Handling Commands over HTTP](#handling-commands-over-http)).*
+*Note that calling `NewDecider` with `nil` as the state or as the function panics. A `Decider` that was declared but never created with `NewDecider` has neither, so handing it to `Execute`, to the test fixture, or to `Route` panics as well, and `Handle` fails with an error (see [Handling Commands over HTTP](#handling-commands-over-http)). Either way, the text names the mistake.*
 
 To reject a command, return an error created with the `NewDomainError` function. It takes a format string and arguments, like `fmt.Errorf`, and returns an error of the type `*DomainError`, whose message is exactly the formatted text, and which belongs to the category `ErrDomain` (see [Handling Errors](#handling-errors)).
 
