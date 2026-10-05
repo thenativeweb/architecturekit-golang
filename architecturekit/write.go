@@ -106,8 +106,8 @@ func writePreconditions(declared []Precondition) ([]eventsourcingdb.Precondition
 				return nil, fmt.Errorf("%w: a write combines Unconditionally with other preconditions", ErrPermanent)
 			}
 		default:
-			return nil, fmt.Errorf("%w: a write declares a precondition not made with Require or Unconditionally",
-				ErrPermanent)
+			return nil, fmt.Errorf("%w: a write declares a zero Precondition, which none of OnPristineSubject, "+
+				"OnPopulatedSubject, OnEventID, OnStateRead, Require, or Unconditionally returns", ErrPermanent)
 		}
 	}
 

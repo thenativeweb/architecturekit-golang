@@ -112,7 +112,7 @@ func TestWrite(t *testing.T) {
 				architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition(subject)),
 			}, "combines Unconditionally"},
 			{"a nil precondition", event, []architecturekit.Precondition{architecturekit.Require(nil)}, "nil"},
-			{"a precondition made by hand", event, []architecturekit.Precondition{{}}, "not made with Require or Unconditionally"},
+			{"a precondition made by hand", event, []architecturekit.Precondition{{}}, "a write declares a zero Precondition, which none of OnPristineSubject, OnPopulatedSubject, OnEventID, OnStateRead, Require, or Unconditionally returns"},
 			{"an event without a subject", []architecturekit.EventOn{{Event: incremented{By: 1}}}, []architecturekit.Precondition{architecturekit.Unconditionally()}, "needs a subject and an event"},
 			{"a subject without an event", []architecturekit.EventOn{{Subject: subject}}, []architecturekit.Precondition{architecturekit.Unconditionally()}, "needs a subject and an event"},
 			{"a nil pointer as the event", []architecturekit.EventOn{{Subject: subject, Event: (*incremented)(nil)}}, []architecturekit.Precondition{architecturekit.Unconditionally()}, "event 0 of a write needs a subject and an event"},

@@ -1515,10 +1515,10 @@ The options after the projection are optional. `Named` gives the projection a na
 `WaitCaughtUp` waits until the run has applied the events that were stored when it started, and returns `nil` then, and only then, so that `nil` always means that the view is complete:
 
 - If the run ends before it catches up, `WaitCaughtUp` returns the error the run ended with.
-- If the run ends without an error before it catches up, because its context ended, for example on a timeout while the database can not be reached, `WaitCaughtUp` returns an error that wraps `context.Canceled` and says that the projection stopped before it caught up.
+- If the run ends without an error before it catches up, because its context ended, `WaitCaughtUp` returns an error that wraps `context.Canceled` and says that the projection stopped before it caught up.
 - If the context handed to `WaitCaughtUp` ends first, it returns the error of that context.
 
-A run that has caught up counts as caught up, even if it has ended since, or the context handed to `WaitCaughtUp` has ended.
+A run that has caught up counts as caught up, even if it has ended since, or the context handed to `WaitCaughtUp` has ended. If several of the other cases have happened by the time `WaitCaughtUp` looks, the error the run ended with comes first, since it tells why, and the error of the context handed to `WaitCaughtUp` comes next. So if the run and `WaitCaughtUp` share a context, as in the example above, and that context times out, `WaitCaughtUp` returns its error, `context.DeadlineExceeded`, which tells more than `context.Canceled`.
 
 For finer control, the run offers what `WaitCaughtUp` waits for. `CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. If the run ends before it catches up, the channel is never closed, so wait for `Done` as well. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did, since canceling the context is how a projection is stopped. If `Apply` returns an error that trying again will not fix, the run ends, and `Err` returns it.
 
@@ -2082,7 +2082,7 @@ For an application without authentication, call the `NewPublicAPI` function inst
 api := httpapi.NewPublicAPI(store)
 ```
 
-Everything that answers through an API logs every error it does not explain to the caller in full, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. A failure of the server is logged at level `Error`, and a refusal with `401` or `409`, whose details the caller is not told, at level `Info` (see [Handling Commands over HTTP](#handling-commands-over-http)). A panic is logged with its value and its stack. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
+Everything that answers through an API logs every error it does not explain to the caller in full, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. A failure of the server is logged at level `Error`, and a refusal whose details the caller is not told, such as one with `401`, `409`, or a `404` for a query that found no item, at level `Info` (see [Handling Commands over HTTP](#handling-commands-over-http)). A panic is logged with its value and its stack. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
 
 ```go
 api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
@@ -2092,7 +2092,7 @@ api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
 
 #### Determining the User
 
-To determine the user in a handler of your own, call the `UserOf` function. If the user cannot be determined, it returns an error that wraps `httpapi.ErrUnauthorized` as well as the error of the function, so that `errors.Is` and `errors.As` find either. If the error of the function has a status code of its own, though, it returns that error as it is (see [Setting Up an HTTP API](#setting-up-an-http-api)):
+To determine the user in a handler of your own, call the `UserOf` function. If the user can not be determined, it returns an error that wraps `httpapi.ErrUnauthorized` as well as the error of the function, so that `errors.Is` and `errors.As` find either. If the error of the function has a status code of its own, though, it returns that error as it is (see [Setting Up an HTTP API](#setting-up-an-http-api)):
 
 ```go
 mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
@@ -2144,7 +2144,7 @@ Then call the `Route` function with the API, the mux, a pattern, the function th
 httpapi.Route(api, mux, "POST /api/books/{id}/borrow", toBorrowBook, borrowBook)
 ```
 
-A command changes something, so the pattern names a method that may do so, usually `POST`. A pattern without a method, such as `/api/books/{id}/borrow`, accepts every method, `GET` included, and `GET`, `HEAD`, `OPTIONS`, and `QUERY` must not change anything. A browser sends them from another site without asking, for example for a link that the user follows, along with the cookies of the user. So `Route` panics for a pattern without a method, or with one of these, rather than executing the command for any site that links to it.
+A command changes something, so the pattern names a method that may do so, usually `POST`. A pattern without a method, such as `/api/books/{id}/borrow`, accepts every method, `GET` included, and `GET`, `HEAD`, `OPTIONS`, and `QUERY` must not change anything. A browser sends `GET` and `HEAD` from another site without asking, for example for a link that the user follows, along with the cookies of the user, and a route that takes no body lets `GET`, `HEAD`, and `OPTIONS` pass from another origin (see [Handling Commands Without a Body](#handling-commands-without-a-body)). `QUERY` may change nothing either, since HTTP defines it as safe and repeatable, so a client or a cache may send it again. So `Route` panics for a pattern without a method, or with one of these, rather than executing the command for any site that links to it, or whenever a query is sent again.
 
 The route decodes the request body, builds the command, and executes it:
 
@@ -2331,7 +2331,7 @@ To read a body by the same rules in a handler of your own, call the `BodyOf` fun
 
 ### Handling Queries over HTTP
 
-A query is asked with the method `QUERY`, as in the v2 API of EventSourcingDB. Like `GET`, it changes nothing, but like `POST`, it carries a body, so a query takes its input from the body, as a command does. To answer a query over HTTP, define a request type with JSON annotations for the body, and a function that returns the query. Like the function that returns a command, it receives the request, the body, decoded into the request type, and the user:
+A query is asked with the method `QUERY`, which HTTP defines in RFC 10008. Like `GET`, it is safe, so it changes nothing, but like `POST`, it carries a body, so a query takes its input from the body, as a command does. To answer a query over HTTP, define a request type with JSON annotations for the body, and a function that returns the query. Like the function that returns a command, it receives the request, the body, decoded into the request type, and the user:
 
 ```go
 type listBooksRequest struct {
@@ -2409,7 +2409,7 @@ curl -X QUERY http://localhost:8080/api/books \
   -d '{"onlyAvailable":true}'
 ```
 
-The route determines the user, and then decodes the body by the same rules as for a command (see [Validating Requests](#validating-requests)), before it calls the function that returns the query. So a body that is not JSON, that is too large, or that does not fit the request type is answered with `415`, `413`, or `400`, and the same message as for a command.
+The route determines the user, and then decodes the body by the same rules as for a command (see [Validating Requests](#validating-requests)), before it calls the function that returns the query. So a body that does not claim to be JSON, that is too large, or that is not valid JSON or does not fit the request type is answered with `415`, `413`, or `400`, and the same message as for a command.
 
 A query without input, such as one that takes everything it needs from the path, has the request type `httpapi.NoBody`, so that the caller sends no body, or `{}`. As for a command without a body, a request that a browser sends from another origin is then answered with `403 Forbidden` (see [Handling Commands Without a Body](#handling-commands-without-a-body)):
 

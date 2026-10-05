@@ -136,8 +136,8 @@ func checkPreconditions(cmd Command) ([]Precondition, error) {
 					ErrPermanent, cmd)
 			}
 		default:
-			return nil, fmt.Errorf("%w: %T declares a precondition not made with Require, OnStateRead, or Unconditionally",
-				ErrPermanent, cmd)
+			return nil, fmt.Errorf("%w: %T declares a zero Precondition, which none of OnPristineSubject, "+
+				"OnPopulatedSubject, OnEventID, OnStateRead, Require, or Unconditionally returns", ErrPermanent, cmd)
 		}
 	}
 

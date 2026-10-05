@@ -893,7 +893,7 @@ func TestWhenChecksPreconditions(t *testing.T) {
 		{
 			name:          "a zero value",
 			preconditions: []architecturekit.Precondition{{}},
-			cause:         "not made with Require, OnStateRead, or Unconditionally",
+			cause:         "declares a zero Precondition, which none of OnPristineSubject, OnPopulatedSubject, OnEventID, OnStateRead, Require, or Unconditionally returns",
 		},
 		{
 			name:          "a requirement of nothing",

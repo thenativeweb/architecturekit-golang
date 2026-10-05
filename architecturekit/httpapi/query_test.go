@@ -417,7 +417,7 @@ func seenView(revision string) *architecturekit.InMemoryView[string, noteItem] {
 }
 
 // A query is asked with QUERY, a method that asks with a body and changes
-// nothing, as the API of EventSourcingDB does.
+// nothing (RFC 10008).
 
 func TestQueryMethod(t *testing.T) {
 	for kind, options := range map[string]func() []httpapi.QueryOption{

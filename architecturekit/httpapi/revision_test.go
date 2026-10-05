@@ -453,10 +453,9 @@ func askWith(mux *http.ServeMux, method, target, body string, lines ...string) *
 }
 
 // TestIfNoneMatchWithABody covers a query that asks with a body. HTTP has 304
-// for QUERY, which it treats like GET (draft-ietf-httpbis-safe-method-w-body),
-// and the tag holds the query that the body is turned into, so a body that
-// asks something else does not match, while one that asks the same in other
-// words does.
+// for QUERY, which it treats like GET (RFC 10008), and the tag holds the
+// query that the body is turned into, so a body that asks something else does
+// not match, while one that asks the same in other words does.
 func TestIfNoneMatchWithABody(t *testing.T) {
 	const found = `{"texts":["one","two"]}`
 

@@ -61,7 +61,7 @@ func Await(
 
 	// A revision that is not one would otherwise wait for the full timeout and
 	// then answer as if nothing were wrong.
-	if _, err := architecturekit.CompareRevisions(wanted, "0"); err != nil {
+	if _, err := architecturekit.ParseRevision(wanted); err != nil {
 		return fmt.Errorf("%w: %w", ErrMalformed, err)
 	}
 

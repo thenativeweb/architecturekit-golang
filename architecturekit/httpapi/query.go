@@ -100,8 +100,7 @@ type querySettings struct {
 // the way HTTP has it: as a list of tags, or *, compared weakly, so that a tag
 // that a proxy marked as weak while compressing the answer still matches.
 // HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, which it
-// treats like GET (draft-ietf-httpbis-safe-method-w-body), also when the
-// query asks with a body. It carries the tag and the revision, and no body.
+// treats like GET (RFC 10008), also when the query asks with a body. It carries the tag and the revision, and no body.
 //
 // The tag holds the query, so two callers get the same tag only if they ask
 // the same: a query that holds the user, or anything else that tells callers
@@ -202,21 +201,21 @@ func Varying(varies Volatile) QueryOption {
 // nothing has changed; with Varying in addition, its tag changes with what the
 // answer takes from elsewhere.
 //
-// A query is asked with QUERY, a method that changes nothing, like GET, but
-// carries a body (draft-ietf-httpbis-safe-method-w-body), as in the API of
-// EventSourcingDB. So the pattern names it, as in QUERY /api/books. A pattern
-// without a method, which accepts every method, or with another method than
-// QUERY, is a programming error, so Query panics, as Route does for a method
-// that must not change anything. A handler of your own that asks with Ask may
-// use any method, such as GET for a download.
+// A query is asked with QUERY, the method that HTTP defines in RFC 10008.
+// Like GET, it is safe, so it changes nothing, but like POST, it carries a
+// body. So the pattern names it, as in QUERY /api/books. A pattern without a
+// method, which accepts every method, or with another method than QUERY, is
+// a programming error, so Query panics, as Route does for a method that must
+// not change anything. A handler of your own that asks with Ask may use any
+// method, such as GET for a download.
 //
 // The body holds the input of the query, which is decoded into TRequest as
 // for a command, after the caller is determined, and before toQuery gets it
-// (see BodyOf). So a body that is not JSON, that is too large, or that does
-// not fit TRequest is answered with 415, 413, or 400, as for a command. A
-// query without input has the request type NoBody, which accepts a body that
-// is empty, or {}, and refuses a request that a browser sends from another
-// origin (see NoBody).
+// (see BodyOf). So a body that does not claim to be JSON, that is too large,
+// or that is not valid JSON or does not fit TRequest is answered with 415,
+// 413, or 400, as for a command. A query without input has the request type
+// NoBody, which accepts a body that is empty, or {}, and refuses a request
+// that a browser sends from another origin (see NoBody).
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack, as with Route.

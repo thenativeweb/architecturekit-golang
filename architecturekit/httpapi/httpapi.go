@@ -44,11 +44,14 @@ var (
 	// ErrTooLarge means the request body exceeded MaxRequestBody.
 	ErrTooLarge = errors.New("request body too large")
 
-	// ErrForbidden means the user is known but not allowed to do this.
+	// ErrForbidden means the user is known but not allowed to do this, or that
+	// a request without a body comes from another origin (see NoBody).
 	ErrForbidden = errors.New("forbidden")
 
-	// ErrMalformed means the body could not be decoded, or not be turned into
-	// a command.
+	// ErrMalformed means the body could not be read or decoded, or is not
+	// empty for a route that takes none, that the request could not be turned
+	// into a command by ToCommand or into a query by ToQuery, or that the
+	// revision it waits for, in the Wait-For-Revision header, is not one.
 	ErrMalformed = errors.New("malformed request")
 )
 
@@ -467,11 +470,14 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 // A command changes something, so the pattern names a method that may do so,
 // usually POST, as in POST /api/books/{id}/return. A pattern without a method
 // accepts every method, GET included, and GET, HEAD, OPTIONS, and QUERY must
-// not change anything. A browser sends them from another site without asking,
-// such as for a link that the user follows, with the cookies of the user, and
-// a route that takes no body lets them pass (see NoBody). So a pattern without
-// a method, or with one of these, is a programming error, and Route panics,
-// rather than executing the command for any site that links to it.
+// not change anything. A browser sends GET and HEAD from another site without
+// asking, such as for a link that the user follows, with the cookies of the
+// user, and a route that takes no body lets GET, HEAD, and OPTIONS pass from
+// another origin (see NoBody). QUERY may change nothing either, since HTTP
+// defines it as safe and repeatable, so a client or a cache may send it again.
+// So a pattern without a method, or with one of these, is a programming error,
+// and Route panics, rather than executing the command for any site that links
+// to it, or whenever a query is sent again.
 //
 // A nil API, a nil toCommand, or the zero Decider, one that was not made with
 // NewDecider, is a programming error, so Route panics, rather than failing
