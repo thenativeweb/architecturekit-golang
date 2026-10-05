@@ -997,7 +997,7 @@ var buildFailures = []struct {
 	{"that is forbidden", fmt.Errorf("%w: only librarians acquire books", httpapi.ErrForbidden), http.StatusForbidden, "forbidden: only librarians acquire books", true},
 	{"that is not found", fmt.Errorf("%w: book 42 is unknown", httpapi.ErrNotFound), http.StatusNotFound, "not found: book 42 is unknown", true},
 	{"that found no item", fmt.Errorf("finding book 42: %w", query.ErrNoItems), http.StatusNotFound, "not found", true},
-	{"that is not found, and found no item", fmt.Errorf("%w: book 42 is unknown: %w", httpapi.ErrNotFound, query.ErrNoItems), http.StatusNotFound, "not found: book 42 is unknown: query: sequence contains no items", true},
+	{"that is not found, and found no item", fmt.Errorf("%w: book 42 is unknown: %w", httpapi.ErrNotFound, query.ErrNoItems), http.StatusNotFound, "not found: book 42 is unknown: no items", true},
 	{"that is too large", fmt.Errorf("%w: at most 10 books at once", httpapi.ErrTooLarge), http.StatusRequestEntityTooLarge, "request body too large: at most 10 books at once", true},
 	{"that is no JSON", fmt.Errorf("%w: text/plain is not application/json", httpapi.ErrUnsupportedMediaType), http.StatusUnsupportedMediaType, "unsupported media type: text/plain is not application/json", true},
 	{"of the domain", architecturekit.NewDomainError("the reader is suspended"), http.StatusUnprocessableEntity, "the reader is suspended", true},
@@ -1007,7 +1007,7 @@ var buildFailures = []struct {
 	{"that is transient", fmt.Errorf("%w: session store at redis://10.0.3.9 is down", architecturekit.ErrTransient), http.StatusServiceUnavailable, "internal server error", true},
 	{"that is permanent", fmt.Errorf("%w: the catalog at /etc/catalog.yaml is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, "internal server error", true},
 	{"that is unverified", fmt.Errorf("%w: the reader is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, "internal server error", true},
-	{"because the caller went away", fmt.Errorf("looking up the reader: %w", context.Canceled), 499, "looking up the reader: context canceled", true},
+	{"because the caller went away", fmt.Errorf("looking up the reader: %w", context.Canceled), 499, "request canceled", true},
 	{"because the deadline ran out", fmt.Errorf("looking up the reader: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, "internal server error", true},
 }
 

@@ -220,6 +220,31 @@ func TestBodyOf(t *testing.T) {
 		assert.ErrorIs(t, err, httpapi.ErrTooLarge)
 	})
 
+	t.Run("rejects a body over the limit of a middleware", func(t *testing.T) {
+		// http.MaxBytesReader cuts the body off at a limit of its own, below
+		// that of the kit, and fails with an error of package http.
+		for label, bodyOf := range map[string]func(*http.Request) error{
+			"with a body": func(r *http.Request) error {
+				_, err := httpapi.BodyOf[previewRequest](r)
+				return err
+			},
+			"without a body": func(r *http.Request) error {
+				_, err := httpapi.BodyOf[httpapi.NoBody](r)
+				return err
+			},
+		} {
+			t.Run(label, func(t *testing.T) {
+				request := bodyRequest("application/json", strings.NewReader(`{"customerId":"42"}`))
+				request.Body = http.MaxBytesReader(httptest.NewRecorder(), request.Body, 10)
+
+				err := bodyOf(request)
+
+				require.ErrorIs(t, err, httpapi.ErrTooLarge)
+				assert.EqualError(t, err, "request body too large: at most 10 bytes are read")
+			})
+		}
+	})
+
 	t.Run("reads a body at the limit", func(t *testing.T) {
 		prefix := `{"customerId":"`
 		suffix := `"}`
@@ -517,11 +542,12 @@ func TestBodyOf(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps the text of the decoder for what it has no words of its own for", func(t *testing.T) {
-		// encoding/json takes no boolean for the key of a map. It ignores the
-		// option string for a time, which encoding/json/v2 refuses, so the
-		// second decoding fails elsewhere and says nothing about the time, nor
-		// where a json.Number is.
+	t.Run("says that a value can not be decoded, where it has no words of its own", func(t *testing.T) {
+		// The text of the decoder names the types of Go. encoding/json takes no
+		// boolean for the key of a map. It ignores the option string for a
+		// time, which encoding/json/v2 refuses, so the second decoding fails
+		// elsewhere and says nothing about the time, nor where a json.Number
+		// is, so they are told of the body.
 		type shelf struct {
 			ByAvailability map[bool]string `json:"byAvailability"`
 			//lint:ignore SA5008 the test is about the option on a type that it does not apply to
@@ -536,27 +562,48 @@ func TestBodyOf(t *testing.T) {
 			body string
 			text string
 		}{
-			{body: `{"byAvailability":{"true":"a"}}`, text: "json: cannot unmarshal string into Go struct field shelf.byAvailability.true of type bool"},
-			{body: `{"arrivedAt":"yesterday"}`, text: `parsing time "yesterday" as "2006-01-02T15:04:05Z07:00": cannot parse "yesterday" as "2006"`},
-			{body: `{"arrivedAt":"2026-10-05T12:00:00Z","dueOn":"tomorrow"}`,
-				text: `parsing time "tomorrow" as "2006-01-02T15:04:05Z07:00": cannot parse "tomorrow" as "2006"`},
-			{body: `{"tags":["new"],"price":true}`, text: "json: cannot unmarshal bool into Go value of type json.Number"},
+			{body: `{"byAvailability":{"true":"a"}}`, text: `"byAvailability.true" can not be decoded`},
+			{body: `{"arrivedAt":"yesterday"}`, text: "the body can not be decoded"},
+			{body: `{"arrivedAt":"2026-10-05T12:00:00Z","dueOn":"tomorrow"}`, text: "the body can not be decoded"},
+			{body: `{"tags":["new"],"price":true}`, text: "the body can not be decoded"},
 		} {
 			t.Run(test.body, func(t *testing.T) {
 				assertMalformed(t, bodyErrorOf[shelf](test.body), test.text)
 			})
 		}
+
+		t.Run("and keeps the error of the decoder inspectable", func(t *testing.T) {
+			_, isMismatch := errors.AsType[*json.UnmarshalTypeError](bodyErrorOf[shelf](`{"byAvailability":{"true":"a"}}`))
+			assert.True(t, isMismatch, "errors.As has to find the error of decoding")
+
+			_, isParse := errors.AsType[*time.ParseError](bodyErrorOf[shelf](`{"arrivedAt":"yesterday"}`))
+			assert.True(t, isParse, "errors.As has to find the error of parsing")
+		})
 	})
 
-	t.Run("keeps the text of the decoder for a field of a type that JSON has no kind for", func(t *testing.T) {
+	t.Run("says that a value of a type that JSON has no kind for can not be decoded", func(t *testing.T) {
 		type measurement struct {
-			Value complex128 `json:"value"`
+			Value  complex128 `json:"value"`
+			Source io.Reader  `json:"source"`
 		}
 
-		_, err := httpapi.BodyOf[measurement](bodyRequest("application/json", strings.NewReader(`{"value":1}`)))
+		for _, test := range []struct {
+			label string
+			err   error
+			text  string
+		}{
+			{label: "a complex number", err: bodyErrorOf[measurement](`{"value":1}`), text: `"value" can not be decoded`},
+			{label: "an interface with methods", err: bodyErrorOf[measurement](`{"source":{}}`), text: `"source" can not be decoded`},
+			{label: "a complex number as the body", err: bodyErrorOf[complex128](`1`), text: "the body can not be decoded"},
+			{label: "a key of a map whose keys are booleans", err: bodyErrorOf[map[bool]int](`{"true":1}`), text: `"true" can not be decoded`},
+		} {
+			t.Run(test.label, func(t *testing.T) {
+				assertMalformed(t, test.err, test.text)
 
-		require.ErrorIs(t, err, httpapi.ErrMalformed)
-		assert.EqualError(t, err, "malformed request: json: cannot unmarshal number into Go struct field measurement.value of type complex128")
+				_, isMismatch := errors.AsType[*json.UnmarshalTypeError](test.err)
+				assert.True(t, isMismatch, "errors.As has to find the error of decoding")
+			})
+		}
 	})
 
 	t.Run("keeps the text of the error of a type that decodes itself", func(t *testing.T) {
@@ -875,6 +922,20 @@ func TestBodyOf(t *testing.T) {
 		_, err := httpapi.BodyOf[previewRequest](bodyRequest("application/json", failingReader{}))
 		assert.ErrorIs(t, err, httpapi.ErrMalformed)
 		assert.ErrorIs(t, err, errBrokenBody, "the error of reading has to stay inspectable")
+	})
+
+	t.Run("answers a body over the limit of a middleware with 413", func(t *testing.T) {
+		api := httpapi.NewPublicAPI(deadStore(t))
+		handler := http.MaxBytesHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			preview, err := httpapi.BodyOf[previewRequest](r)
+			httpapi.RespondResult(w, r, api, preview, err)
+		}), 10)
+
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, bodyRequest("application/json", strings.NewReader(`{"customerId":"42"}`)))
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, response.Code)
+		assert.JSONEq(t, messageOf(t, "request body too large: at most 10 bytes are read"), response.Body.String())
 	})
 
 	t.Run("answers with the statuses of a command", func(t *testing.T) {

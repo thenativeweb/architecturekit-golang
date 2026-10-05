@@ -28,11 +28,14 @@ import (
 	"slices"
 )
 
-// ErrNoItems means a query that expected a result found none.
-var ErrNoItems = errors.New("query: sequence contains no items")
+// ErrNoItems means a query that expected a result found none. An application
+// may hand it on to a caller, so its text names neither the package nor a
+// sequence.
+var ErrNoItems = errors.New("no items")
 
-// ErrTooManyItems means a query that expected one result found several.
-var ErrTooManyItems = errors.New("query: sequence contains more than one item")
+// ErrTooManyItems means a query that expected one result found several. Like
+// ErrNoItems, its text names neither the package nor a sequence.
+var ErrTooManyItems = errors.New("more than one item")
 
 // fail hands on the error of a sequence, as its last element.
 func fail[TItem any](yield func(TItem, error) bool, err error) {

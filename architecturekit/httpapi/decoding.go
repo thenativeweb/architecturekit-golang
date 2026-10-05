@@ -40,8 +40,9 @@ const exampleTime = "2026-10-05T12:00:00Z"
 // describeDecoding says what is wrong with a body that could not be decoded
 // into a value of bodyType, given err, the error of encoding/json, and
 // detailed, the error of decoding the body once more, reporting errors the way
-// encoding/json/v2 does. An error that it has no words for comes back as it
-// is.
+// encoding/json/v2 does. The error of a type that decodes itself comes back as
+// it is, since the application wrote it, and for any other failure that it
+// has no words for, it says that the value can not be decoded.
 func describeDecoding(bodyType reflect.Type, body []byte, err, detailed error) error {
 	// A string field with the option string holds JSON text of its own, a
 	// string in quotes, whose mistakes encoding/json reports as a value that
@@ -61,22 +62,26 @@ func describeDecoding(bodyType reflect.Type, body []byte, err, detailed error) e
 	// both. Both decode in the same order, so they report the same failure,
 	// unless encoding/json/v2 refuses the option string for a type that
 	// encoding/json ignores it for, such as a time. Then its failure is of
-	// another kind, and the error comes back as it is.
+	// another kind, and says nothing about where the error is.
 	failure, isFailure := errors.AsType[*jsonv2.SemanticError](detailed)
 
 	switch {
-	case !isFailure:
-		return err
-	case failure.Err == jsonv2.ErrUnknownName:
+	case isFailure && failure.Err == jsonv2.ErrUnknownName:
 		return &decodeFailure{
 			text:   fmt.Sprintf("unknown field %q", failure.JSONPointer.LastToken()),
 			causes: []error{err, failure},
 		}
-	case failure.GoType == reflect.TypeFor[time.Time]() && errors.As(failure.Err, new(*time.ParseError)):
+	case isFailure && failure.GoType == reflect.TypeFor[time.Time]() && errors.As(failure.Err, new(*time.ParseError)):
 		return describeTime(body, failure, err)
-	default:
+	}
+
+	// The error of a type that decodes itself is the application's, while any
+	// other one is the decoder's, whose text would name the types of Go.
+	if _, isOwn := ownFailureOf(detailed); isOwn {
 		return err
 	}
+
+	return describeUndecodable("", err)
 }
 
 // describeSyntax says what is wrong with a body that encoding/json refused
@@ -162,10 +167,11 @@ func describeNamesake(body []byte, syntax *json.SyntaxError, err, detailed error
 //
 // A value of a type that takes more than one kind of value, or none, has no
 // words of its own, and neither has the key of a map whose keys are booleans,
-// which encoding/json takes for no key at all. Their errors come back as they
-// are, and so does the error of a type that decodes itself, which may decode
-// JSON text of its own with encoding/json, whose path then points into that
-// text rather than into the body.
+// which encoding/json takes for no key at all. For them, it says that the
+// value can not be decoded. The error of a type that decodes itself comes back
+// as it is, since the application wrote it. Such a type may decode JSON text
+// of its own with encoding/json, whose path then points into that text rather
+// than into the body.
 func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.UnmarshalTypeError, err, detailed error) error {
 	// encoding/json/v2 points to the type that decodes itself instead, unless
 	// encoding/json refused the value for that very type, before the type
@@ -180,7 +186,7 @@ func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.Unmarsh
 	// encoding/json takes the key of a map for a value, while encoding/json/v2
 	// points to where the key starts.
 	if isFailure && isNameAt(body, failure.ByteOffset) {
-		return describeKey(failure.JSONPointer.Parent(), mismatch.Type, err)
+		return describeKey(failure.JSONPointer, mismatch.Type, err)
 	}
 
 	// encoding/json writes the path that encoding/json/v2 points to with dots
@@ -196,12 +202,12 @@ func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.Unmarsh
 	case mismatch.Field != "":
 		pointer = jsontext.Pointer("/" + strings.ReplaceAll(mismatch.Field, ".", "/"))
 	default:
-		return err
+		return describeUndecodable("", err)
 	}
 
 	expected, isKnown := kindOf(mismatch.Type)
 	if !isKnown {
-		return err
+		return describeUndecodable(pointer, err)
 	}
 
 	// encoding/json writes the value after its kind, if at all: a number as it
@@ -236,7 +242,7 @@ func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.Unmarsh
 			causes: []error{err},
 		}
 	default:
-		return err
+		return describeUndecodable(pointer, err)
 	}
 }
 
@@ -269,16 +275,28 @@ func describeNumber(subject string, numberType reflect.Type, text string, err er
 	return &decodeFailure{text: subject + " must be an integer", causes: []error{err}}
 }
 
-// describeKey says that the keys of the map that the pointer points to have
-// to be numbers, if their type takes numbers. A key of any other type has no
-// words of its own, and its error comes back as it is.
-func describeKey(mapPointer jsontext.Pointer, keyType reflect.Type, err error) error {
+// describeKey says that the keys of the map have to be numbers, given the
+// pointer to the member whose key does not fit, if their type takes numbers.
+// A key of any other type has no words of its own, so it says that the member
+// can not be decoded.
+func describeKey(keyPointer jsontext.Pointer, keyType reflect.Type, err error) error {
 	if kind, _ := kindOf(keyType); kind != kindNumber {
-		return err
+		return describeUndecodable(keyPointer, err)
 	}
 
 	return &decodeFailure{
-		text:   fmt.Sprintf("the keys of %s must be numbers", subjectOf(mapPointer)),
+		text:   fmt.Sprintf("the keys of %s must be numbers", subjectOf(keyPointer.Parent())),
+		causes: []error{err},
+	}
+}
+
+// describeUndecodable says that the value that the pointer points to can not
+// be decoded, or the body, if the pointer is empty, for a failure of the
+// decoder that there are no other words for, whose text would name the types
+// of Go.
+func describeUndecodable(pointer jsontext.Pointer, err error) error {
+	return &decodeFailure{
+		text:   subjectOf(pointer) + " can not be decoded",
 		causes: []error{err},
 	}
 }

@@ -652,6 +652,8 @@ func TestAnsweringWhenTheContextEnded(t *testing.T) {
 		httpapi.Respond(recorder, request, api, nil, fmt.Errorf("architecturekit: reading %q: %w", "/notes/1", context.Canceled))
 
 		assert.Equal(t, 499, recorder.Code)
+		assert.JSONEq(t, `{"message":"request canceled"}`, recorder.Body.String(),
+			"the error may name internals, such as the subject, and the caller may still be there, if the application canceled")
 		assert.Empty(t, logs.String(), "a caller who went away is no failure of the server")
 	})
 

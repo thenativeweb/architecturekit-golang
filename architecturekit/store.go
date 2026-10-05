@@ -270,8 +270,9 @@ func Load[TState any](
 // panic (see ReadOption). For anything else, use ReadEvents of the client SDK.
 //
 // A bound whose ID is not the ID of an event, such as an empty one, ends the
-// iteration with an error that wraps ErrNotARevision, before the database is
-// asked. Otherwise, the iteration ends with the first error, and stops reading
+// iteration with the error of ParseRevision, which wraps ErrNotARevision and
+// names the ID, before the database is asked. It names neither the subjects
+// nor the option, since the ID usually comes from a request. Otherwise, the iteration ends with the first error, and stops reading
 // as soon as the caller stops iterating. If the context ends first, it ends
 // with the context's error, so that a read that was cut short never looks
 // complete.
@@ -287,9 +288,8 @@ func Read(
 	return func(yield func(eventsourcingdb.Event, error) bool) {
 		doing := fmt.Sprintf("reading %q", subjects.subject)
 
-		if option := settings.invalidBound(); option != "" {
-			yield(eventsourcingdb.Event{}, fmt.Errorf("%w: %s: %s needs the ID of an event",
-				ErrNotARevision, doing, option))
+		if err := settings.checkBounds(); err != nil {
+			yield(eventsourcingdb.Event{}, err)
 			return
 		}
 

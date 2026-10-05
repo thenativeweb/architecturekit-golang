@@ -344,29 +344,56 @@ func TestDescribeDecoding(t *testing.T) {
 		assert.EqualError(t, err, `"floors.a/b~c" must be a number`)
 	})
 
-	t.Run("keeps a value without a path, if encoding/json/v2 reports another failure", func(t *testing.T) {
+	t.Run("says that the body can not be decoded for a value without a path, if encoding/json/v2 reports another failure", func(t *testing.T) {
 		mismatch := &json.UnmarshalTypeError{Value: "bool", Type: reflect.TypeFor[json.Number]()}
 
 		err := describeDecoding(bodyType, []byte(`{"count":true}`), mismatch, errors.New("another failure"))
 
-		assert.Same(t, mismatch, err)
+		assert.EqualError(t, err, "the body can not be decoded")
+		assert.ErrorIs(t, err, mismatch)
 	})
 
-	t.Run("keeps the key of a map, if encoding/json/v2 reports another failure", func(t *testing.T) {
+	t.Run("says that the key of a map can not be decoded, if encoding/json/v2 reports another failure", func(t *testing.T) {
 		// encoding/json takes the key for a number that it could not read.
 		mismatch := &json.UnmarshalTypeError{Value: "number x", Type: reflect.TypeFor[int](), Field: "stock.x", Offset: 14}
 
 		err := describeDecoding(bodyType, []byte(`{"stock":{"x":1}}`), mismatch, errors.New("another failure"))
 
-		assert.Same(t, mismatch, err)
+		assert.EqualError(t, err, `"stock.x" can not be decoded`)
+		assert.ErrorIs(t, err, mismatch)
 	})
 
-	t.Run("keeps an error that encoding/json/v2 does not point to", func(t *testing.T) {
+	t.Run("says that the body can not be decoded for an error that encoding/json/v2 does not point to", func(t *testing.T) {
+		failure := errors.New("a failure")
+
+		for label, detailed := range map[string]error{
+			"without a failure":    nil,
+			"with another failure": errors.New("another failure"),
+		} {
+			t.Run(label, func(t *testing.T) {
+				err := describeDecoding(bodyType, []byte(`{"count":1}`), failure, detailed)
+
+				assert.EqualError(t, err, "the body can not be decoded")
+				assert.ErrorIs(t, err, failure)
+			})
+		}
+	})
+
+	t.Run("keeps an error of a type that decodes itself, which encoding/json/v2 points to", func(t *testing.T) {
 		failure := errors.New("a failure of its own")
 
-		err := describeDecoding(bodyType, []byte(`{"count":1}`), failure, nil)
+		err := describeDecoding(bodyType, []byte(`{"isbn":"42"}`), failure, &jsonv2.SemanticError{GoType: reflect.TypeFor[isbn](), JSONPointer: "/isbn", Err: failure})
 
 		assert.Same(t, failure, err)
+	})
+
+	t.Run("says that the body can not be decoded for an error of the decoder about a time", func(t *testing.T) {
+		// A time decodes itself, but is no type of the application.
+		failure := errors.New("a failure of a time")
+
+		err := describeDecoding(bodyType, []byte(`{"dueOn":"x"}`), failure, &jsonv2.SemanticError{GoType: reflect.TypeFor[time.Time](), JSONPointer: "/dueOn", Err: failure})
+
+		assert.EqualError(t, err, "the body can not be decoded")
 	})
 
 	t.Run("keeps a name that occurs twice where no name is in the body", func(t *testing.T) {

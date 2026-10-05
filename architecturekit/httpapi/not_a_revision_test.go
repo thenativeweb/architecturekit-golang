@@ -86,8 +86,9 @@ func messageOf(t *testing.T, message string) string {
 }
 
 func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
+	// The caller knows neither the subject nor the option of Read, so the
+	// text names the value only, wherever it is refused.
 	const notARevision = `not a revision: "abc"`
-	const notABound = `not a revision: reading "/note": AfterEvent("abc") needs the ID of an event`
 
 	queries := map[string]struct {
 		wire    func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux)
@@ -97,14 +98,14 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 			wire: func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux) {
 				httpapi.Query(api, mux, "QUERY /notes", toPageOfNotes, readingNotesAfter(emptyDatabase(t, false)))
 			},
-			message: notABound,
+			message: notARevision,
 		},
 		"a revisioned query answers a bound of Read that is not the ID of an event": {
 			wire: func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux) {
 				httpapi.Query(api, mux, "QUERY /notes", toPageOfNotes, readingNotesAfter(emptyDatabase(t, false)),
 					httpapi.Revisioned(noteView(), time.Second))
 			},
-			message: notABound,
+			message: notARevision,
 		},
 		"a query answers a revision to compare that is not one": {
 			wire: func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux) {

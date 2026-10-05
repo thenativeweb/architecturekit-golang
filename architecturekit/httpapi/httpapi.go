@@ -103,8 +103,9 @@ type apiSettings struct {
 // of the server is logged as an error, which for a panic includes its value
 // and its stack, and a refusal whose details the caller is not told, such as
 // one with 401 or 409 (see Respond), as information. The same goes for an
-// answer that Adding could not complete, which is logged as an error. Without
-// it, they log through the default logger of log/slog.
+// answer that Adding could not complete, which is logged as an error. Only a
+// request that was canceled is not logged, since nothing failed. Without it,
+// they log through the default logger of log/slog.
 //
 // A nil logger is a programming error, so WithLogger panics.
 func WithLogger(logger *slog.Logger) APIOption {
@@ -178,11 +179,20 @@ func (api *API[TUser]) explain(r *http.Request) func(status int, err error) stri
 
 			return "conflict: the data has changed since it was read"
 
+		// A request that was canceled, usually because the caller went away,
+		// failed for no fault of the server. Its error may name internals, such
+		// as the subject that was read, and the caller may still be there, if
+		// the application canceled the request itself. So it gets a fixed text,
+		// and since nothing failed, it is not logged.
+		case status == statusClientClosedRequest:
+			return "request canceled"
+
 		// A query that expects one item and finds none fails with
-		// query.ErrNoItems, whose text speaks of a sequence, in the words of a
-		// package that knows nothing about HTTP. So unless the application says
-		// itself what was not found, with ErrNotFound, the caller is told what
-		// the status says, and the error is logged as information, as above.
+		// query.ErrNoItems, whose text does not say what was not found, in the
+		// words of a package that knows nothing about HTTP. So unless the
+		// application says itself what was not found, with ErrNotFound, the
+		// caller is told what the status says, and the error is logged as
+		// information, as above.
 		case status == http.StatusNotFound && !errors.Is(err, ErrNotFound):
 			api.logRefusal(r, status, err)
 
@@ -598,7 +608,8 @@ const statusClientClosedRequest = 499
 // The status says nothing about what to tell the caller. Respond,
 // RespondResult, and RespondError explain only an error that is written for
 // the caller, and an answer in a format of your own should do the same: the
-// error of a 401, a 409, or a status of 500 and above may name internals.
+// error of a 401, a 409, a 499, or a status of 500 and above may name
+// internals.
 func StatusFor(err error) int {
 	switch {
 	case err == nil:
@@ -655,9 +666,11 @@ func StatusFor(err error) int {
 //     since it was read", while the error is logged at level Info, since the
 //     server did not fail.
 //   - 404 says "not found" for a query that found no item, whose error
-//     query.ErrNoItems speaks of a sequence rather than of what was not
-//     found, and it is logged the same way. An error of ErrNotFound, on the
-//     other hand, is written for the caller, and so it is the message.
+//     query.ErrNoItems does not say what was not found, and it is logged the
+//     same way. An error of ErrNotFound, on the other hand, is written for
+//     the caller, and so it is the message.
+//   - 499, for a request that was canceled, says "request canceled", and is
+//     not logged, since nothing failed.
 //   - 500 and above say "internal server error", while the failure is logged
 //     at level Error.
 //
@@ -863,6 +876,7 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 //	"dueOn" must be a time such as "2026-10-05T12:00:00Z"
 //	"quantity" must be a string that holds a number
 //	the keys of "stock" must be numbers
+//	"rating" can not be decoded
 //
 // It names a value by its path, as encoding/json does, such as
 // "delivery.address" or "items.0.bookId", or the body as a whole, as in "the
@@ -875,10 +889,11 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // map whose keys are times have to be times.
 //
 // The error of a type that decodes itself keeps its own text, since the
-// application wrote it, and so does any failure that there are no words for,
-// such as a value of a type that JSON has no kind for. Either way, the error
-// wraps the error of decoding, so that errors.As finds it, such as a
-// *json.UnmarshalTypeError that names the field.
+// application wrote it. Any other failure that there are no words for, such
+// as a value of a type that JSON has no kind for, says that the value can not
+// be decoded, or that the body can not be decoded, if it is not clear which
+// value. Either way, the error wraps the error of decoding, so that errors.As
+// finds it, such as a *json.UnmarshalTypeError that names the field.
 //
 // If TBody is NoBody, the request is read without a body instead. A request
 // that a browser sends from another origin is ErrForbidden then, before the
@@ -1010,9 +1025,13 @@ func requireNoBody(r *http.Request) error {
 }
 
 // readBody reads at most MaxRequestBody bytes and tells a body that is too
-// large apart from one that could not be read.
+// large apart from one that could not be read. A body that a middleware cuts
+// off at a lower limit, with http.MaxBytesReader, is too large as well.
 func readBody(r *http.Request) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBody+1))
+	if tooLarge, isTooLarge := errors.AsType[*http.MaxBytesError](err); isTooLarge {
+		return nil, fmt.Errorf("%w: at most %d bytes are read", ErrTooLarge, tooLarge.Limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: reading the body: %w", ErrMalformed, err)
 	}

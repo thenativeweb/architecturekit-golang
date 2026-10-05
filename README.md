@@ -976,7 +976,7 @@ events := architecturekit.Read(context.TODO(), store, architecturekit.ExactSubje
 )
 ```
 
-The IDs are strings, as everywhere else in the kit. The database hands them out as one ascending sequence across all subjects, so a bound does not have to be an event of the subjects that are read. An ID that is not the one of an event, such as `abc` or an empty one, ends the iteration with an error that wraps `ErrNotARevision`, before the database is asked. That way, an ID that comes from a request can be told apart from a failure of the database, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
+The IDs are strings, as everywhere else in the kit. The database hands them out as one ascending sequence across all subjects, so a bound does not have to be an event of the subjects that are read. An ID that is not the one of an event, such as `abc` or an empty one, ends the iteration with an error that wraps `ErrNotARevision` and names the ID, as in `not a revision: "abc"`, before the database is asked. That way, an ID that comes from a request can be told apart from a failure of the database, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
 *Note that a read has at most one lower bound, one upper bound, and one order, and that `FromLatestEvent` counts as a lower bound. Options that contradict each other, such as `FromEvent` together with `AfterEvent`, or `NewestFirst` given twice, make `Read` panic. So does `FromLatestEvent` together with `NewestFirst`, since the database reads from the latest event of a type only oldest first, and so does the zero value of `Subjects`. A subject for `FromLatestEvent` that does not start with a slash makes `FromLatestEvent` itself panic, and so does a value other than `ReadEverything` and `ReadNothing`.*
 
@@ -2082,7 +2082,7 @@ For an application without authentication, call the `NewPublicAPI` function inst
 api := httpapi.NewPublicAPI(store)
 ```
 
-Everything that answers through an API logs every error it does not explain to the caller in full, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. A failure of the server is logged at level `Error`, and a refusal whose details the caller is not told, such as one with `401`, `409`, or a `404` for a query that found no item, at level `Info` (see [Handling Commands over HTTP](#handling-commands-over-http)). A panic is logged with its value and its stack. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
+Everything that answers through an API logs every error it does not explain to the caller in full, once, with the method and the route of the request: the routes it wires up, and the functions that answer in a handler of your own. A failure of the server is logged at level `Error`, and a refusal whose details the caller is not told, such as one with `401`, `409`, or a `404` for a query that found no item, at level `Info` (see [Handling Commands over HTTP](#handling-commands-over-http)). Only a request that was canceled is not logged, since nothing failed. A panic is logged with its value and its stack. By default, they use the default logger of `log/slog`. To use the logger of your application instead, hand over the `WithLogger` option, which `NewPublicAPI` accepts as well:
 
 ```go
 api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
@@ -2175,9 +2175,10 @@ The message is the error message if the error is written for the caller, such as
 | `401 Unauthorized` | `unauthorized` |
 | `404 Not Found`, for a query that found no item | `not found` |
 | `409 Conflict` | `conflict: the data has changed since it was read` |
+| `499 Client Closed Request` | `request canceled` |
 | `500` and above | `internal server error` |
 
-The actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)): at level `Info` for `401`, `404`, and `409`, since the server did not fail, and at level `Error` for `500` and above. For `404`, that holds only for a query that found no item (see [Reporting Missing Items](#reporting-missing-items)).
+The actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)): at level `Info` for `401`, `404`, and `409`, since the server did not fail, and at level `Error` for `500` and above. For `404`, that holds only for a query that found no item (see [Reporting Missing Items](#reporting-missing-items)). A request that was canceled, usually because the caller went away, is not logged, since nothing failed.
 
 If handling a request panics, for example because `Build` received an ID that was not checked, the route answers with `500 Internal Server Error` and the message `internal server error`, like any other internal failure, and logs the panic at level `Error`, with its value and its stack. Otherwise, `net/http` would close the connection, and the caller would get no answer at all.
 
@@ -2318,12 +2319,12 @@ Any other error returned from the function is answered with `400 Bad Request`, w
 Before the function that returns the command receives the body, the request is validated, as it is for a query (see [Handling Queries over HTTP](#handling-queries-over-http)):
 
 - The `Content-Type` header must be `application/json`, otherwise the request is answered with `415 Unsupported Media Type`, and the error is `httpapi.ErrUnsupportedMediaType`.
-- The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`.
+- The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`. The same goes for a body that a middleware cuts off at a lower limit with `http.MaxBytesReader`.
 - The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`, which wraps the error of decoding, so that `errors.As` finds it. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case.
 
 *Note that parsers disagree on what a name that occurs twice means, and on data after the value: one takes the first value, another the last, and one stops after the value, while another reads on. A filter or a proxy in front of the application might then check another value than the one the application uses, which is why both are refused.*
 
-If the body can not be decoded, the message says what is wrong in words of its own, rather than in those of the decoder, which name the types of Go. After `malformed request: `, it says, for example, `empty body`, `invalid JSON`, `unknown field "borowedUntil"`, `duplicate field "expectedEventId"`, or `"borrowedUntil" must be a string`. A nested value is named by its path, such as `"items.0.bookId"`. For the full list, see the documentation of `BodyOf`.
+If the body can not be decoded, the message says what is wrong in words of its own, rather than in those of the decoder, which name the types of Go. After `malformed request: `, it says, for example, `empty body`, `invalid JSON`, `unknown field "borowedUntil"`, `duplicate field "expectedEventId"`, or `"borrowedUntil" must be a string`. A nested value is named by its path, such as `"items.0.bookId"`. For a failure that it has no words of its own for, such as a value of a type that JSON has no kind for, it says that the value can not be decoded, as in `"rating" can not be decoded`, or `the body can not be decoded`. The error of a type that decodes itself, on the other hand, keeps its text, since you wrote it. For the full list, see the documentation of `BodyOf`.
 
 If the request type is `httpapi.NoBody`, the request is validated differently (see [Handling Commands Without a Body](#handling-commands-without-a-body)): a request that a browser sends from another origin is answered with `403 Forbidden` first, and the error is `httpapi.ErrForbidden`. The `Content-Type` header is not required, and the body must be empty or `{}`, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. A body larger than `httpapi.MaxRequestBody` is still answered with `413 Request Entity Too Large`.
 
@@ -2498,7 +2499,7 @@ httpapi.Query(api, mux, "QUERY /api/check-availability", toCheckAvailability, ch
 
 #### Reporting Missing Items
 
-If the answering function returns `query.ErrNoItems`, as `query.Single` does if no item matches, the request is answered with `404 Not Found`, and the message `not found`, since the text of `query.ErrNoItems` speaks of a sequence rather than of what was not found. The error is logged at level `Info`, as for `401` and `409`. So a wrapper that maps a single item hands on the error as it is:
+If the answering function returns `query.ErrNoItems`, as `query.Single` does if no item matches, the request is answered with `404 Not Found`, and the message `not found`, since the text of `query.ErrNoItems`, `no items`, does not say what was not found. The error is logged at level `Info`, as for `401` and `409`. So a wrapper that maps a single item hands on the error as it is:
 
 ```go
 func answerBook[TQuery any](ask httpapi.Answer[TQuery, BookItem]) httpapi.Answer[TQuery, bookBody] {
@@ -2547,7 +2548,7 @@ It checks the categories in this order:
 | `architecturekit.ErrNotARevision` | `400 Bad Request` |
 | any other error | `500 Internal Server Error` |
 
-*Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged.*
+*Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged. Its message is `request canceled`, because the error may name internals, such as the subject that was read.*
 
 *Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, a value for `CompareRevisions` or `ParseRevision`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
 
@@ -2555,7 +2556,7 @@ It checks the categories in this order:
 
 *Note that a panic while a route handles a request is answered with `500 Internal Server Error` as well (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
-*Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, and `500` and above, as `Respond`, `RespondResult`, and `RespondError` do, since it may name internals, and say `not found` for `query.ErrNoItems` (see [Handling Commands over HTTP](#handling-commands-over-http)).*
+*Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, `499`, and `500` and above, as `Respond`, `RespondResult`, and `RespondError` do, since it may name internals, and say `not found` for `query.ErrNoItems` (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
 ### Reading Your Own Writes over HTTP
 
