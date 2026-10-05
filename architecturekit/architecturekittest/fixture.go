@@ -4,6 +4,9 @@
 // state, and a projection is driven with events handed to it directly. A test
 // that needs a real database gets one from the dbtest package, which is kept
 // apart so that this one builds without Docker.
+//
+// Every function here that can fail a test takes the testing.TB of the test,
+// such as its *testing.T, or the *testing.B of a benchmark.
 package architecturekittest
 
 import (
@@ -12,21 +15,15 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"testing"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// TestingT is the part of *testing.T that the fixtures need. It is an
-// interface so that the fixtures themselves can be tested.
-type TestingT interface {
-	Helper()
-	Fatalf(format string, args ...any)
-}
-
 // Fixture holds the state a command will decide on.
 type Fixture[TCommand architecturekit.Command, TState any] struct {
-	t       TestingT
+	t       testing.TB
 	decider architecturekit.Decider[TCommand, TState]
 	state   TState
 }
@@ -34,7 +31,7 @@ type Fixture[TCommand architecturekit.Command, TState any] struct {
 // Given builds the state from typed events, which is how a test usually
 // spells out a history.
 func Given[TCommand architecturekit.Command, TState any](
-	t TestingT,
+	t testing.TB,
 	decider architecturekit.Decider[TCommand, TState],
 	history ...architecturekit.Event,
 ) *Fixture[TCommand, TState] {
@@ -52,7 +49,7 @@ func Given[TCommand architecturekit.Command, TState any](
 // upcasters on the way. Use it to test that an older event type still arrives
 // correctly, which typed events cannot show.
 func GivenStored[TCommand architecturekit.Command, TState any](
-	t TestingT,
+	t testing.TB,
 	decider architecturekit.Decider[TCommand, TState],
 	history ...eventsourcingdb.Event,
 ) *Fixture[TCommand, TState] {
@@ -114,7 +111,7 @@ func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState
 // Outcome is what a command did. Every assertion returns the outcome again, so
 // they can be chained.
 type Outcome[TCommand architecturekit.Command, TState any] struct {
-	t      TestingT
+	t      testing.TB
 	cmd    TCommand
 	state  TState
 	events []architecturekit.Event

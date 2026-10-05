@@ -14,8 +14,13 @@ import (
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// spy captures the fixture's failure messages instead of ending a test.
+// spy captures the fixture's failure messages instead of ending a test. It
+// embeds testing.TB, which has an unexported method, so that it is one, and
+// overrides what the fixtures use. The embedded testing.TB is nil, so a
+// fixture that used anything else would panic.
 type spy struct {
+	testing.TB
+
 	failures []string
 }
 
@@ -1087,9 +1092,34 @@ func TestThenPreconditions(t *testing.T) {
 
 func TestSpy(t *testing.T) {
 	t.Run("Helper is harmless", func(t *testing.T) {
-		// Helper only exists to satisfy the interface.
+		// Helper only exists so that the spy takes the place of a test, with
+		// nothing to mark as a helper.
 		recorder := &spy{}
 		recorder.Helper()
 		recorder.expectNoFailure(t)
+	})
+}
+
+func TestTestingTB(t *testing.T) {
+	t.Run("is what every fixture takes", func(t *testing.T) {
+		// The fixtures take the testing.TB of the standard library, not an
+		// interface of the kit's own, so that a function of a type with
+		// testing.TB, such as a helper that tests and benchmarks share, can
+		// be one of them.
+		var (
+			_ func(testing.TB, architecturekit.Decider[open, account], ...architecturekit.Event) *architecturekittest.Fixture[open, account] = architecturekittest.Given[open, account]
+
+			_ func(testing.TB, architecturekit.Decider[open, account], ...eventsourcingdb.Event) *architecturekittest.Fixture[open, account] = architecturekittest.GivenStored[open, account]
+
+			_ func(testing.TB, architecturekit.Projection, ...eventsourcingdb.Event) = architecturekittest.Project
+
+			_ func(testing.TB, architecturekit.Transactional, ...eventsourcingdb.Event) = architecturekittest.ProjectTransactional
+
+			_ func(testing.TB, architecturekit.View[owner]) []owner = architecturekittest.ItemsOf[owner]
+
+			_ func(testing.TB, architecturekit.Projection, architecturekit.Mode) = architecturekittest.ExpectMode
+
+			_ func(testing.TB, architecturekit.View[owner], ...owner) = architecturekittest.ExpectItems[owner]
+		)
 	})
 }

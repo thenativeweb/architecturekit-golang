@@ -457,8 +457,13 @@ func fixtureRefusal(t *testing.T, decider architecturekit.Decider[increment, cou
 }
 
 // failureRecorder takes the failures of the test fixture in place of a
-// *testing.T, so that a test can read them.
+// *testing.T, so that a test can read them. It embeds testing.TB, which has
+// an unexported method, so that it is one, and overrides what the fixture
+// uses. The embedded testing.TB is nil, so a fixture that used anything else
+// would panic.
 type failureRecorder struct {
+	testing.TB
+
 	failures []string
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"testing"
 	"time"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
@@ -65,7 +66,7 @@ func StoredEventsAt(subject string, firstID int, at time.Time, events ...archite
 //
 // A projection that is transactional as well fails the test, because its Apply
 // is not what runs in production; use ProjectTransactional for it.
-func Project(t TestingT, projection architecturekit.Projection, events ...eventsourcingdb.Event) {
+func Project(t testing.TB, projection architecturekit.Projection, events ...eventsourcingdb.Event) {
 	t.Helper()
 
 	if _, ok := projection.(architecturekit.Transactional); ok {
@@ -85,7 +86,7 @@ func Project(t TestingT, projection architecturekit.Projection, events ...events
 // one transaction, the way StartTransactionalProjection does for a batch. It
 // commits with the ID of the last event, and rolls back and fails the test on
 // the first refusal. Without events, no transaction is begun.
-func ProjectTransactional(t TestingT, projection architecturekit.Transactional, events ...eventsourcingdb.Event) {
+func ProjectTransactional(t testing.TB, projection architecturekit.Transactional, events ...eventsourcingdb.Event) {
 	t.Helper()
 
 	if len(events) == 0 {
@@ -118,7 +119,7 @@ func ProjectTransactional(t TestingT, projection architecturekit.Transactional, 
 // ItemsOf reads a view, which is what a query would do before filtering. A
 // view that fails while it is read fails the test, also after some of the
 // items.
-func ItemsOf[TItem any](t TestingT, view architecturekit.View[TItem]) []TItem {
+func ItemsOf[TItem any](t testing.TB, view architecturekit.View[TItem]) []TItem {
 	t.Helper()
 
 	var items []TItem
@@ -138,7 +139,7 @@ func ItemsOf[TItem any](t TestingT, view architecturekit.View[TItem]) []TItem {
 // Worth asserting: the modes come from optional interfaces, so a typo in a
 // method signature leaves one unfulfilled and the projection silently falls
 // back to being rebuilt on every start.
-func ExpectMode(t TestingT, projection architecturekit.Projection, want architecturekit.Mode) {
+func ExpectMode(t testing.TB, projection architecturekit.Projection, want architecturekit.Mode) {
 	t.Helper()
 
 	if got := architecturekit.ModeOf(projection); got != want {
@@ -151,7 +152,7 @@ func ExpectMode(t TestingT, projection architecturekit.Projection, want architec
 // It compares the items by value, with reflect.DeepEqual, so that an item may
 // hold slices, maps, or pointers, and two items are equal if what they hold
 // is. A nil slice or map is not equal to an empty one, though.
-func ExpectItems[TItem any](t TestingT, view architecturekit.View[TItem], expected ...TItem) {
+func ExpectItems[TItem any](t testing.TB, view architecturekit.View[TItem], expected ...TItem) {
 	t.Helper()
 
 	items := ItemsOf(t, view)
