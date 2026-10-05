@@ -270,7 +270,7 @@ The event type is taken from the event's `EventType` function, so it does not ha
 
 *Note that calling `Evolve` twice for the same event type panics.*
 
-Every read starts from a copy of the initial value, so an `Evolve` function may change the state it gets without changing what the next read starts from. A copy shares nothing with a value like `Book{}`, and neither with an initial value whose maps, slices and pointers are `nil`, so leave them `nil`, and let the `Evolve` functions create them when they need them. If the initial value holds a map, a slice with room for elements, or a pointer that is not `nil`, every copy shares it, and the state needs a `Clone` function that copies it (see [Caching States](#caching-states)). Without one, reading the state fails with an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)), rather than let an `Evolve` function change the initial value of every later read.
+Every read starts from a copy of the initial value, so an `Evolve` function may change the state it gets without changing what the next read starts from. A copy shares nothing with a value like `Book{}`, and neither with an initial value whose maps, slices, pointers and channels are `nil`, so leave them `nil`, and let the `Evolve` functions create them when they need them. If the initial value holds a map, a pointer or a channel that is not `nil`, or a slice with room for elements, every copy shares it, and the state needs a `Clone` function that copies it (see [Caching States](#caching-states)). Without one, reading the state fails with an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)), rather than let an `Evolve` function change the initial value of every later read.
 
 Reading an event without a rule fails, since it usually points to a missing rule or a wrong subject. If a subject holds events that matter for no decision, such as `BookInspected`, which only records that somebody looked at a book, call the `Ignore` function for their type. The state then takes them without changing, and says so, rather than an `Evolve` function that returns the state unchanged and needs a comment to explain why:
 
@@ -917,7 +917,7 @@ var shelfState = architecturekit.NewState(Shelf{}).
   })
 ```
 
-Without a `Clone` function, such a state is read as without a cache. The same function lets `Step` and `StepStored` leave a state unchanged (see [Stepping Through States](#stepping-through-states)), and copies the initial value at the start of every read, which an initial value with a map, a slice with room for elements, or a pointer that is not `nil` requires (see [Defining State](#defining-state)).
+Without a `Clone` function, such a state is read as without a cache. The same function lets `Step` and `StepStored` leave a state unchanged (see [Stepping Through States](#stepping-through-states)), and copies the initial value at the start of every read, which an initial value with a map, a pointer or a channel that is not `nil`, or a slice with room for elements, requires (see [Defining State](#defining-state)).
 
 *Note that as an initial value, `Shelf{}`, whose `BookIDs` are `nil`, does not require a `Clone` function, and neither does `Shelf{BookIDs: []string{}}`, since appending to a slice without room for elements allocates a new array. `Shelf{BookIDs: make([]string, 0, 10)}` does, since appending to it writes into the array that every copy shares.*
 

@@ -105,7 +105,8 @@ func TestWrite(t *testing.T) {
 			says          string
 		}{
 			{"no preconditions", event, nil, "declares no preconditions"},
-			{"OnStateRead", event, []architecturekit.Precondition{architecturekit.OnStateRead()}, "OnStateRead has nothing to guard"},
+			{"OnStateRead", event, []architecturekit.Precondition{architecturekit.OnStateRead()},
+				"a write reads no state, so OnStateRead has nothing to guard, use OnPristineSubject, OnPopulatedSubject, OnEventID, or Require instead"},
 			{"Unconditionally with another precondition", event, []architecturekit.Precondition{
 				architecturekit.Unconditionally(),
 				architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition(subject)),

@@ -85,14 +85,15 @@ type EventSchema struct {
 // a copy of it, in Execute, Load, Replay, and ReplayStored alike, so that an
 // Evolve rule never changes what the next read starts from.
 //
-// An initial value that consists of values only, or whose maps, slices and
-// pointers are nil, needs nothing else, since a copy shares no data with it.
-// One that holds a map, a slice with room for elements, or a pointer that is
-// not nil, at any depth, shares that with every copy, so the state needs a
-// Clone function to copy it. Without one, every read fails with an error of
-// the category ErrPermanent, rather than let an Evolve rule write into the
-// initial value. A slice without room for elements, such as []string{}, needs
-// none, since appending to it allocates a new array.
+// An initial value that consists of values only, or whose maps, slices,
+// pointers and channels are nil, needs nothing else, since a copy shares no
+// data with it. One that holds a map, a pointer or a channel that is not nil,
+// or a slice with room for elements, at any depth, shares that with every
+// copy, so the state needs a Clone function to copy it. Without one, every
+// read fails with an error of the category ErrPermanent, rather than let an
+// Evolve rule write into the initial value. A slice without room for
+// elements, such as []string{}, needs none, since appending to it allocates a
+// new array.
 func NewState[TState any](initial TState) *State[TState] {
 	return &State[TState]{
 		initial: initial,
@@ -223,9 +224,9 @@ func (s *State[TState]) FromLatest[TEvent Event]() *State[TState] {
 }
 
 // Clone lets a store with a state cache cache this state, although it holds
-// slices, maps or pointers. The function must return a copy that shares no
-// data with the original, so that changing one of them never changes the
-// other.
+// slices, maps, pointers, channels, functions or interfaces. The function must
+// return a copy that shares no data with the original, so that changing one of
+// them never changes the other.
 //
 // Without it, such a state is not cached, and every command reads its events
 // as without a cache, because commands that ran at the same time would
@@ -234,8 +235,9 @@ func (s *State[TState]) FromLatest[TEvent Event]() *State[TState] {
 //
 // The same function lets Step and StepStored leave the given state unchanged,
 // and copies the initial value at the start of every read. An initial value
-// that holds a map, a slice with room for elements, or a pointer that is not
-// nil needs it, since reading would change it otherwise (see NewState).
+// that holds a map, a pointer or a channel that is not nil, or a slice with
+// room for elements, needs it, since reading would change it otherwise (see
+// NewState).
 //
 // Calling Clone twice is a programming error, so it panics while the state is
 // being built.
@@ -280,8 +282,8 @@ func (s *State[TState]) copyOfInitial() (TState, error) {
 
 	if s.sharesInitial && s.clone == nil {
 		var zero TState
-		return zero, fmt.Errorf("%w: %s holds slices, maps or pointers in its initial value, so it needs a "+
-			"Clone function to start every read from a copy of the initial value", ErrPermanent, reflect.TypeFor[TState]())
+		return zero, fmt.Errorf("%w: %s holds slices, maps, pointers or channels in its initial value, so it "+
+			"needs a Clone function to start every read from a copy of the initial value", ErrPermanent, reflect.TypeFor[TState]())
 	}
 
 	return s.copyOf(s.initial), nil
@@ -442,10 +444,10 @@ func ReplayStored[TState any](
 // unchanged, so that the state before and after the event are both at hand,
 // e.g. for a history that tells what an event changed.
 //
-// So that current stays unchanged, a state that holds slices, maps or
-// pointers needs a Clone function; without one, Step fails permanently. A
-// state that consists of values only needs none. If the event fails, Step
-// returns current.
+// So that current stays unchanged, a state that holds slices, maps, pointers,
+// channels, functions or interfaces needs a Clone function; without one, Step
+// fails permanently. A state that consists of values only needs none. If the
+// event fails, Step returns current.
 func Step[TState any](state *State[TState], current TState, event Event) (TState, error) {
 	if err := state.checkCopyable(); err != nil {
 		return current, err
@@ -487,8 +489,8 @@ func (s *State[TState]) checkCopyable() error {
 		return nil
 	}
 
-	return fmt.Errorf("%w: %s holds slices, maps or pointers, so it needs a Clone function "+
-		"to be stepped without changing the given state", ErrPermanent, reflect.TypeFor[TState]())
+	return fmt.Errorf("%w: %s holds slices, maps, pointers, channels, functions or interfaces, so it needs a "+
+		"Clone function to be stepped without changing the given state", ErrPermanent, reflect.TypeFor[TState]())
 }
 
 // evolveBy applies the rule for a typed event.

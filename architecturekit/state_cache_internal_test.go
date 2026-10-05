@@ -299,8 +299,8 @@ func TestCopyOfInitial(t *testing.T) {
 		initial, err := state.copyOfInitial()
 
 		require.ErrorIs(t, err, ErrPermanent)
-		assert.EqualError(t, err, "permanent failure: map[string]int holds slices, maps or "+
-			"pointers in its initial value, so it needs a Clone function to start every read from a copy of the "+
+		assert.EqualError(t, err, "permanent failure: map[string]int holds slices, maps, pointers or "+
+			"channels in its initial value, so it needs a Clone function to start every read from a copy of the "+
 			"initial value")
 		assert.Nil(t, initial, "the initial value must not be handed out")
 	})
