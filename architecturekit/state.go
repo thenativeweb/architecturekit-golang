@@ -329,10 +329,11 @@ func (s *State[TState]) checkRules(subject string, events []Event) error {
 // NewDecider.
 //
 // The zero value, such as a variable that was declared but never set, has
-// neither a state nor a decision, so its State returns nil. Handing it to
-// Execute, to the test fixture of architecturekittest, or to Route of httpapi
-// is a programming error, so they panic, while Handle fails with an error.
-// Either way, the text names the mistake rather than a nil pointer.
+// neither a state nor a decision, so its State returns nil. Calling its
+// Decide, or handing it to Execute, to the test fixture of architecturekittest,
+// or to Route of httpapi is a programming error, so they panic, while Handle
+// fails with an error. Either way, the text names the mistake rather than a
+// nil pointer.
 type Decider[TCommand Command, TState any] struct {
 	state  *State[TState]
 	decide func(ctx context.Context, cmd TCommand, state TState) ([]Event, error)
@@ -376,8 +377,12 @@ func (d Decider[TCommand, TState]) State() *State[TState] {
 
 // Decide decides on a command, given the state, with the function the decider
 // was created with, and returns what that function returns. The zero value
-// has no such function, so it panics.
+// has no such function, so it panics, naming the mistake.
 func (d Decider[TCommand, TState]) Decide(ctx context.Context, cmd TCommand, state TState) ([]Event, error) {
+	if d.decide == nil {
+		panic("architecturekit: Decide needs a decider made with NewDecider, not the zero Decider")
+	}
+
 	return d.decide(ctx, cmd, state)
 }
 

@@ -1,6 +1,8 @@
 package httpapi_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
@@ -148,6 +150,30 @@ func (*labels) UnmarshalJSON([]byte) error {
 	return errors.Join(&json.SyntaxError{Offset: 1}, jsontext.ErrDuplicateName)
 }
 
+// errNoSuchShelf is what shelfCode fails with.
+var errNoSuchShelf = errors.New("no such shelf")
+
+// shelfCode decodes itself, from JSON or from text, as the key of a map, and
+// refuses anything with a failure of encoding/json/v2 that does not name its
+// type.
+type shelfCode string
+
+func (*shelfCode) UnmarshalJSON([]byte) error {
+	return &jsonv2.SemanticError{Err: errNoSuchShelf}
+}
+
+func (*shelfCode) UnmarshalText([]byte) error {
+	return &jsonv2.SemanticError{Err: errNoSuchShelf}
+}
+
+// shelfIndex does the same, around a value that does not fit, which does not
+// name its type either.
+type shelfIndex int
+
+func (*shelfIndex) UnmarshalJSON([]byte) error {
+	return &jsonv2.SemanticError{Err: &json.UnmarshalTypeError{Value: "string"}}
+}
+
 // stockEntry holds types that decode themselves next to fields whose names
 // they use as well, one of which takes its number in a string.
 type stockEntry struct {
@@ -168,6 +194,21 @@ func bodyRequest(contentType string, body io.Reader) *http.Request {
 	}
 
 	return request
+}
+
+// gunzipping is a middleware that decompresses the body of a request, as an
+// application may have one.
+func gunzipping(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reader, err := gzip.NewReader(r.Body)
+		if err != nil {
+			http.Error(w, "the body is not compressed", http.StatusBadRequest)
+			return
+		}
+
+		r.Body = io.NopCloser(reader)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // bodyErrorOf decodes a JSON body into a TBody and returns the error.
@@ -677,6 +718,62 @@ func TestBodyOf(t *testing.T) {
 				assertMalformed(t, bodyErrorOf[stockEntry](test.body), test.text)
 			})
 		}
+
+		// encoding/json ignores the option string for a time, which
+		// encoding/json/v2 refuses, so the second decoding stops at the time,
+		// before the name that the offset points to. That name differs in case
+		// only from an earlier one of its object, but a map takes both, and so
+		// does a struct with a field for each.
+		t.Run("at a name that differs in case only from an earlier one that is another, after a time with the option string", func(t *testing.T) {
+			type pair struct {
+				Lower int `json:"y"`
+				Upper int `json:"Y"`
+			}
+
+			type shipment struct {
+				ByName map[string]int `json:"byName"`
+				Pair   pair           `json:"pair"`
+				//lint:ignore SA5008 the test is about the option on a type that it does not apply to
+				ArrivedAt time.Time `json:"arrivedAt,string"`
+				Keywords  keywords  `json:"keywords"`
+			}
+
+			for label, body := range map[string]string{
+				"in a map":      `{"byName":{"x":1,"X":2},"arrivedAt":"2026-10-05T12:00:00Z","keywords":"{\"a\":1,` + strings.Repeat(" ", 9) + `\"a\":2}"}`,
+				"of two fields": `{"pair":{"y":1,"Y":2},"arrivedAt":"2026-10-05T12:00:00Z","keywords":"{\"a\":1,` + strings.Repeat(" ", 7) + `\"a\":2}"}`,
+			} {
+				t.Run(label, func(t *testing.T) {
+					assertMalformed(t, bodyErrorOf[shipment](body), "duplicate object member name")
+				})
+			}
+		})
+	})
+
+	t.Run("keeps the error of a type that decodes itself that names no type, rather than panic", func(t *testing.T) {
+		// A failure of encoding/json/v2 that a type reports without its type
+		// is one that encoding/json hands back without a type as well.
+		type shelving struct {
+			Code   shelfCode         `json:"code"`
+			Index  shelfIndex        `json:"index"`
+			ByCode map[shelfCode]int `json:"byCode"`
+		}
+
+		for _, body := range []string{`{"code":"x"}`, `{"index":1}`, `{"byCode":{"x":1}}`} {
+			t.Run(body, func(t *testing.T) {
+				var err error
+				require.NotPanics(t, func() { err = bodyErrorOf[shelving](body) })
+
+				require.ErrorIs(t, err, httpapi.ErrMalformed)
+
+				mismatch, isMismatch := errors.AsType[*json.UnmarshalTypeError](err)
+				require.True(t, isMismatch, "errors.As has to find the error of decoding")
+				assert.Nil(t, mismatch.Type)
+			})
+		}
+
+		t.Run("and keeps it inspectable", func(t *testing.T) {
+			assert.ErrorIs(t, bodyErrorOf[shelving](`{"code":"x"}`), errNoSuchShelf)
+		})
 	})
 
 	t.Run("still says what a type that decodes itself from text takes", func(t *testing.T) {
@@ -920,8 +1017,38 @@ func TestBodyOf(t *testing.T) {
 
 	t.Run("rejects a body that can not be read", func(t *testing.T) {
 		_, err := httpapi.BodyOf[previewRequest](bodyRequest("application/json", failingReader{}))
-		assert.ErrorIs(t, err, httpapi.ErrMalformed)
+		assertMalformed(t, err, "the body could not be read")
 		assert.ErrorIs(t, err, errBrokenBody, "the error of reading has to stay inspectable")
+	})
+
+	t.Run("answers a body that a middleware fails to read without the words of the middleware", func(t *testing.T) {
+		// A middleware that decompresses the body fails with an error that
+		// names its package, such as "gzip: invalid checksum".
+		var failure error
+
+		api := httpapi.NewPublicAPI(deadStore(t))
+		handler := gunzipping(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var preview previewRequest
+			preview, failure = httpapi.BodyOf[previewRequest](r)
+			httpapi.RespondResult(w, r, api, preview, failure)
+		}))
+
+		var compressed bytes.Buffer
+		writer := gzip.NewWriter(&compressed)
+		_, err := writer.Write([]byte(`{"customerId":"42"}`))
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+
+		// The checksum is in the last eight bytes, before the length.
+		corrupt := compressed.Bytes()
+		corrupt[len(corrupt)-8] ^= 0xff
+
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, bodyRequest("application/json", bytes.NewReader(corrupt)))
+
+		assert.Equal(t, http.StatusBadRequest, response.Code)
+		assert.JSONEq(t, messageOf(t, "malformed request: the body could not be read"), response.Body.String())
+		assert.ErrorIs(t, failure, gzip.ErrChecksum, "the error of reading has to stay inspectable")
 	})
 
 	t.Run("answers a body over the limit of a middleware with 413", func(t *testing.T) {

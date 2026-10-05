@@ -190,6 +190,14 @@ func TestDecider(t *testing.T) {
 		assert.Nil(t, decider.State())
 	})
 
+	t.Run("panics in Decide as the zero value, naming the mistake", func(t *testing.T) {
+		var decider architecturekit.Decider[increment, counter]
+
+		assert.PanicsWithValue(t, "architecturekit: Decide needs a decider made with NewDecider, not the zero Decider", func() {
+			_, _ = decider.Decide(context.Background(), increment{subject: "/counter/1", By: 1}, counter{})
+		})
+	})
+
 	t.Run("panics in Execute as the zero value, naming the mistake", func(t *testing.T) {
 		var decider architecturekit.Decider[increment, counter]
 		store := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")

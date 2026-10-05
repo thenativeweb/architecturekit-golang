@@ -861,9 +861,10 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // as the same name, even if they differ in case.
 //
 // The error says what is wrong in words of its own, rather than in those of
-// the decoder, which name the types of Go. After the text of ErrMalformed, it
-// says one of these:
+// the reader, which name its package, or of the decoder, which name the types
+// of Go. After the text of ErrMalformed, it says one of these:
 //
+//	the body could not be read
 //	empty body
 //	invalid JSON
 //	data after the JSON value
@@ -1027,13 +1028,18 @@ func requireNoBody(r *http.Request) error {
 // readBody reads at most MaxRequestBody bytes and tells a body that is too
 // large apart from one that could not be read. A body that a middleware cuts
 // off at a lower limit, with http.MaxBytesReader, is too large as well.
+//
+// The error of reading is the reader's, such as that of a middleware that
+// decompresses the body, whose text names its package, such as "gzip:
+// invalid checksum". So the caller is told that the body could not be read,
+// in words of its own, while the error still wraps it.
 func readBody(r *http.Request) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, MaxRequestBody+1))
 	if tooLarge, isTooLarge := errors.AsType[*http.MaxBytesError](err); isTooLarge {
 		return nil, fmt.Errorf("%w: at most %d bytes are read", ErrTooLarge, tooLarge.Limit)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: reading the body: %w", ErrMalformed, err)
+		return nil, fmt.Errorf("%w: %w", ErrMalformed, &decodeFailure{text: "the body could not be read", causes: []error{err}})
 	}
 
 	if len(body) > MaxRequestBody {

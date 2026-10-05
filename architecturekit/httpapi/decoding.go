@@ -19,11 +19,11 @@ import (
 	"time"
 )
 
-// decodeFailure is a body that could not be decoded, told in words of its own
-// rather than in those of the decoder, which name the types of Go, such as
-// "Go struct field previewRequest.quantity of type int", that the caller does
-// not know. It wraps the errors of the decoder, so that errors.As still finds
-// them.
+// decodeFailure is a body that could not be read or decoded, told in words of
+// its own rather than in those of the reader or the decoder, which name a
+// package, such as "gzip: invalid checksum", or the types of Go, such as "Go
+// struct field previewRequest.quantity of type int", that the caller does not
+// know. It wraps their errors, so that errors.As still finds them.
 type decodeFailure struct {
 	text   string
 	causes []error
@@ -54,7 +54,7 @@ func describeDecoding(bodyType reflect.Type, body []byte, err, detailed error) e
 	// encoding/json checks that the whole body is JSON before it decodes
 	// anything, so a mistake in the JSON comes first, wherever it is.
 	if syntax, isSyntax := errors.AsType[*json.SyntaxError](err); isSyntax {
-		return describeSyntax(body, syntax, err, detailed)
+		return describeSyntax(bodyType, body, syntax, err, detailed)
 	}
 
 	// encoding/json names an unknown field in its text alone, and hands back
@@ -89,7 +89,7 @@ func describeDecoding(bodyType reflect.Type, body []byte, err, detailed error) e
 // it into a value, to tell a body without any value, which is empty or holds
 // nothing but whitespace, a name that occurs twice, and data after a complete
 // value from any other mistake, which is invalid JSON.
-func describeSyntax(body []byte, syntax *json.SyntaxError, err, detailed error) error {
+func describeSyntax(bodyType reflect.Type, body []byte, syntax *json.SyntaxError, err, detailed error) error {
 	reader := jsontext.NewDecoder(bytes.NewReader(body), strictJSON)
 	_, failure := reader.ReadValue()
 
@@ -97,7 +97,7 @@ func describeSyntax(body []byte, syntax *json.SyntaxError, err, detailed error) 
 	case failure == nil && len(bytes.TrimLeft(body[reader.InputOffset():], " \t\r\n")) > 0:
 		return &decodeFailure{text: "data after the JSON value", causes: []error{err}}
 	case failure == nil:
-		return describeNamesake(body, syntax, err, detailed)
+		return describeNamesake(bodyType, body, syntax, err, detailed)
 	case errors.Is(failure, io.EOF):
 		return &decodeFailure{text: "empty body", causes: []error{err}}
 	case errors.Is(failure, jsontext.ErrDuplicateName):
@@ -130,14 +130,14 @@ func describeDuplicate(err, found error) error {
 // them only while decoding, which encoding/json/v2 points to, unless it
 // stopped at an earlier failure that encoding/json passes over, such as a
 // value of the wrong kind. Then the name is where the error of encoding/json
-// says that it starts, if a name starts there that repeats an earlier one of
-// its object, regardless of case.
+// says that it starts, if a name starts there that falls on the same field of
+// bodyType as an earlier one of its object.
 //
 // Any other error comes back as it is, such as a *json.SyntaxError of a type
 // that decodes itself, which points into JSON text of its own. If that type is
 // where encoding/json/v2 stopped, its failure points into that text as well,
 // and if it failed with a syntax error at the very offset, the error is its.
-func describeNamesake(body []byte, syntax *json.SyntaxError, err, detailed error) error {
+func describeNamesake(bodyType reflect.Type, body []byte, syntax *json.SyntaxError, err, detailed error) error {
 	own, isOwn := ownFailureOf(detailed)
 
 	switch {
@@ -147,7 +147,7 @@ func describeNamesake(body []byte, syntax *json.SyntaxError, err, detailed error
 		return err
 	}
 
-	name, isRepeated := repeatedNameAt(body, syntax.Offset)
+	name, isRepeated := repeatedNameAt(bodyType, body, syntax.Offset)
 	if !isRepeated {
 		return err
 	}
@@ -173,6 +173,13 @@ func describeNamesake(body []byte, syntax *json.SyntaxError, err, detailed error
 // of its own with encoding/json, whose path then points into that text rather
 // than into the body.
 func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.UnmarshalTypeError, err, detailed error) error {
+	// encoding/json names the type of every value that it refuses itself, so
+	// a value without one is that of a type that decodes itself, which failed
+	// with a failure of encoding/json/v2 that does not name its type.
+	if mismatch.Type == nil {
+		return err
+	}
+
 	// encoding/json/v2 points to the type that decodes itself instead, unless
 	// encoding/json refused the value for that very type, before the type
 	// decoded anything, such as a number for a type that decodes itself from
@@ -315,11 +322,15 @@ func describeTime(body []byte, failure *jsonv2.SemanticError, err error) error {
 }
 
 // repeatedNameAt returns the name of a member that starts at the offset of
-// the body, and reports whether there is one that repeats an earlier name of
-// its object, regardless of case, as two names do that match the same field.
-// The offset may point anywhere, even beyond the body, if it comes from an
-// error of a type that decodes itself.
-func repeatedNameAt(body []byte, offset int64) (string, bool) {
+// the body, and reports whether there is one that falls on the same field as
+// an earlier name of its object, given bodyType, the type that the body is
+// decoded into. Two names do that if they differ in case only, and the object
+// is decoded into a struct that has one field for both. The keys of a map are
+// different names, even if they differ in case only, as are the names of two
+// fields, and the names of an object whose fields it can not tell (see
+// structAt). The offset may point anywhere, even beyond the body, if it comes
+// from an error of a type that decodes itself.
+func repeatedNameAt(bodyType reflect.Type, body []byte, offset int64) (string, bool) {
 	reader := jsontext.NewDecoder(bytes.NewReader(body), strictJSON)
 
 	// The names that the objects around the next token hold so far, those of
@@ -350,8 +361,16 @@ func repeatedNameAt(body []byte, offset int64) (string, bool) {
 			earlier := names[len(names)-1]
 
 			if start == offset {
-				return name, slices.ContainsFunc(earlier, func(earlierName string) bool {
-					return strings.EqualFold(earlierName, name)
+				structType, isStruct := structAt(bodyType, reader.StackPointer().Parent())
+				if !isStruct {
+					return name, false
+				}
+
+				field, isField := fieldNamed(structType, name)
+
+				return name, isField && slices.ContainsFunc(earlier, func(earlierName string) bool {
+					earlierField, _ := fieldNamed(structType, earlierName)
+					return slices.Equal(earlierField.Index, field.Index)
 				})
 			}
 
@@ -540,6 +559,51 @@ func fieldNamed(structType reflect.Type, name string) (reflect.StructField, bool
 	return namesake, hasNamesake
 }
 
+// structAt returns the struct that encoding/json decodes the object that the
+// pointer points to into, given valueType, the type that it decodes the whole
+// value into, and reports false if that object is decoded into anything else,
+// such as a map, or if it can not tell. That is the case for a pointer to a
+// field that valueType does not have, and for a type on the way that decodes
+// itself, whose fields say nothing about the names it takes.
+func structAt(valueType reflect.Type, pointer jsontext.Pointer) (reflect.Type, bool) {
+	names := slices.Collect(pointer.Tokens())
+
+	for depth := 0; ; depth++ {
+		for valueType.Kind() == reflect.Pointer {
+			valueType = valueType.Elem()
+		}
+
+		switch {
+		case decodesItself(valueType):
+			return nil, false
+		case depth == len(names):
+			return valueType, valueType.Kind() == reflect.Struct
+		}
+
+		switch valueType.Kind() {
+		case reflect.Struct:
+			field, isFound := fieldNamed(valueType, names[depth])
+			if !isFound {
+				return nil, false
+			}
+
+			valueType = field.Type
+		case reflect.Slice, reflect.Array, reflect.Map:
+			valueType = valueType.Elem()
+		default:
+			return nil, false
+		}
+	}
+}
+
+// decodesItself reports whether a value of the type decodes itself, from JSON
+// or from text.
+func decodesItself(valueType reflect.Type) bool {
+	return hasMethodsOf[json.Unmarshaler](valueType) ||
+		hasMethodsOf[jsonv2.UnmarshalerFrom](valueType) ||
+		hasMethodsOf[encoding.TextUnmarshaler](valueType)
+}
+
 // hasMethodsOf reports whether a value of the type, or a pointer to it, has
 // the methods of the interface TMethods.
 func hasMethodsOf[TMethods any](valueType reflect.Type) bool {
@@ -557,10 +621,7 @@ func ownFailureOf(detailed error) (*jsonv2.SemanticError, bool) {
 		return nil, false
 	}
 
-	decodesItself := hasMethodsOf[json.Unmarshaler](failure.GoType) ||
-		hasMethodsOf[jsonv2.UnmarshalerFrom](failure.GoType) ||
-		hasMethodsOf[encoding.TextUnmarshaler](failure.GoType)
-	if !decodesItself {
+	if !decodesItself(failure.GoType) {
 		return nil, false
 	}
 

@@ -570,6 +570,7 @@ func TestRoute(t *testing.T) {
 		muxFor(t, deadStore(t)).ServeHTTP(recorder, httpRequest)
 
 		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.JSONEq(t, messageOf(t, "malformed request: the body could not be read"), recorder.Body.String())
 	})
 
 	t.Run("an unreachable store is an internal failure", func(t *testing.T) {

@@ -222,7 +222,8 @@ func TestNoBody(t *testing.T) {
 	t.Run("BodyOf refuses a body that can not be read", func(t *testing.T) {
 		_, err := httpapi.BodyOf[httpapi.NoBody](bodyRequest("", failingReader{}))
 
-		assert.ErrorIs(t, err, httpapi.ErrMalformed)
+		require.ErrorIs(t, err, httpapi.ErrMalformed)
+		assert.EqualError(t, err, "malformed request: the body could not be read")
 		assert.ErrorIs(t, err, errBrokenBody, "the error of reading has to stay inspectable")
 	})
 

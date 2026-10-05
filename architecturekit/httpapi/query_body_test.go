@@ -198,7 +198,7 @@ var bodyFailures = []struct {
 	{
 		label: "that can not be read", contentType: "application/json", body: func() io.Reader { return failingReader{} },
 		category: httpapi.ErrMalformed, status: http.StatusBadRequest,
-		message: "malformed request: reading the body: broken body",
+		message: "malformed request: the body could not be read",
 	},
 }
 

@@ -116,6 +116,14 @@ func TestKindOf(t *testing.T) {
 	})
 }
 
+// ledger decodes itself, so its fields say nothing about the names it takes.
+type ledger struct {
+	Count int   `json:"count"`
+	Entry order `json:"entry"`
+}
+
+func (*ledger) UnmarshalJSON([]byte) error { return nil }
+
 // The types for isQuoted and fieldNamed: an order whose quantity is a number
 // in a string, as are the code of its voucher, which an embedded struct that
 // is not exported holds, and the percentage of its discount, which an
@@ -413,27 +421,51 @@ func TestDescribeDecoding(t *testing.T) {
 		}
 	})
 
-	t.Run("names a name that occurs twice only where it repeats an earlier name of its object, regardless of case", func(t *testing.T) {
+	t.Run("names a name that occurs twice only where it falls on the same field as an earlier name of its object", func(t *testing.T) {
 		for _, test := range []struct {
-			label  string
-			body   string
-			offset int
-			name   string
+			label     string
+			valueType reflect.Type
+			body      string
+			offset    int
+			name      string
 		}{
 			{label: "in another case", body: `{"count":1,"COUNT":2}`, offset: 11, name: "COUNT"},
 			{label: "in a nested object", body: `{"delivery":{"street":"a","STREET":"b"}}`, offset: 26, name: "STREET"},
 			{label: "in an object after a nested one", body: `{"count":1,"delivery":{"street":"a"},"COUNT":2}`, offset: 37, name: "COUNT"},
+			{label: "in an object in a map", body: `{"byName":{"home":{"street":"a","STREET":"b"}}}`, offset: 32, name: "STREET"},
+			{label: "in an object in a list", valueType: reflect.TypeFor[[]order](), body: `[{"count":1,"COUNT":2}]`, offset: 12, name: "COUNT"},
+			{label: "in an object in an array", valueType: reflect.TypeFor[[1]order](), body: `[{"count":1,"COUNT":2}]`, offset: 12, name: "COUNT"},
+			{label: "behind a pointer", valueType: reflect.TypeFor[*order](), body: `{"count":1,"COUNT":2}`, offset: 11, name: "COUNT"},
+			{label: "in another case than the fields of both", valueType: reflect.TypeFor[casings](), body: `{"name":"1","Name":"2"}`, offset: 12, name: "Name"},
 			{label: "once", body: `{"count":1,"quantity":"2"}`, offset: 11},
 			{label: "once in its object, after a nested one that holds it", body: `{"delivery":{"street":"a"},"STREET":1}`, offset: 27},
 			{label: "once in its object, inside one that holds it", body: `{"street":"a","delivery":{"STREET":"b"}}`, offset: 26},
-			{label: "once in an object in a list, after another one that holds it", body: `[{"count":1},{"COUNT":2}]`, offset: 14},
+			{label: "once in an object in a list, after another one that holds it", valueType: reflect.TypeFor[[]order](), body: `[{"count":1},{"COUNT":2}]`, offset: 14},
 			{label: "as a value", body: `{"count":1,"x":"count"}`, offset: 15},
 			{label: "as an item of a list", body: `{"count":1,"x":["a","b","COUNT"]}`, offset: 24},
+			// Names that differ in case only are different names, unless they
+			// fall on the same field.
+			{label: "as a key of a map", body: `{"floors":{"ground":1,"GROUND":2}}`, offset: 22},
+			{label: "as the name of a field of its own", valueType: reflect.TypeFor[casings](), body: `{"name":"1","NAME":2}`, offset: 12},
+			{label: "as the name of no field", body: `{"count":1,"x":1,"X":2}`, offset: 17},
+			{label: "in an object of no field", body: `{"x":{"count":1,"COUNT":2}}`, offset: 16},
+			{label: "in an object of a value that holds none", body: `{"count":{"count":1,"COUNT":2}}`, offset: 20},
+			{label: "in an object of any type", valueType: reflect.TypeFor[any](), body: `{"count":1,"COUNT":2}`, offset: 11},
+			{label: "in an object inside one of any type", valueType: reflect.TypeFor[any](), body: `{"a":{"count":1,"COUNT":2}}`, offset: 16},
+			{label: "in an object of a type that decodes itself", valueType: reflect.TypeFor[ledger](), body: `{"count":1,"COUNT":2}`, offset: 11},
+			{label: "in an object inside a type that decodes itself", valueType: reflect.TypeFor[ledger](), body: `{"entry":{"count":1,"COUNT":2}}`, offset: 20},
 		} {
 			t.Run(test.label, func(t *testing.T) {
+				valueType := test.valueType
+				if valueType == nil {
+					valueType = bodyType
+				}
+
+				require.Equal(t, `"`, test.body[test.offset:test.offset+1], "the offset has to point to a name")
+
 				duplicate := duplicateAt(t, test.offset)
 
-				err := describeDecoding(bodyType, []byte(test.body), duplicate, nil)
+				err := describeDecoding(valueType, []byte(test.body), duplicate, nil)
 
 				if test.name == "" {
 					assert.Same(t, duplicate, err)
@@ -523,6 +555,34 @@ func TestDescribeDecoding(t *testing.T) {
 				err := describeDecoding(bodyType, []byte(`{"isbn":{"quantity":"x"}}`), mismatch, failure)
 
 				assert.Same(t, mismatch, err)
+			})
+		}
+	})
+
+	t.Run("keeps a value that does not fit without a type, as a type that decodes itself reports it", func(t *testing.T) {
+		// A type that decodes itself may fail with a failure of
+		// encoding/json/v2 that does not name its type, which encoding/json
+		// hands back without a type as well, wherever the failure points to.
+		for _, test := range []struct {
+			label    string
+			body     string
+			mismatch *json.UnmarshalTypeError
+			detailed error
+		}{
+			{label: "to a value", body: `{"isbn":1}`,
+				mismatch: &json.UnmarshalTypeError{}, detailed: &jsonv2.SemanticError{JSONPointer: "/isbn", ByteOffset: 8}},
+			{label: "to the key of a map", body: `{"floors":{"x":1}}`,
+				mismatch: &json.UnmarshalTypeError{}, detailed: &jsonv2.SemanticError{JSONPointer: "/floors/x", ByteOffset: 11}},
+			{label: "nowhere, with a path of encoding/json", body: `{"count":1}`,
+				mismatch: &json.UnmarshalTypeError{Field: "count"}, detailed: errors.New("another failure")},
+			{label: "nowhere, without a path", body: `{"count":1}`,
+				mismatch: &json.UnmarshalTypeError{}, detailed: nil},
+		} {
+			t.Run(test.label, func(t *testing.T) {
+				var err error
+				require.NotPanics(t, func() { err = describeDecoding(bodyType, []byte(test.body), test.mismatch, test.detailed) })
+
+				assert.Same(t, test.mismatch, err)
 			})
 		}
 	})
