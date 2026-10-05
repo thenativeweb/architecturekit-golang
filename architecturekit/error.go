@@ -16,18 +16,22 @@ import (
 // so that errors.As finds an *eventsourcingdb.DBAPIError with the status code
 // and the reason the database gave. It is the category, though, that tells
 // what the failure means.
+//
+// The texts of the categories leave out the name of the package, since an
+// error that is written for a caller, such as one of ErrDomain, may reach them
+// with its text.
 var (
 	// ErrDomain means a business rule rejected the command. The caller has to
 	// change what it asks for; asking again will not help.
-	ErrDomain = errors.New("architecturekit: domain rule violated")
+	ErrDomain = errors.New("domain rule violated")
 
 	// ErrTransient means the same attempt may succeed later, unchanged.
-	ErrTransient = errors.New("architecturekit: transient failure")
+	ErrTransient = errors.New("transient failure")
 
 	// ErrPermanent means trying again will not help, and something is wrong
 	// with the code, the data or the configuration, for example an event whose
 	// data can not be encoded as JSON, such as a float NaN.
-	ErrPermanent = errors.New("architecturekit: permanent failure")
+	ErrPermanent = errors.New("permanent failure")
 )
 
 // ErrConflict means a precondition of the write did not hold. It is transient,

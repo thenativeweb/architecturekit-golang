@@ -14,7 +14,11 @@ import (
 )
 
 // ErrNotFound means the query asked for something that does not exist.
-var ErrNotFound = errors.New("httpapi: not found")
+var ErrNotFound = errors.New("not found")
+
+// methodQuery is QUERY, the method that a query is asked with (see Query).
+// net/http has no name for it yet.
+const methodQuery = "QUERY"
 
 // ToQuery turns request data and the user into a query. It is the read
 // side's counterpart to ToCommand, without a decoded body, since a query
@@ -85,19 +89,15 @@ type querySettings struct {
 
 // Revisioned has a query wait for the revision a caller asks for, for at most
 // the given time (DefaultWait, unless there is a reason for another), answer
-// 304 when nothing has changed, or 412 for a method other than GET, HEAD and
-// QUERY, and tag the answer with the revision of the view it served.
+// 304 when nothing has changed, and tag the answer with the revision of the
+// view it served.
 //
 // Whether nothing has changed, it tells from If-None-Match, which it reads
 // the way HTTP has it: as a list of tags, or *, compared weakly, so that a tag
 // that a proxy marked as weak while compressing the answer still matches.
-//
-// HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, a method
-// that asks with a body and changes nothing, which it treats like GET
-// (draft-ietf-httpbis-safe-method-w-body), and 412 for every other method. So
-// a query that is sent as POST, since its input does not fit into the query
-// string, is answered with 412 when nothing has changed. It carries the tag
-// and the revision, as 304 does, and a message.
+// HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, which it
+// treats like GET (draft-ietf-httpbis-safe-method-w-body), also when the
+// query asks with a body. It carries the tag and the revision, and no body.
 //
 // The tag holds the query, so two callers get the same tag only if they ask
 // the same: a query that holds the user, or anything else that tells callers
@@ -120,7 +120,14 @@ type querySettings struct {
 // The query is built before anything waits or is answered, since building it
 // determines the caller and checks what they may ask: nobody can make the
 // server wait, or learn that an answer is unchanged, without being allowed to
-// ask. Answers are marked private, so that a shared cache does not keep them.
+// ask.
+//
+// An answer that carries a revision, a success or one that says that nothing
+// has changed, says Cache-Control: private, no-cache: a cache asks again
+// before it hands it out, and private keeps shared caches, such as proxies,
+// from keeping it at all. Any other answer, such as a failure, or a success of
+// a view that has seen nothing, says no-store, as every other answer of the
+// kit does.
 //
 // A nil view, a negative wait, or giving Revisioned twice, is a programming
 // error, so it panics. A nil pointer counts as a nil view, such as a view that
@@ -186,10 +193,21 @@ func Varying(varies Volatile) QueryOption {
 }
 
 // Query wires a query to the mux and answers in the kit's default format,
-// which is the result itself. With Revisioned, it reads its own writes and
-// answers 304 when nothing has changed, or 412 for a method other than GET,
-// HEAD and QUERY; with Varying in addition, its tag changes with what the
+// which is the result itself, with Cache-Control: no-store, so that no cache
+// keeps it. With Revisioned, it reads its own writes and answers 304 when
+// nothing has changed; with Varying in addition, its tag changes with what the
 // answer takes from elsewhere.
+//
+// A query is asked with QUERY, a method that changes nothing, like GET, but
+// may carry a body (draft-ietf-httpbis-safe-method-w-body), as in the API of
+// EventSourcingDB. So the pattern names it, as in QUERY /api/books, and
+// toQuery reads the input of the query from the path, the query string, or
+// the body, with BodyOf. A query without input that refuses a body reads it
+// as NoBody, which accepts one that is empty, or {} (see NoBody). A pattern
+// without a method, which accepts every method, or with another method than
+// QUERY, is a programming error, so Query panics, as Route does for a method
+// that must not change anything. A handler of your own that asks with Ask may
+// use any method, such as GET for a download.
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack, as with Route.
@@ -217,6 +235,16 @@ func Query[TUser any, TQuery any, TResult any](
 		panic("architecturekit/httpapi: Query needs a function that answers the query, not nil")
 	}
 
+	switch method := methodOf(pattern); method {
+	case methodQuery:
+	case "":
+		panic(fmt.Sprintf("architecturekit/httpapi: Query needs a pattern that names the method QUERY, not %q, "+
+			"which accepts every method", pattern))
+	default:
+		panic(fmt.Sprintf("architecturekit/httpapi: Query needs a pattern whose method is QUERY, not %q, "+
+			"since a query is asked with QUERY rather than %s", pattern, method))
+	}
+
 	var settings querySettings
 	for _, option := range options {
 		option(&settings)
@@ -241,11 +269,12 @@ func Query[TUser any, TQuery any, TResult any](
 }
 
 // RespondResult writes a query result, or answers the error the way Respond
-// does for commands, with the same messages: a fixed one for 401, 409, and
-// 500 and above, while the error is logged through the logger of the API,
-// with the route of the request (see WithLogger), and the error itself
-// otherwise. A result that can not be encoded, such as one that holds NaN,
-// is answered with 500 as well.
+// does for commands, with the same messages: a fixed one for 401, 409, a
+// query that found no item, and 500 and above, while the error is logged
+// through the logger of the API, with the route of the request (see
+// WithLogger), and the error itself otherwise. A result that can not be
+// encoded, such as one that holds NaN, is answered with 500 as well. Like
+// Respond, it says Cache-Control: no-store, so that no cache keeps the answer.
 //
 // As with Respond, an error without a status of its own is answered with 500,
 // so wrap a mistake in the request that a handler of your own has found with
@@ -273,6 +302,11 @@ func respondResult[TResult any](
 // respondResultAt writes a query result with the revision it shows, if there
 // is one (see writeRevision), and explains an error with explain.
 //
+// An answer without a revision has no tag that a cache could ask about, and
+// it may be the outcome of a command, or hold what only its caller may see.
+// Without a word on caching, HTTP lets a cache keep it for a while it picks
+// itself, and hand it out again, so it says that no cache may keep it.
+//
 // The result is encoded before anything is written, so that a result that can
 // not be encoded is still answered with 500, and without the revision of an
 // answer that never came. That holds for an error while it is encoded, such as
@@ -287,6 +321,7 @@ func respondResultAt[TResult any](
 	explain func(status int, err error) string,
 ) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 
 	var body bytes.Buffer
 	if err == nil {

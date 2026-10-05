@@ -16,12 +16,12 @@ func TestAPIWithoutStore(t *testing.T) {
 	t.Run("answers queries", func(t *testing.T) {
 		api := httpapi.NewAPI(nil, userFrom)
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes",
+		httpapi.Query(api, mux, "QUERY /notes",
 			func(*http.Request, user) (string, error) { return "all", nil },
 			func(context.Context, string) ([]string, error) { return []string{"first", "second"}, nil },
 		)
 
-		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request := httptest.NewRequest("QUERY", "/notes", nil)
 		request.Header.Set("X-User", "golo")
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, request)

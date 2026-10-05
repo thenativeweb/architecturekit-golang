@@ -239,7 +239,7 @@ func TestPanickingProjection(t *testing.T) {
 
 		run := architecturekit.StartProjection(t.Context(), storeWithOneEvent(t), architecturekit.ExactSubject("/test"), transient)
 
-		assertStoppedOnPanic(t, run, "architecturekit: transient failure: the index is down", "architecturekit_test.TestPanickingProjection")
+		assertStoppedOnPanic(t, run, "transient failure: the index is down", "architecturekit_test.TestPanickingProjection")
 		assert.NotErrorIs(t, run.Err(), architecturekit.ErrTransient, "a panic is a mistake in the code, whatever it panicked with")
 	})
 

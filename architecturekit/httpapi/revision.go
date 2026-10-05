@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -90,36 +89,17 @@ func Await(
 // Returning the current day is usually all it takes.
 type Volatile func(*http.Request) string
 
-// methodQuery is QUERY, a method that asks with a body and changes nothing,
-// like GET (draft-ietf-httpbis-safe-method-w-body). net/http has no name for
-// it yet.
-const methodQuery = "QUERY"
-
 // serveUnchanged answers 304 when the caller already holds the answer with
-// the given tag, or 412 for a method other than GET, HEAD and QUERY, and
-// reports whether it did.
-//
-// HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, which it
-// treats like GET, and 412 for every other method, such as POST, which a
-// query whose input does not fit into the query string is sent with. Both
-// carry the tag and the revision of the current answer, and only 412 has a
-// body, which is a message, as with any other answer that is not a success.
+// the given tag, and reports whether it did. Only QUERY reaches it (see
+// Query), which HTTP answers with 304, as it does GET. It carries the tag and
+// the revision of the current answer, and no body.
 func serveUnchanged(w http.ResponseWriter, r *http.Request, revision, tag string) bool {
 	if tag == "" || !holdsTag(r, tag) {
 		return false
 	}
 
 	writeRevision(w, revision, tag)
-
-	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == methodQuery {
-		w.WriteHeader(http.StatusNotModified)
-	} else {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusPreconditionFailed)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"message": "precondition failed: the current answer matches If-None-Match",
-		})
-	}
+	w.WriteHeader(http.StatusNotModified)
 
 	return true
 }
@@ -207,6 +187,8 @@ func writeRevision(w http.ResponseWriter, revision, tag string) {
 	// Without no-cache a browser is free to decide for itself how long the
 	// answer stays good, and it will not ask again until it has. The tag still
 	// saves the body when nothing has changed; this only insists that it asks.
+	// It replaces no-store, which every answer without a revision carries (see
+	// respondResultAt).
 	//
 	// Private keeps shared caches, such as proxies, from keeping the answer at
 	// all. Whether an answer is the same for everybody is something only the

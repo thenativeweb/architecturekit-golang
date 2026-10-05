@@ -18,6 +18,7 @@ import (
 	"maps"
 	"mime"
 	"net/http"
+	"reflect"
 	"runtime/debug"
 	"strings"
 
@@ -30,27 +31,30 @@ import (
 // into memory in full before it is decoded, so it needs an upper bound.
 const MaxRequestBody = 1 << 20
 
+// These errors sort the failures of a request. An error that is written for
+// the caller is answered with its text (see Respond), so their texts name what
+// is wrong, without the name of the package.
 var (
 	// ErrUnauthorized means the caller could not be determined.
-	ErrUnauthorized = errors.New("httpapi: unauthorized")
+	ErrUnauthorized = errors.New("unauthorized")
 
 	// ErrUnsupportedMediaType means the request did not claim to be JSON.
-	ErrUnsupportedMediaType = errors.New("httpapi: unsupported media type")
+	ErrUnsupportedMediaType = errors.New("unsupported media type")
 
 	// ErrTooLarge means the request body exceeded MaxRequestBody.
-	ErrTooLarge = errors.New("httpapi: request body too large")
+	ErrTooLarge = errors.New("request body too large")
 
 	// ErrForbidden means the user is known but not allowed to do this.
-	ErrForbidden = errors.New("httpapi: forbidden")
+	ErrForbidden = errors.New("forbidden")
 
 	// ErrMalformed means the body could not be decoded, or not be turned into
 	// a command.
-	ErrMalformed = errors.New("httpapi: malformed request")
-
-	// errNoStore means a command reached an API that was created without a
-	// store. That is a mistake in the wiring, which the caller is not told.
-	errNoStore = errors.New("httpapi: the API has no store, so it can not execute commands")
+	ErrMalformed = errors.New("malformed request")
 )
+
+// errNoStore means a command reached an API that was created without a store.
+// That is a mistake in the wiring, which the caller is not told.
+var errNoStore = errors.New("httpapi: the API has no store, so it can not execute commands")
 
 // ToCommand turns a request, its body, and the user into a command. The body
 // comes decoded into TRequest, by the rules of BodyOf, while the request holds
@@ -92,12 +96,12 @@ type apiSettings struct {
 // WithLogger has everything that answers through the API log every error it
 // does not explain to the caller in full through the given logger, once, with
 // the method and the route of the request: the routes the API wires up, and
-// Respond and RespondResult in a handler of your own. A failure of the server
-// is logged as an error, which for a panic includes its value and its stack,
-// and a refusal with 401 or 409, whose details the caller is not told (see
-// Respond), as information. The same goes for an answer that Adding could not
-// complete, which is logged as an error. Without it, they log through the
-// default logger of log/slog.
+// Respond, RespondResult, and RespondError in a handler of your own. A failure
+// of the server is logged as an error, which for a panic includes its value
+// and its stack, and a refusal whose details the caller is not told, such as
+// one with 401 or 409 (see Respond), as information. The same goes for an
+// answer that Adding could not complete, which is logged as an error. Without
+// it, they log through the default logger of log/slog.
 //
 // A nil logger is a programming error, so WithLogger panics.
 func WithLogger(logger *slog.Logger) APIOption {
@@ -170,6 +174,16 @@ func (api *API[TUser]) explain(r *http.Request) func(status int, err error) stri
 			api.logRefusal(r, status, err)
 
 			return "conflict: the data has changed since it was read"
+
+		// A query that expects one item and finds none fails with
+		// query.ErrNoItems, whose text speaks of a sequence, in the words of a
+		// package that knows nothing about HTTP. So unless the application says
+		// itself what was not found, with ErrNotFound, the caller is told what
+		// the status says, and the error is logged as information, as above.
+		case status == http.StatusNotFound && !errors.Is(err, ErrNotFound):
+			api.logRefusal(r, status, err)
+
+			return "not found"
 
 		// Every other error is written for the caller, such as the business rule
 		// a command broke, or what is wrong with a request.
@@ -536,6 +550,10 @@ const statusClientClosedRequest = 499
 // StatusFor maps an error to an HTTP status. It asks for error categories
 // rather than concrete errors, so new failures do not need a new case here.
 //
+// A query that expects exactly one item and finds none, such as one of
+// query.Single, fails with query.ErrNoItems, which maps to 404 without having
+// to be translated into ErrNotFound.
+//
 // An error that wraps architecturekit.ErrNotARevision maps to 400, since the
 // value that is not a revision was handed over, such as a bound of
 // architecturekit.Read or the revision a view is to wait for, which usually
@@ -548,10 +566,10 @@ const statusClientClosedRequest = 499
 // is not logged, since nothing failed. If its deadline ran out, the server
 // took too long, which maps to 503 and is logged.
 //
-// The status says nothing about what to tell the caller. Respond and
-// RespondResult explain only an error that is written for the caller, and an
-// answer in a format of your own should do the same: the error of a 401, a
-// 409, or a status of 500 and above may name internals.
+// The status says nothing about what to tell the caller. Respond,
+// RespondResult, and RespondError explain only an error that is written for
+// the caller, and an answer in a format of your own should do the same: the
+// error of a 401, a 409, or a status of 500 and above may name internals.
 func StatusFor(err error) int {
 	switch {
 	case err == nil:
@@ -607,11 +625,18 @@ func StatusFor(err error) int {
 //   - 401 says "unauthorized", and 409 says "conflict: the data has changed
 //     since it was read", while the error is logged at level Info, since the
 //     server did not fail.
+//   - 404 says "not found" for a query that found no item, whose error
+//     query.ErrNoItems speaks of a sequence rather than of what was not
+//     found, and it is logged the same way. An error of ErrNotFound, on the
+//     other hand, is written for the caller, and so it is the message.
 //   - 500 and above say "internal server error", while the failure is logged
 //     at level Error.
 //
-// Both are logged through the logger of the API, with the route of the
+// Each of them is logged through the logger of the API, with the route of the
 // request (see WithLogger).
+//
+// Every answer, a success as well as a failure, says Cache-Control: no-store,
+// so that no cache keeps it.
 //
 // Unlike Route and Handle, Respond does not know where an error comes from, so
 // an error without a status of its own is answered with 500, also one that a
@@ -628,6 +653,35 @@ func Respond[TUser any](
 	err error,
 ) {
 	respond(w, written, nil, err, api.explain(r))
+}
+
+// RespondError answers an error without a result, exactly as Respond and
+// RespondResult answer one: with the status that StatusFor maps it to, the
+// same messages, Cache-Control: no-store, and the same logging (see
+// WithLogger). Use it in a handler of your own that answers a success in a
+// format of its own, such as a download, and a failure in the kit's, such as
+// one of UserOf or Ask.
+//
+// As with Respond, an error without a status of its own is answered with 500,
+// so wrap a mistake in the request that a handler of your own has found with
+// ErrMalformed, to answer it with 400.
+//
+// A nil API is a programming error, so RespondError panics, as Respond and
+// RespondResult do, and so is a nil error, since there is nothing to answer.
+// The API is checked first.
+func RespondError[TUser any](
+	w http.ResponseWriter,
+	r *http.Request,
+	api *API[TUser],
+	err error,
+) {
+	explain := api.explain(r)
+
+	if err == nil {
+		panic("architecturekit/httpapi: RespondError needs an error, not nil")
+	}
+
+	respondResult(w, struct{}{}, err, explain)
 }
 
 // respond writes the answer to a command, with the given fields next to the
@@ -757,13 +811,30 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // into the query string. The Content-Type has to be application/json, or it is
 // ErrUnsupportedMediaType. The body may hold at most MaxRequestBody bytes, or
 // it is ErrTooLarge. JSON that does not fit TBody, including a field that TBody
-// does not have, is ErrMalformed, which wraps the error of decoding, so that
-// errors.As finds it, such as a *json.UnmarshalTypeError that names the field.
+// does not have, is ErrMalformed.
 //
 // So is anything but whitespace after the JSON value, such as a second value,
 // and an object in which a name occurs twice. Names match fields regardless of
 // case, as with encoding/json, so two names that match the same field count
 // as the same name, even if they differ in case.
+//
+// The error says what is wrong in words of its own, rather than in those of
+// the decoder, which name the types of Go. After the text of ErrMalformed, it
+// says, for example:
+//
+//	"quantity" must be a number
+//	unknown field "quantiy"
+//	duplicate field "customerId"
+//	invalid JSON
+//	data after the JSON value
+//
+// A value of another kind than its field takes names the field by its path,
+// as encoding/json does, such as "delivery.address" or "items.0.bookId", and
+// the kind it has to be, which is a string, a number, a boolean, an array, or
+// an object. Any other failure keeps the text of the decoder for now, such as
+// a body that is empty, or a number that is too large for its field. Either
+// way, the error wraps the error of decoding, so that errors.As finds it, such
+// as a *json.UnmarshalTypeError that names the field.
 //
 // If TBody is NoBody, the request is read without a body instead. A request
 // that a browser sends from another origin is ErrForbidden then, before the
@@ -807,7 +878,8 @@ var strictJSON = jsonv2.JoinOptions(
 
 // decodeStrictly decodes a body that holds exactly one JSON value, with
 // nothing but whitespace after it, and hands back the zero value if it fails,
-// so that nothing half-decoded gets out.
+// so that nothing half-decoded gets out. Its error says what is wrong in words
+// of its own, as far as it has them (see describeDecoding).
 //
 // Unknown fields are rejected rather than dropped, so that a misspelled field
 // cannot silently turn into a zero value. A name that occurs twice, and
@@ -824,18 +896,14 @@ func decodeStrictly[TBody any](body []byte) (TBody, error) {
 		return value, nil
 	}
 
-	// encoding/json reports a name that occurs twice without saying which, so
-	// in that case the body is decoded once more, reporting errors the way
-	// encoding/json/v2 does, which names it and the object it occurs in. Its
-	// other errors are kept, since they name an unknown field more plainly.
+	// encoding/json names an unknown field in its text alone, so the body is
+	// decoded once more, reporting errors the way encoding/json/v2 does, which
+	// points to it.
 	detailed := jsonv2.Unmarshal(body, new(TBody), strictJSON, json.ReportErrorsWithLegacySemantics(false))
-	if errors.Is(detailed, jsontext.ErrDuplicateName) {
-		err = detailed
-	}
 
 	var zero TBody
 
-	return zero, err
+	return zero, describeDecoding(reflect.TypeFor[TBody](), body, err, detailed)
 }
 
 // requireJSON insists on application/json. That is not pedantry: a browser
