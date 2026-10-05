@@ -528,6 +528,66 @@ var acquireBook = architecturekit.NewDecider(bookState,
 
 *Note that a value must never go into an EventQL query unchecked. A quote, as in `it's`, breaks the query, so that the write fails, and a value made up for that purpose changes what the query checks.*
 
+When the ISBN is taken, the database refuses the write with `precondition failed`, the same answer as for a subject that has changed since it was read. It does not say which precondition failed, so the kit can not tell the two apart:
+
+- The command fails with an error of the category `ErrConflict`, which is transient (see [Handling Errors](#handling-errors)).
+- The `httpapi` package answers it with `409 Conflict` and the message `conflict: the data has changed since it was read`, which tells the caller to try again, although that never helps (see [Handling Commands over HTTP](#handling-commands-over-http)).
+- If the command declares `OnStateRead` as well, and the store decides again on conflicts, `Execute` decides again and again in vain, until the retries are used up (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
+
+To answer a taken ISBN with a domain error instead, check it in the decider, against a view that holds the acquired books by their ISBN (see [Defining Views](#defining-views)). The catalog does not hold the ISBN, so here, a small view of its own does, which a projection fills (see [Defining Projections](#defining-projections)):
+
+```go
+type ISBNItem struct {
+  ISBN   string
+  BookID string
+}
+
+func newISBNs() *architecturekit.InMemoryView[string, ISBNItem] {
+  return architecturekit.NewInMemoryView(func(item ISBNItem) string { return item.ISBN })
+}
+
+func newISBNProjection(isbns *architecturekit.InMemoryView[string, ISBNItem]) *architecturekit.TypedProjection {
+  return architecturekit.NewTypedProjection().
+    On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
+      _, err := isbns.Insert(ctx, event.ID, ISBNItem{
+        ISBN:   event.Data.ISBN,
+        BookID: bookIDOf(event.Subject),
+      })
+      return err
+    })
+}
+```
+
+The decider gets the view from a function that creates it, as it gets a clock (see [Using the Current Time](#using-the-current-time)). If the ISBN is taken, it returns a domain error, which the `httpapi` package answers with `422 Unprocessable Entity` and the error as the message, as in `ISBN has already been acquired: 978-0756906788`:
+
+```go
+var ErrISBNAlreadyAcquired = architecturekit.NewDomainError("ISBN has already been acquired")
+
+func acquireBookDecider(isbns architecturekit.KeyedView[string, ISBNItem]) architecturekit.Decider[AcquireBook, Book] {
+  return architecturekit.NewDecider(bookState,
+    func(ctx context.Context, cmd AcquireBook, book Book) ([]architecturekit.Event, error) {
+      if !isbnPattern.MatchString(cmd.ISBN) {
+        return nil, architecturekit.NewDomainError("%q is not an ISBN", cmd.ISBN)
+      }
+
+      _, isTaken, err := isbns.Get(ctx, cmd.ISBN)
+      if err != nil {
+        return nil, err
+      }
+      if isTaken {
+        return nil, fmt.Errorf("%w: %s", ErrISBNAlreadyAcquired, cmd.ISBN)
+      }
+
+      // ...
+    })
+}
+
+isbns := newISBNs()
+acquireBook := acquireBookDecider(isbns)
+```
+
+Keep the EventQL precondition all the same, as the guard. A view lags behind the events, so when two acquisitions of the same ISBN arrive at the same moment, both pass the view, since it has seen neither of them. The database writes only one of them, and the other fails with `ErrConflict`, which is the right answer in that rare case: once the view has seen the first acquisition, trying again gets the domain error.
+
 #### Writing Unconditionally
 
 If a command may write its events whatever has been written to its subject in the meantime, for example `CommentOnBook`, which only records a comment that does not depend on the state, use the `Unconditionally` function:
