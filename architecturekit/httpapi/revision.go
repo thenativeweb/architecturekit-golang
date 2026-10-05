@@ -207,6 +207,8 @@ func writeRevision(w http.ResponseWriter, revision, tag string) {
 	// Without no-cache a browser is free to decide for itself how long the
 	// answer stays good, and it will not ask again until it has. The tag still
 	// saves the body when nothing has changed; this only insists that it asks.
+	// It replaces no-store, which every answer without a revision carries (see
+	// respondResultAt).
 	//
 	// Private keeps shared caches, such as proxies, from keeping the answer at
 	// all. Whether an answer is the same for everybody is something only the

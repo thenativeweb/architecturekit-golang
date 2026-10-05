@@ -120,7 +120,14 @@ type querySettings struct {
 // The query is built before anything waits or is answered, since building it
 // determines the caller and checks what they may ask: nobody can make the
 // server wait, or learn that an answer is unchanged, without being allowed to
-// ask. Answers are marked private, so that a shared cache does not keep them.
+// ask.
+//
+// An answer that carries a revision, a success or one that says that nothing
+// has changed, says Cache-Control: private, no-cache: a cache asks again
+// before it hands it out, and private keeps shared caches, such as proxies,
+// from keeping it at all. Any other answer, such as a failure, or a success of
+// a view that has seen nothing, says no-store, as every other answer of the
+// kit does.
 //
 // A nil view, a negative wait, or giving Revisioned twice, is a programming
 // error, so it panics. A nil pointer counts as a nil view, such as a view that
@@ -186,10 +193,11 @@ func Varying(varies Volatile) QueryOption {
 }
 
 // Query wires a query to the mux and answers in the kit's default format,
-// which is the result itself. With Revisioned, it reads its own writes and
-// answers 304 when nothing has changed, or 412 for a method other than GET,
-// HEAD and QUERY; with Varying in addition, its tag changes with what the
-// answer takes from elsewhere.
+// which is the result itself, with Cache-Control: no-store, so that no cache
+// keeps it. With Revisioned, it reads its own writes and answers 304 when
+// nothing has changed, or 412 for a method other than GET, HEAD and QUERY;
+// with Varying in addition, its tag changes with what the answer takes from
+// elsewhere.
 //
 // A panic while it handles a request is answered with 500, like any other
 // internal failure, and logged with its value and its stack, as with Route.
@@ -245,7 +253,8 @@ func Query[TUser any, TQuery any, TResult any](
 // query that found no item, and 500 and above, while the error is logged
 // through the logger of the API, with the route of the request (see
 // WithLogger), and the error itself otherwise. A result that can not be
-// encoded, such as one that holds NaN, is answered with 500 as well.
+// encoded, such as one that holds NaN, is answered with 500 as well. Like
+// Respond, it says Cache-Control: no-store, so that no cache keeps the answer.
 //
 // As with Respond, an error without a status of its own is answered with 500,
 // so wrap a mistake in the request that a handler of your own has found with
@@ -273,6 +282,11 @@ func respondResult[TResult any](
 // respondResultAt writes a query result with the revision it shows, if there
 // is one (see writeRevision), and explains an error with explain.
 //
+// An answer without a revision has no tag that a cache could ask about, and
+// it may be the outcome of a command, or hold what only its caller may see.
+// Without a word on caching, HTTP lets a cache keep it for a while it picks
+// itself, and hand it out again, so it says that no cache may keep it.
+//
 // The result is encoded before anything is written, so that a result that can
 // not be encoded is still answered with 500, and without the revision of an
 // answer that never came. That holds for an error while it is encoded, such as
@@ -287,6 +301,7 @@ func respondResultAt[TResult any](
 	explain func(status int, err error) string,
 ) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 
 	var body bytes.Buffer
 	if err == nil {

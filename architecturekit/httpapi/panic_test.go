@@ -230,7 +230,7 @@ func TestPanicsInRoutes(t *testing.T) {
 		assertPanicAnswered(t, response, logs.String(), "GET", "GET /notes", "the encoder is broken", "httpapi_test.explosive.MarshalJSON")
 		assert.Empty(t, response.Header().Get("ETag"), "a panic was tagged")
 		assert.Empty(t, response.Header().Get(httpapi.HeaderRevision), "a panic carries a revision")
-		assert.Empty(t, response.Header().Get("Cache-Control"))
+		assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
 	})
 
 	t.Run("a revisioned query whose variance panics is answered with 500", func(t *testing.T) {

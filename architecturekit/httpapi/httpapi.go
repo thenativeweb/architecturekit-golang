@@ -636,6 +636,9 @@ func StatusFor(err error) int {
 // Each of them is logged through the logger of the API, with the route of the
 // request (see WithLogger).
 //
+// Every answer, a success as well as a failure, says Cache-Control: no-store,
+// so that no cache keeps it.
+//
 // Unlike Route and Handle, Respond does not know where an error comes from, so
 // an error without a status of its own is answered with 500, also one that a
 // handler of your own has found in the request. Wrap such an error with
@@ -655,9 +658,10 @@ func Respond[TUser any](
 
 // RespondError answers an error without a result, exactly as Respond and
 // RespondResult answer one: with the status that StatusFor maps it to, the
-// same messages, and the same logging (see WithLogger). Use it in a handler of
-// your own that answers a success in a format of its own, such as a download,
-// and a failure in the kit's, such as one of UserOf or Ask.
+// same messages, Cache-Control: no-store, and the same logging (see
+// WithLogger). Use it in a handler of your own that answers a success in a
+// format of its own, such as a download, and a failure in the kit's, such as
+// one of UserOf or Ask.
 //
 // As with Respond, an error without a status of its own is answered with 500,
 // so wrap a mistake in the request that a handler of your own has found with

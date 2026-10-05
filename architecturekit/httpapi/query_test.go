@@ -383,7 +383,7 @@ func TestResultsThatCanNotBeEncoded(t *testing.T) {
 				assert.JSONEq(t, `{"message": "internal server error"}`, response.Body.String())
 				assert.Empty(t, response.Header().Get("ETag"), "an answer that never came was tagged")
 				assert.Empty(t, response.Header().Get(httpapi.HeaderRevision), "an answer that never came carries a revision")
-				assert.Empty(t, response.Header().Get("Cache-Control"))
+				assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
 
 				assert.Equal(t, 1, strings.Count(logs.String(), "\n"), "want exactly one entry")
 				assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: internal failure"`)
