@@ -291,7 +291,7 @@ func waitInBackground(t *testing.T, ctx context.Context, run *architecturekit.Pr
 	t.Helper()
 
 	waited := make(chan error, 1)
-	go func() { waited <- run.WaitCaughtUp(ctx) }()
+	go func() { waited <- architecturekit.WaitCaughtUp(ctx, run) }()
 
 	return func(t *testing.T) error {
 		t.Helper()
@@ -334,7 +334,7 @@ func TestWaitCaughtUp(t *testing.T) {
 			architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io"), target)
 		defer stop(t)
 
-		require.NoError(t, run.WaitCaughtUp(waitingContext(t)))
+		require.NoError(t, architecturekit.WaitCaughtUp(waitingContext(t), run))
 
 		assert.True(t, isClosed(run.CaughtUp()))
 		assert.Equal(t, []string{"0", "1", "2"}, target.IDs(), "everything that was stored at the start has been applied")
@@ -355,8 +355,8 @@ func TestWaitCaughtUp(t *testing.T) {
 		// Select picks at random among the cases that are ready, so a single
 		// attempt could pass by chance.
 		for range 100 {
-			require.NoError(t, run.WaitCaughtUp(waitingContext(t)))
-			require.NoError(t, run.WaitCaughtUp(endedContext(t)))
+			require.NoError(t, architecturekit.WaitCaughtUp(waitingContext(t), run))
+			require.NoError(t, architecturekit.WaitCaughtUp(endedContext(t), run))
 		}
 	})
 
@@ -376,8 +376,8 @@ func TestWaitCaughtUp(t *testing.T) {
 		require.Error(t, run.Err())
 
 		for range 100 {
-			require.NoError(t, run.WaitCaughtUp(waitingContext(t)))
-			require.NoError(t, run.WaitCaughtUp(endedContext(t)))
+			require.NoError(t, architecturekit.WaitCaughtUp(waitingContext(t), run))
+			require.NoError(t, architecturekit.WaitCaughtUp(endedContext(t), run))
 		}
 	})
 
@@ -390,7 +390,7 @@ func TestWaitCaughtUp(t *testing.T) {
 
 		run := architecturekit.StartProjection(context.Background(), store, architecturekit.ExactSubject("/test"), failingCollector{})
 
-		err := run.WaitCaughtUp(waitingContext(t))
+		err := architecturekit.WaitCaughtUp(waitingContext(t), run)
 
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "the view is broken", "expected the failure of Apply")
@@ -409,7 +409,7 @@ func TestWaitCaughtUp(t *testing.T) {
 		waitForClosed(t, run.Done(), "Done")
 
 		for range 100 {
-			err := run.WaitCaughtUp(endedContext(t))
+			err := architecturekit.WaitCaughtUp(endedContext(t), run)
 
 			require.Error(t, err)
 			require.ErrorContains(t, err, "the view is broken", "the failure of the run says more than the end of the context")
@@ -440,7 +440,7 @@ func TestWaitCaughtUp(t *testing.T) {
 		cancel()
 		waitForClosed(t, run.Done(), "Done")
 
-		err := run.WaitCaughtUp(waitingContext(t))
+		err := architecturekit.WaitCaughtUp(waitingContext(t), run)
 
 		assert.ErrorIs(t, err, context.Canceled)
 		assert.EqualError(t, err, `architecturekit: the projection "catalog" stopped before it caught up: context canceled`)
@@ -478,7 +478,7 @@ func TestWaitCaughtUp(t *testing.T) {
 		// The run has ended without an error, because its context has, and the
 		// context of waiting is that same one, so its error says why.
 		for range 100 {
-			assert.Equal(t, context.DeadlineExceeded, run.WaitCaughtUp(ctx))
+			assert.Equal(t, context.DeadlineExceeded, architecturekit.WaitCaughtUp(ctx, run))
 		}
 	})
 }

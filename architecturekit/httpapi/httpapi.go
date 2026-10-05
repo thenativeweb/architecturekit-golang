@@ -600,7 +600,9 @@ const statusClientClosedRequest = 499
 // architecturekit.Read or the revision a view is to wait for, which usually
 // come from the request. An error of the category architecturekit.ErrPermanent
 // maps to 500 even then, since an ID that the server stored or made itself is
-// broken.
+// broken. An error that wraps architecturekit.ErrEmptyRange maps to 400 the
+// same way, since bounds of architecturekit.Read that leave no room for an
+// event usually come from the request as well.
 //
 // An error because the context ended belongs to no category. If the request
 // was canceled, which happens when the caller goes away, it maps to 499, which
@@ -642,11 +644,12 @@ func StatusFor(err error) int {
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable
 	// A permanent failure is the server's mistake, even if it says that an ID
-	// is not a revision, so it comes before ErrNotARevision. Both come last,
-	// so that an error that has a status of its own above keeps it.
+	// is not a revision, or that a range is empty, so it comes before
+	// ErrNotARevision and ErrEmptyRange. They all come last, so that an error
+	// that has a status of its own above keeps it.
 	case errors.Is(err, architecturekit.ErrPermanent):
 		return http.StatusInternalServerError
-	case errors.Is(err, architecturekit.ErrNotARevision):
+	case errors.Is(err, architecturekit.ErrNotARevision), errors.Is(err, architecturekit.ErrEmptyRange):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

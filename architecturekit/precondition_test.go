@@ -257,6 +257,7 @@ func TestCheckPreconditions(t *testing.T) {
 			{subject: "/test/valid"},
 			increment{subject: "/test/valid"}.onStateRead(),
 			increment{subject: "/test/valid"}.pristine(),
+			increment{subject: "/test/valid"}.declaring(architecturekit.OnEventID("/test/valid", "0")),
 			increment{subject: "/test/valid"}.declaring(
 				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/test/valid")),
 				architecturekit.OnStateRead(),
@@ -299,8 +300,6 @@ func TestSubjectPreconditions(t *testing.T) {
 				eventsourcingdb.NewIsSubjectPristinePrecondition("/books/42")},
 			{"OnPopulatedSubject", architecturekit.OnPopulatedSubject("/books/42"),
 				eventsourcingdb.NewIsSubjectPopulatedPrecondition("/books/42")},
-			{"OnEventID", architecturekit.OnEventID("/books/42", "7"),
-				eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/books/42", "7")},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				assert.Equal(t, architecturekit.Require(test.database), test.made)

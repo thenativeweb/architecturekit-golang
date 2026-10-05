@@ -417,7 +417,7 @@ Every command declares at least one precondition, so that writing without any ch
 
 Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`.
 
-To find out what kind a precondition is, call its `IsOnStateRead` or `IsUnconditional` function. Its `Database` function returns the precondition of the client SDK that `Require` made it from, or `false` if it was not made with `Require`. `OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` make theirs with `Require`, so they return one as well.
+To find out what kind a precondition is, call its `IsOnStateRead` or `IsUnconditional` function. Its `Database` function returns the precondition of the client SDK that the database checks for it: the one `Require` made it from, which is how `OnPristineSubject` and `OnPopulatedSubject` make theirs, or the one of `NewIsSubjectOnEventIDPrecondition` for `OnEventID`. For any other, it returns `false`.
 
 #### Guarding Against Concurrent Changes
 
@@ -466,7 +466,7 @@ func (c BorrowBook) Preconditions() []architecturekit.Precondition {
 
 *Note that the caller has to provide the event ID. A view can keep it for that purpose, as long as its items follow every event of their subject (see [Defining Views](#defining-views)).*
 
-*Note that the database refuses an empty event ID, or one that is not an event ID at all, as a malformed request, so `Execute` fails with an error of the category `ErrPermanent`. Since the event ID comes from the caller, check it before it becomes part of the command (see [Handling Commands over HTTP](#handling-commands-over-http)).*
+*Note that the event ID usually comes from the caller, so `Execute` checks it before it reads anything. An empty event ID, or one that is not an event ID at all, makes `Execute` fail with an error that wraps `ErrNotARevision` and names the ID, as in `not a revision: "abc"`, as `Read` does for a bound (see [Reading Events](#reading-events)), and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). It does so only once nothing else is wrong with the preconditions, so that a mistake in the code is not hidden behind one of the caller, and `Write`, `CheckPreconditions`, and the test fixture of `architecturekittest` refuse the ID the same way. `Require` with `NewIsSubjectOnEventIDPrecondition` of the client SDK leaves the ID to the database instead, which refuses such an ID as a malformed request, so that `Execute` fails with an error of the category `ErrPermanent`.*
 
 #### Preventing Duplicates
 
@@ -720,7 +720,7 @@ if errors.Is(err, architecturekit.ErrConflict) {
 
 `Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. If the data of one of the events can not be encoded as JSON, nothing is written either, and the error belongs to the category `ErrPermanent`. So does an event without a subject, or one that is `nil`, a `nil` pointer included. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
 
-Like a command, a write declares at least one precondition, such as `OnPristineSubject` or one made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state, so `Write` refuses it with an error of the category `ErrPermanent`, without writing anything.
+Like a command, a write declares at least one precondition, such as `OnPristineSubject` or one made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state, so `Write` refuses it with an error of the category `ErrPermanent`, without writing anything. An event ID of `OnEventID` that is not a revision makes `Write` fail with an error that wraps `ErrNotARevision`, as with `Execute`, without writing anything either (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)).
 
 *Note that `Write` never decides again, since there is nothing to decide. If nothing is to be written, call it with no events, which writes nothing. It still needs preconditions, though, as any other write, and fails with an error of the category `ErrPermanent` without them, so declare them, for example with `Unconditionally()`.*
 
@@ -728,7 +728,7 @@ Like a command, a write declares at least one precondition, such as `OnPristineS
 
 ### Handling Errors
 
-Apart from the end of the context and `ErrNotARevision`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
+Apart from the end of the context, `ErrNotARevision`, and `ErrEmptyRange`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
 
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
@@ -768,7 +768,9 @@ An error that your own code returns, for example from a decider or a projection,
 
 If the context ends, reading and writing stop, and the error is the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides.
 
-The other exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
+Another exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
+
+The last exception is `ErrEmptyRange`, which belongs to no category either. It means that the bounds of `Read` leave no room for any event, such as `BeforeEvent("0")` (see [Reading Events](#reading-events)). The error wraps `ErrEmptyRange` and names the values, so check for it with `errors.Is` as well. Such bounds usually come from a request, so `StatusFor` maps it to `400 Bad Request` as well.
 
 *Note that only the end of the context matches `context.Canceled` or `context.DeadlineExceeded`. If an error of the client matches one of them all the same, for example because connecting to the database timed out, which the standard library reports as `context.DeadlineExceeded`, the failure of the database keeps that error in its message only, so that it does not look like the end of the context.*
 
@@ -998,7 +1000,9 @@ The IDs are strings, as everywhere else in the kit. The database hands them out 
 
 *Note that `FromLatestEvent` looks for the event on the given subject alone, not below it, and that this subject does not have to be one of those that are read.*
 
-*Note that the database refuses bounds that leave no room for any event, such as `AfterEvent` and `BeforeEvent` with two neighboring IDs, or an upper bound before the latest event of the type given to `FromLatestEvent`. `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the reason the database gives.*
+Bounds that leave no room for any event are a mistake, since no event can ever lie between them, such as `BeforeEvent("0")`, `AfterEvent` and `BeforeEvent` with two neighboring IDs, or a lower bound above the upper one. They end the iteration with an error that wraps `ErrEmptyRange` and names the values, before the database is asked, as in `empty range: no event can lie after "0" and before "1"` or `empty range: no event can lie from "2" up to "1"`. The error names the values only, never the options, since a caller of an API does not know them, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). A range that is only empty for now, on the other hand, such as the one after the last event, is no mistake, since events can still come there, so `Read` hands out no events for it, without an error.
+
+*Note that the lower bound of `FromLatestEvent` is only known once the database has found the latest event of the type, so together with it, only an upper bound that leaves no room on its own, `BeforeEvent("0")`, is refused that way. The database refuses an upper bound before the latest event of the type, and `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the reason the database gives.*
 
 Every event is verified, like everything else the store reads, before the loop sees it (see [Verifying Events](#verifying-events)). A failure belongs to a category, as with `Load` (see [Handling Errors](#handling-errors)), and ends the iteration. The store stops reading as soon as the loop ends, so breaking out of it after a page is fine.
 
@@ -1509,7 +1513,7 @@ To run a projection, call the `StartProjection` function with a context, the sto
 
 *Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection`, the other functions that run a projection, and `Read` panic, as does a `nil` projection. A `nil` pointer or a `nil` `ProjectionFunc` counts as a `nil` projection.*
 
-The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that with the `WaitCaughtUp` function of the run:
+The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that with the `WaitCaughtUp` function, which takes a context and the runs:
 
 ```go
 ctx, cancel := context.WithCancel(context.TODO())
@@ -1519,7 +1523,7 @@ run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("
   architecturekit.Named("catalog"),
 )
 
-if err := run.WaitCaughtUp(ctx); err != nil {
+if err := architecturekit.WaitCaughtUp(ctx, run); err != nil {
   return err
 }
 
@@ -1530,13 +1534,15 @@ The options after the projection are optional. `Named` gives the projection a na
 
 *Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic.*
 
-`WaitCaughtUp` waits until the run has applied the events that were stored when it started, and returns `nil` then, and only then, so that `nil` always means that the view is complete:
+`WaitCaughtUp` waits until every run has applied the events that were stored when it started, and returns `nil` then, and only then, so that `nil` always means that the views are complete. To wait for several projections, hand over all of their runs, as in `architecturekit.WaitCaughtUp(ctx, catalogRun, readersRun)`. It waits for all of them at once, not one after the other, and returns as soon as one of them ends before it has caught up:
 
-- If the run ends before it catches up, `WaitCaughtUp` returns the error the run ended with.
-- If the run ends without an error before it catches up, because its context ended, `WaitCaughtUp` returns an error that wraps `context.Canceled` and says that the projection stopped before it caught up.
+- If a run ends before it catches up, `WaitCaughtUp` returns the error the run ended with. If the run has a name, the error names it, as in `projection "catalog": …`, and wraps the error of the run, so that `errors.Is` still finds what that wraps.
+- If a run ends without an error before it catches up, because its context ended, `WaitCaughtUp` returns an error that wraps `context.Canceled` and says that the projection stopped before it caught up, naming it if it has a name.
 - If the context handed to `WaitCaughtUp` ends first, it returns the error of that context.
 
-A run that has caught up counts as caught up, even if it has ended since, or the context handed to `WaitCaughtUp` has ended. If several of the other cases have happened by the time `WaitCaughtUp` looks, the error the run ended with comes first, since it tells why, and the error of the context handed to `WaitCaughtUp` comes next. So if the run and `WaitCaughtUp` share a context, as in the example above, and that context times out, `WaitCaughtUp` returns its error, `context.DeadlineExceeded`, which tells more than `context.Canceled`.
+A run that has caught up counts as caught up, even if it has ended since, or the context handed to `WaitCaughtUp` has ended. If several of the other cases have happened by the time `WaitCaughtUp` looks, the error a run ended with comes first, since it tells why, that of the first such run among the ones handed over, and the error of the context handed to `WaitCaughtUp` comes next. So if the run and `WaitCaughtUp` share a context, as in the example above, and that context times out, `WaitCaughtUp` returns its error, `context.DeadlineExceeded`, which tells more than `context.Canceled`.
+
+*Note that `WaitCaughtUp` returns `nil` at once without any run, since none of them is behind, and that a `nil` run makes it panic.*
 
 For finer control, the run offers what `WaitCaughtUp` waits for. `CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. If the run ends before it catches up, the channel is never closed, so wait for `Done` as well. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did, since canceling the context is how a projection is stopped. If `Apply` returns an error that trying again will not fix, the run ends, and `Err` returns it.
 
@@ -2067,6 +2073,28 @@ _, err = architecturekit.ParseRevision("")
 
 For a value that is not a revision, it returns an error that wraps `ErrNotARevision` and names the value, as `CompareRevisions` does.
 
+#### Waiting for Written Events
+
+Sometimes a step on the server builds on what was just written, for example a handler that executes a command and then answers with what a view holds after it. To wait until a view has seen the events that `Execute` or `Write` returned, call the `WaitForWritten` function with a context, the view, the written events, and how long to wait at most:
+
+```go
+writtenEvents, err := architecturekit.Execute(ctx, store, borrowBook, cmd)
+if err != nil {
+  // ...
+}
+
+err = architecturekit.WaitForWritten(ctx, catalog, writtenEvents, 5*time.Second)
+if err != nil {
+  // ...
+}
+```
+
+It waits with `WaitFor` for the revision that `RevisionOf` returns for the events, and returns `nil` once the view has reached it. If no events were written, it returns `nil` at once, since there is nothing to wait for. If the time runs out first, it returns an error of the category `ErrTransient` that says so, as in `the view did not catch up within 5s`, since the view may still catch up. If the context ends first, it returns the error of the context, and any other error of the view as it is.
+
+*Note that running out of time is an error here, since the step needs what was written. The `Await` function of the `httpapi` package, on the other hand, waits for the revision a caller asks for, and takes running out of time for none, so that the handler answers with what the view holds (see [Waiting for a Revision in a Handler of Your Own](#waiting-for-a-revision-in-a-handler-of-your-own)).*
+
+*Note that `WaitForWritten` panics for a `nil` view, a `nil` pointer included, and for a timeout that is not positive, since a view that catches up with a write that has just happened needs some time, and waiting no time at all would fail almost always.*
+
 ### Setting Up an HTTP API
 
 To expose commands and queries over HTTP, use the `httpapi` package:
@@ -2157,7 +2185,7 @@ func toBorrowBook(r *http.Request, request borrowBookRequest, user User) (Borrow
 }
 ```
 
-The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake. So is an expected event ID that is empty or not an event ID at all, which only the database checks (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). `ParseRevision` refuses both, unlike `CompareRevisions`, which takes an empty revision for the one of a view that has seen nothing (see [Comparing Revisions](#comparing-revisions)).
+The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake. An expected event ID that is empty or not an event ID at all is answered with `400 Bad Request` without a check of your own, since `OnEventID` refuses it before anything is read (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). Checking it here lets the message name the field, though. `ParseRevision` refuses both, unlike `CompareRevisions`, which takes an empty revision for the one of a view that has seen nothing (see [Comparing Revisions](#comparing-revisions)).
 
 Then call the `Route` function with the API, the mux, a pattern, the function that returns the command, and the decider:
 
@@ -2568,12 +2596,14 @@ It checks the categories in this order:
 | `context.Canceled` | `499 Client Closed Request` |
 | `context.DeadlineExceeded` | `503 Service Unavailable` |
 | `architecturekit.ErrPermanent` | `500 Internal Server Error` |
-| `architecturekit.ErrNotARevision` | `400 Bad Request` |
+| `architecturekit.ErrNotARevision`, `architecturekit.ErrEmptyRange` | `400 Bad Request` |
 | any other error | `500 Internal Server Error` |
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged. Its message is `request canceled`, because the error may name internals, such as the subject that was read.*
 
-*Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, a value for `CompareRevisions` or `ParseRevision`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
+*Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, a value for `CompareRevisions` or `ParseRevision`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
+
+*Note that `ErrEmptyRange` means that the bounds of `Read` leave no room for any event, which usually come from the request as well. So it is answered the same way, with `400 Bad Request` and the error as the message, such as `empty range: no event can lie before "0"`, unless the error belongs to the category `ErrPermanent` as well (see [Reading Events](#reading-events)).*
 
 *Note that an error of the function that returns a command, of the one that returns a query, or of the one that determines the user keeps its status code only if it has one of its own, or belongs to the category `ErrPermanent`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
 
@@ -2824,7 +2854,7 @@ func main() {
   waitCtx, cancelWait := context.WithTimeout(ctx, time.Minute)
   defer cancelWait()
 
-  if err := run.WaitCaughtUp(waitCtx); err != nil {
+  if err := architecturekit.WaitCaughtUp(waitCtx, run); err != nil {
     if ctx.Err() != nil {
       // The process was asked to stop while waiting.
       return
@@ -2907,7 +2937,7 @@ func TestBorrowBook(t *testing.T) {
 
 `Given` returns a `*Fixture`, and `When` returns an `*Outcome`. The functions that check the outcome return the outcome again, so they can be chained.
 
-Like `Execute`, `When` refuses an event that is `nil`, a `nil` pointer included, an event that the state of the decider has no rule for, and an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). As `Execute` does, it checks all events for `nil` first, then all of them for a rule, and encodes them last. It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
+Like `Execute`, `When` refuses an event that is `nil`, a `nil` pointer included, an event that the state of the decider has no rule for, and an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). As `Execute` does, it checks all events for `nil` first, then all of them for a rule, and encodes them last. It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches. Only an event ID of `OnEventID` that is not a revision is refused with the error that wraps `ErrNotARevision` instead, as `Execute` does, which `ThenFailed(architecturekit.ErrNotARevision)` matches.
 
 *Note that `Given` takes a `testing.TB`, as does every function of the package that can fail a test, so it works with the `*testing.B` of a benchmark as well.*
 

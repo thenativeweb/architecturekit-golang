@@ -49,6 +49,14 @@ func TestResolvePreconditions(t *testing.T) {
 		assert.Equal(t, second, resolved[2])
 	})
 
+	t.Run("turns OnEventID into the revision check of the database", func(t *testing.T) {
+		resolved := resolvePreconditions("/books/42", []Precondition{OnEventID("/books/23", "5"), OnStateRead()}, "7")
+
+		require.Len(t, resolved, 2)
+		assert.Equal(t, eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/books/23", "5"), resolved[0])
+		assert.Equal(t, eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/books/42", "7"), resolved[1])
+	})
+
 	t.Run("checks nothing for Unconditionally", func(t *testing.T) {
 		resolved := resolvePreconditions("/books/42", []Precondition{Unconditionally()}, "7")
 

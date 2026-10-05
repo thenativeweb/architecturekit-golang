@@ -964,10 +964,41 @@ func TestWhenChecksPreconditions(t *testing.T) {
 		assert.False(t, decided, "the decider decided on a command that Execute refuses before reading")
 	})
 
+	t.Run("refuses an ID of OnEventID that is not a revision with the error of Execute", func(t *testing.T) {
+		decided := false
+
+		spying := decider()
+		decide := spying.Decide
+		spying = architecturekit.NewDecider(spying.State(),
+			func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
+				decided = true
+				return decide(ctx, cmd, current)
+			})
+
+		cmd := open{Owner: "golo", preconditions: []architecturekit.Precondition{
+			architecturekit.OnEventID("/account/1", "abc"),
+		}}
+
+		architecturekittest.Given(t, spying).
+			When(cmd).
+			ThenFailed(architecturekit.ErrNotARevision)
+
+		assert.False(t, decided, "the decider decided on a command that Execute refuses before reading")
+		assert.Equal(t, `not a revision: "abc"`, refusalOf(t, decider(), cmd))
+		assert.Equal(t, architecturekit.CheckPreconditions(cmd).Error(), refusalOf(t, decider(), cmd))
+
+		recorder := &spy{}
+		architecturekittest.Given(recorder, decider()).
+			When(cmd).
+			ThenFailed(architecturekit.ErrPermanent)
+		recorder.expectFailure(t, `not a revision: "abc"`)
+	})
+
 	t.Run("lets the decider decide on every valid declaration", func(t *testing.T) {
 		for label, preconditions := range map[string][]architecturekit.Precondition{
 			"OnStateRead":     {architecturekit.OnStateRead()},
 			"Unconditionally": {architecturekit.Unconditionally()},
+			"OnEventID":       {architecturekit.OnEventID("/account/1", "0")},
 			"Require":         {architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1"))},
 			"Require and OnStateRead": {
 				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1")),

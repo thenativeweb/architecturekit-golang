@@ -90,7 +90,10 @@ func GivenStored[TCommand architecturekit.Command, TState any](
 // then the error of the category architecturekit.ErrPermanent that Execute
 // returns, so that ThenEvents and the other assertions that expect events
 // fail, naming the cause, and ThenFailed(architecturekit.ErrPermanent)
-// matches it.
+// matches it. Only an ID of architecturekit.OnEventID that is not a revision
+// is refused with an error that wraps architecturekit.ErrNotARevision
+// instead, as Execute does, which
+// ThenFailed(architecturekit.ErrNotARevision) matches.
 func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState] {
 	f.t.Helper()
 
