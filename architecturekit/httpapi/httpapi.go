@@ -820,21 +820,36 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 //
 // The error says what is wrong in words of its own, rather than in those of
 // the decoder, which name the types of Go. After the text of ErrMalformed, it
-// says, for example:
+// says one of these:
 //
-//	"quantity" must be a number
-//	unknown field "quantiy"
-//	duplicate field "customerId"
+//	empty body
 //	invalid JSON
 //	data after the JSON value
+//	unknown field "quantiy"
+//	duplicate field "customerId"
+//	"quantity" must be a number
+//	"quantity" is out of range
+//	"quantity" must be an integer
+//	"cover" must be base64
+//	"dueOn" must be a time such as "2026-10-05T12:00:00Z"
+//	"quantity" must be a string that holds a number
+//	the keys of "stock" must be numbers
 //
-// A value of another kind than its field takes names the field by its path,
-// as encoding/json does, such as "delivery.address" or "items.0.bookId", and
-// the kind it has to be, which is a string, a number, a boolean, an array, or
-// an object. Any other failure keeps the text of the decoder for now, such as
-// a body that is empty, or a number that is too large for its field. Either
-// way, the error wraps the error of decoding, so that errors.As finds it, such
-// as a *json.UnmarshalTypeError that names the field.
+// It names a value by its path, as encoding/json does, such as
+// "delivery.address" or "items.0.bookId", or the body as a whole, as in "the
+// body must be an object". A value of the wrong kind names the kind it has to
+// be, which is a string, a number, a boolean, an array, or an object. A number
+// is out of range if it is too large or too small for its type, which a
+// negative number is for an unsigned integer, and an integer has to be
+// written as one, without a fraction or an exponent. A field with the option
+// string takes its number, boolean, or string in a string, and the keys of a
+// map whose keys are times have to be times.
+//
+// The error of a type that decodes itself keeps its own text, since the
+// application wrote it, and so does any failure that there are no words for,
+// such as a value of a type that JSON has no kind for. Either way, the error
+// wraps the error of decoding, so that errors.As finds it, such as a
+// *json.UnmarshalTypeError that names the field.
 //
 // If TBody is NoBody, the request is read without a body instead. A request
 // that a browser sends from another origin is ErrForbidden then, before the
@@ -896,9 +911,9 @@ func decodeStrictly[TBody any](body []byte) (TBody, error) {
 		return value, nil
 	}
 
-	// encoding/json names an unknown field in its text alone, so the body is
-	// decoded once more, reporting errors the way encoding/json/v2 does, which
-	// points to it.
+	// encoding/json does not say where some failures are, such as an unknown
+	// field, so the body is decoded once more, reporting errors the way
+	// encoding/json/v2 does, which points to them.
 	detailed := jsonv2.Unmarshal(body, new(TBody), strictJSON, json.ReportErrorsWithLegacySemantics(false))
 
 	var zero TBody

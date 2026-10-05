@@ -144,7 +144,7 @@ func TestNoBody(t *testing.T) {
 				response := serve(t, mux, closing("application/json", strings.NewReader("")))
 
 				assert.Equal(t, http.StatusBadRequest, response.Code)
-				assert.Contains(t, response.Body.String(), "unexpected end of JSON input")
+				assert.Contains(t, response.Body.String(), "empty body")
 			})
 		}
 	})

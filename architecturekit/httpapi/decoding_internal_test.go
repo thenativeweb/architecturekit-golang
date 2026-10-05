@@ -3,11 +3,15 @@ package httpapi
 import (
 	"encoding/json"
 	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // isbn decodes itself, so it may take any kind of JSON value.
@@ -207,4 +211,79 @@ func TestIsQuoted(t *testing.T) {
 			assert.Equal(t, test.isQuoted, isQuoted(test.valueType, test.path))
 		})
 	}
+}
+
+// duplicateAt returns the error of encoding/json for a name that occurs twice
+// in JSON text of its own, the second time at the given offset, as a type that
+// decodes itself might fail with.
+func duplicateAt(t *testing.T, offset int) error {
+	t.Helper()
+
+	text := `{"a":1,` + strings.Repeat(" ", offset-8) + `"a":2}`
+	err := jsonv2.Unmarshal([]byte(text), new(map[string]int), strictJSON)
+
+	duplicate, isDuplicate := errors.AsType[*json.SyntaxError](err)
+	require.True(t, isDuplicate)
+	require.Equal(t, int64(offset), duplicate.Offset)
+	require.EqualError(t, duplicate, jsontext.ErrDuplicateName.Error())
+
+	return err
+}
+
+func TestDescribeDecoding(t *testing.T) {
+	// encoding/json/v2 reports the same failure as encoding/json for every
+	// body, so these failures are made up, to show that the description
+	// does not rely on it.
+	bodyType := reflect.TypeFor[order]()
+
+	t.Run("names a value by the path of encoding/json, if encoding/json/v2 reports another failure", func(t *testing.T) {
+		mismatch := &json.UnmarshalTypeError{Value: "string", Type: reflect.TypeFor[int](), Field: "count", Offset: 16}
+
+		err := describeDecoding(bodyType, []byte(`{"count":"three"}`), mismatch, errors.New("another failure"))
+
+		assert.EqualError(t, err, `"count" must be a number`)
+		assert.ErrorIs(t, err, mismatch)
+	})
+
+	t.Run("keeps a value without a path, if encoding/json/v2 reports another failure", func(t *testing.T) {
+		mismatch := &json.UnmarshalTypeError{Value: "bool", Type: reflect.TypeFor[json.Number]()}
+
+		err := describeDecoding(bodyType, []byte(`{"count":true}`), mismatch, errors.New("another failure"))
+
+		assert.Same(t, mismatch, err)
+	})
+
+	t.Run("keeps the key of a map, if encoding/json/v2 reports another failure", func(t *testing.T) {
+		// encoding/json takes the key for a number that it could not read.
+		mismatch := &json.UnmarshalTypeError{Value: "number x", Type: reflect.TypeFor[int](), Field: "stock.x", Offset: 14}
+
+		err := describeDecoding(bodyType, []byte(`{"stock":{"x":1}}`), mismatch, errors.New("another failure"))
+
+		assert.Same(t, mismatch, err)
+	})
+
+	t.Run("keeps an error that encoding/json/v2 does not point to", func(t *testing.T) {
+		failure := errors.New("a failure of its own")
+
+		err := describeDecoding(bodyType, []byte(`{"count":1}`), failure, nil)
+
+		assert.Same(t, failure, err)
+	})
+
+	t.Run("keeps a name that occurs twice where no name is in the body", func(t *testing.T) {
+		// A type that decodes itself may fail with such an error, which points
+		// into its own JSON text rather than into the body.
+		for label, offset := range map[string]int{
+			"at a colon":      8,
+			"beyond the body": 100,
+		} {
+			t.Run(label, func(t *testing.T) {
+				duplicate := duplicateAt(t, offset)
+
+				err := describeDecoding(bodyType, []byte(`{"count":1}`), duplicate, nil)
+
+				assert.Same(t, duplicate, err)
+			})
+		}
+	})
 }

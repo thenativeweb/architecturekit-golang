@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,8 +50,40 @@ func (value *isbn) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// publicationDate decodes itself from a date without a time of day, and fails
+// with the error of package time if it is none.
+type publicationDate struct{ time.Time }
+
+func (value *publicationDate) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+
+	parsed, err := time.Parse(time.DateOnly, text)
+	value.Time = parsed
+
+	return err
+}
+
+// annotations decodes itself from JSON text in a string, and fails with the
+// error of encoding/json if it is none, which points into the string rather
+// than into the body.
+type annotations map[string]string
+
+func (value *annotations) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err != nil {
+		return err
+	}
+
+	return json.Unmarshal([]byte(text), (*map[string]string)(value))
+}
+
 type catalogEntry struct {
-	ISBN isbn `json:"isbn"`
+	ISBN        isbn            `json:"isbn"`
+	PublishedOn publicationDate `json:"publishedOn"`
+	Annotations annotations     `json:"annotations"`
 }
 
 func bodyRequest(contentType string, body io.Reader) *http.Request {
@@ -60,6 +93,22 @@ func bodyRequest(contentType string, body io.Reader) *http.Request {
 	}
 
 	return request
+}
+
+// bodyErrorOf decodes a JSON body into a TBody and returns the error.
+func bodyErrorOf[TBody any](body string) error {
+	_, err := httpapi.BodyOf[TBody](bodyRequest("application/json", strings.NewReader(body)))
+
+	return err
+}
+
+// assertMalformed asserts that err is ErrMalformed with the given text after
+// its own.
+func assertMalformed(t *testing.T, err error, text string) {
+	t.Helper()
+
+	require.ErrorIs(t, err, httpapi.ErrMalformed)
+	assert.EqualError(t, err, "malformed request: "+text)
 }
 
 func TestBodyOf(t *testing.T) {
@@ -115,6 +164,8 @@ func TestBodyOf(t *testing.T) {
 			body  string
 			text  string
 		}{
+			{label: "an empty body", body: ``, text: "empty body"},
+			{label: "a body of nothing but whitespace", body: " \t\r\n", text: "empty body"},
 			{label: "not JSON at all", body: `not json`, text: "invalid JSON"},
 			{label: "JSON that ends too early", body: `{"customerId":"42"`, text: "invalid JSON"},
 			{label: "JSON without a value", body: `{"customerId":}`, text: "invalid JSON"},
@@ -132,6 +183,9 @@ func TestBodyOf(t *testing.T) {
 			{label: "a list where an object belongs", body: `{"delivery":[]}`, text: `"delivery" must be an object`},
 			{label: "a nested value of the wrong kind", body: `{"delivery":{"address":1}}`, text: `"delivery.address" must be a string`},
 			{label: "a value of the wrong kind in a list", body: `{"items":[{"bookId":"1"},{"bookId":2}]}`, text: `"items.1.bookId" must be a string`},
+			{label: "a list where the body has to be an object", body: `[]`, text: "the body must be an object"},
+			{label: "a number too large for its field", body: `{"quantity":1e400}`, text: `"quantity" is out of range`},
+			{label: "a fraction where an integer belongs", body: `{"quantity":1.5}`, text: `"quantity" must be an integer`},
 			{label: "an unknown field before a value of the wrong kind", body: `{"quantiy":3,"quantity":"three"}`, text: `unknown field "quantiy"`},
 			{label: "a value of the wrong kind before an unknown field", body: `{"quantity":"three","quantiy":3}`, text: `"quantity" must be a number`},
 			// The whole body has to be JSON before anything is decoded, so a
@@ -139,6 +193,7 @@ func TestBodyOf(t *testing.T) {
 			{label: "a value of the wrong kind in JSON that ends too early", body: `{"quantity":"three"`, text: "invalid JSON"},
 			{label: "an unknown field before a name that occurs twice", body: `{"quantiy":3,"customerId":"42","customerId":"43"}`, text: `duplicate field "customerId"`},
 			{label: "a name that occurs twice with values of the wrong kind", body: `{"quantity":"three","quantity":"four"}`, text: `duplicate field "quantity"`},
+			{label: "a name that occurs twice in another case, after a value of the wrong kind", body: `{"quantity":"three","QUANTITY":"four"}`, text: `duplicate field "QUANTITY"`},
 		} {
 			t.Run(test.label, func(t *testing.T) {
 				request := bodyRequest("application/json", strings.NewReader(test.body))
@@ -151,73 +206,269 @@ func TestBodyOf(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps the text of the decoder for what it has no words of its own for", func(t *testing.T) {
-		// These texts are to be replaced as well, once there are words for them.
+	t.Run("says which kind the body as a whole has to be, or why it does not fit", func(t *testing.T) {
 		for _, test := range []struct {
 			label string
-			body  string
+			err   error
 			text  string
 		}{
-			{label: "an empty body", body: ``, text: "unexpected end of JSON input"},
-			{label: "a body of nothing but whitespace", body: " \t\r\n", text: "unexpected end of JSON input"},
-			{label: "a list where the body has to be an object", body: `[]`,
-				text: "json: cannot unmarshal array into Go value of type httpapi_test.previewRequest"},
-			{label: "a number too large for its field", body: `{"quantity":1e400}`,
-				text: "json: cannot unmarshal number 1e400 into Go struct field previewRequest.quantity of type int"},
-			{label: "a fraction where an integer belongs", body: `{"quantity":1.5}`,
-				text: "json: cannot unmarshal number 1.5 into Go struct field previewRequest.quantity of type int"},
-			// The reader of JSON text sees no name twice, and the second decoding
-			// stops at the value of the wrong kind before it, so nobody names it.
-			{label: "a name that occurs twice in another case, after a value of the wrong kind", body: `{"quantity":"three","QUANTITY":"four"}`,
-				text: "duplicate object member name"},
+			{label: "a list for an object", err: bodyErrorOf[previewRequest](`[]`), text: "the body must be an object"},
+			{label: "a number for an object", err: bodyErrorOf[previewRequest](`1`), text: "the body must be an object"},
+			{label: "a string for an object", err: bodyErrorOf[previewRequest](`"42"`), text: "the body must be an object"},
+			{label: "a boolean for an object", err: bodyErrorOf[previewRequest](`true`), text: "the body must be an object"},
+			{label: "a list for a pointer to an object", err: bodyErrorOf[*previewRequest](`[]`), text: "the body must be an object"},
+			{label: "a list for a map", err: bodyErrorOf[map[string]int](`[]`), text: "the body must be an object"},
+			{label: "an object for a list", err: bodyErrorOf[[]previewItem](`{}`), text: "the body must be an array"},
+			{label: "a number for a string", err: bodyErrorOf[string](`42`), text: "the body must be a string"},
+			{label: "a boolean for a number", err: bodyErrorOf[int](`true`), text: "the body must be a number"},
+			{label: "a number too large", err: bodyErrorOf[int](`1e400`), text: "the body is out of range"},
+			{label: "a fraction for an integer", err: bodyErrorOf[int](`1.5`), text: "the body must be an integer"},
+			{label: "a string that is no base64", err: bodyErrorOf[[]byte](`"!!"`), text: "the body must be base64"},
+			{label: "a string that is no number", err: bodyErrorOf[json.Number](`"many"`), text: "the body must be a number"},
+			{label: "a string that is no time", err: bodyErrorOf[time.Time](`"tomorrow"`),
+				text: `the body must be a time such as "2026-10-05T12:00:00Z"`},
+			{label: "a key that is no number", err: bodyErrorOf[map[int]int](`{"x":1}`), text: "the keys of the body must be numbers"},
 		} {
 			t.Run(test.label, func(t *testing.T) {
-				request := bodyRequest("application/json", strings.NewReader(test.body))
-
-				preview, err := httpapi.BodyOf[previewRequest](request)
-				require.ErrorIs(t, err, httpapi.ErrMalformed)
-				assert.EqualError(t, err, "malformed request: "+test.text)
-				assert.Zero(t, preview, "nothing half-decoded may be handed back")
+				assertMalformed(t, test.err, test.text)
 			})
 		}
 	})
 
-	t.Run("takes a slice of bytes for a string, in base64", func(t *testing.T) {
-		type cover struct {
-			Image []byte `json:"image"`
-		}
-
-		_, err := httpapi.BodyOf[cover](bodyRequest("application/json", strings.NewReader(`{"image":42}`)))
-		assert.EqualError(t, err, `malformed request: "image" must be a string`)
-
-		// A string that is no base64 has no words of its own yet.
-		_, err = httpapi.BodyOf[cover](bodyRequest("application/json", strings.NewReader(`{"image":"!!"}`)))
-		assert.EqualError(t, err,
-			"malformed request: json: cannot unmarshal string into Go struct field cover.image of type []uint8: illegal base64 data at input byte 0")
-	})
-
-	t.Run("keeps the text of the decoder for a field with the option string", func(t *testing.T) {
-		// Such a field takes its number or boolean in a string, so neither its
-		// type nor the error of decoding says which kind it takes.
-		type quotedPreview struct {
-			Quantity int  `json:"quantity,string"`
-			IsGift   bool `json:"isGift,string"`
+	t.Run("says which number does not fit its type", func(t *testing.T) {
+		// A number is out of range if it is too large or too small for its type,
+		// and an integer has to be written as one, without a fraction or an
+		// exponent, which encoding/json refuses for an integer even if the number
+		// is one.
+		type stockLevel struct {
+			Count    int           `json:"count"`
+			Shelf    int8          `json:"shelf"`
+			Copies   uint          `json:"copies"`
+			Floor    uint8         `json:"floor"`
+			Weight   float32       `json:"weight"`
+			Price    float64       `json:"price"`
+			Rating   any           `json:"rating"`
+			LoanTime time.Duration `json:"loanTime"`
+			Items    []previewItem `json:"items"`
 		}
 
 		for _, test := range []struct {
 			body string
 			text string
 		}{
-			{body: `{"quantity":true}`, text: "json: cannot unmarshal bool into Go struct field quotedPreview.quantity of type int"},
-			{body: `{"QUANTITY":true}`, text: "json: cannot unmarshal bool into Go struct field quotedPreview.QUANTITY of type int"},
-			{body: `{"isGift":"yes"}`, text: `json: cannot unmarshal string "yes" into Go struct field quotedPreview.isGift of type bool: invalid syntax`},
-			{body: `{"isGift":true}`, text: "json: cannot unmarshal bool into Go struct field quotedPreview.isGift of type bool"},
+			{body: `{"count":1e400}`, text: `"count" is out of range`},
+			{body: `{"count":-1e400}`, text: `"count" is out of range`},
+			{body: `{"count":99999999999999999999}`, text: `"count" is out of range`},
+			// Written as an integer, a number is out of range, even if a float64
+			// rounds it to the smallest integer that fits.
+			{body: `{"count":-9223372036854775809}`, text: `"count" is out of range`},
+			{body: `{"count":9223372036854775808}`, text: `"count" is out of range`},
+			{body: `{"count":9.223372036854775808e18}`, text: `"count" is out of range`},
+			{body: `{"count":-9.223372036854775808e18}`, text: `"count" must be an integer`},
+			{body: `{"count":1.5}`, text: `"count" must be an integer`},
+			{body: `{"count":-0.5}`, text: `"count" must be an integer`},
+			{body: `{"count":1.0}`, text: `"count" must be an integer`},
+			{body: `{"count":1e2}`, text: `"count" must be an integer`},
+			{body: `{"count":1E2}`, text: `"count" must be an integer`},
+			{body: `{"shelf":128}`, text: `"shelf" is out of range`},
+			{body: `{"shelf":1.28e2}`, text: `"shelf" is out of range`},
+			{body: `{"shelf":-1.28e2}`, text: `"shelf" must be an integer`},
+			{body: `{"shelf":-1.29e2}`, text: `"shelf" is out of range`},
+			{body: `{"copies":-1}`, text: `"copies" is out of range`},
+			{body: `{"copies":-1.5}`, text: `"copies" is out of range`},
+			{body: `{"copies":0.0}`, text: `"copies" must be an integer`},
+			{body: `{"copies":1.5}`, text: `"copies" must be an integer`},
+			{body: `{"floor":256}`, text: `"floor" is out of range`},
+			{body: `{"floor":2.56e2}`, text: `"floor" is out of range`},
+			{body: `{"floor":2.55e2}`, text: `"floor" must be an integer`},
+			{body: `{"weight":1e40}`, text: `"weight" is out of range`},
+			{body: `{"price":1e400}`, text: `"price" is out of range`},
+			{body: `{"price":-1e400}`, text: `"price" is out of range`},
+			{body: `{"rating":1e400}`, text: `"rating" is out of range`},
+			{body: `{"rating":{"stars":[1,1e400]}}`, text: `"rating.stars.1" is out of range`},
+			{body: `{"loanTime":1.5}`, text: `"loanTime" must be an integer`},
+			// A number where a string belongs is of the wrong kind, however large.
+			{body: `{"items":[{"bookId":1e400}]}`, text: `"items.0.bookId" must be a string`},
 		} {
 			t.Run(test.body, func(t *testing.T) {
-				_, err := httpapi.BodyOf[quotedPreview](bodyRequest("application/json", strings.NewReader(test.body)))
+				assertMalformed(t, bodyErrorOf[stockLevel](test.body), test.text)
+			})
+		}
+	})
 
-				require.ErrorIs(t, err, httpapi.ErrMalformed)
-				assert.EqualError(t, err, "malformed request: "+test.text)
+	t.Run("says which keys of a map do not fit their type", func(t *testing.T) {
+		type inventory struct {
+			Stock   map[int]int        `json:"stock"`
+			Floors  map[uint8]string   `json:"floors"`
+			Weights map[float64]string `json:"weights"`
+			Shelves []map[int]int      `json:"shelves"`
+			Returns map[time.Time]int  `json:"returns"`
+		}
+
+		for _, test := range []struct {
+			label string
+			body  string
+			text  string
+		}{
+			{label: "a key that is no number", body: `{"stock":{"x":1}}`, text: `the keys of "stock" must be numbers`},
+			{label: "a key with whitespace around it", body: `{"stock":{ "x" : 1}}`, text: `the keys of "stock" must be numbers`},
+			{label: "a key with a dot in it", body: `{"stock":{"1":1,"1.5":2}}`, text: `the keys of "stock" must be numbers`},
+			{label: "a key that is no UTF-8", body: "{\"stock\":{\"\xff\":1}}", text: `the keys of "stock" must be numbers`},
+			{label: "a key too large for its type", body: `{"floors":{"300":"a"}}`, text: `the keys of "floors" must be numbers`},
+			{label: "a key too large for a float", body: `{"weights":{"1e400":"a"}}`, text: `the keys of "weights" must be numbers`},
+			{label: "a key of a map in a list", body: `{"shelves":[{},{"x":1}]}`, text: `the keys of "shelves.1" must be numbers`},
+			{label: "a key that is no time", body: `{"returns":{"yesterday":1}}`,
+				text: `the keys of "returns" must be times such as "2026-10-05T12:00:00Z"`},
+			// A value of a map is no key, even where it is a string.
+			{label: "a value of the wrong kind", body: `{"stock":{"1":"x"}}`, text: `"stock.1" must be a number`},
+			{label: "a value too large", body: `{"stock":{"1":1e400}}`, text: `"stock.1" is out of range`},
+		} {
+			t.Run(test.label, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[inventory](test.body), test.text)
+			})
+		}
+	})
+
+	t.Run("says which value is no time", func(t *testing.T) {
+		// encoding/json takes a time.Time in RFC 3339 only.
+		type loan struct {
+			DueOn      time.Time   `json:"dueOn"`
+			ReturnedAt *time.Time  `json:"returnedAt"`
+			Reminders  []time.Time `json:"reminders"`
+		}
+
+		for _, test := range []struct {
+			body string
+			text string
+		}{
+			{body: `{"dueOn":"tomorrow"}`, text: `"dueOn" must be a time such as "2026-10-05T12:00:00Z"`},
+			{body: `{"dueOn":"2026-10-05"}`, text: `"dueOn" must be a time such as "2026-10-05T12:00:00Z"`},
+			{body: `{"returnedAt":"yesterday"}`, text: `"returnedAt" must be a time such as "2026-10-05T12:00:00Z"`},
+			{body: `{"reminders":["2026-10-05T12:00:00Z","soon"]}`, text: `"reminders.1" must be a time such as "2026-10-05T12:00:00Z"`},
+			{body: `{"dueOn":1}`, text: `"dueOn" must be a string`},
+		} {
+			t.Run(test.body, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[loan](test.body), test.text)
+			})
+		}
+
+		t.Run("and keeps the error of parsing it inspectable", func(t *testing.T) {
+			err := bodyErrorOf[loan](`{"dueOn":"tomorrow"}`)
+
+			_, isParse := errors.AsType[*time.ParseError](err)
+			assert.True(t, isParse, "errors.As has to find the error of parsing")
+
+			failure, isFailure := errors.AsType[*jsonv2.SemanticError](err)
+			require.True(t, isFailure, "errors.As has to find the error that points to the field")
+			assert.Equal(t, jsontext.Pointer("/dueOn"), failure.JSONPointer)
+		})
+	})
+
+	t.Run("says that a json.Number takes a number", func(t *testing.T) {
+		// encoding/json leaves out where a json.Number is, wherever it is.
+		type valuation struct {
+			Price  json.Number   `json:"price"`
+			Offers []json.Number `json:"offers"`
+		}
+
+		for _, test := range []struct {
+			body string
+			text string
+		}{
+			{body: `{"price":"cheap"}`, text: `"price" must be a number`},
+			{body: `{"price":true}`, text: `"price" must be a number`},
+			{body: `{"offers":[1,"many"]}`, text: `"offers.1" must be a number`},
+		} {
+			t.Run(test.body, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[valuation](test.body), test.text)
+			})
+		}
+	})
+
+	t.Run("says that a slice of bytes takes a string in base64", func(t *testing.T) {
+		type cover struct {
+			Image []byte `json:"image"`
+		}
+
+		assertMalformed(t, bodyErrorOf[cover](`{"image":42}`), `"image" must be a string`)
+		assertMalformed(t, bodyErrorOf[cover](`{"image":"!!"}`), `"image" must be base64`)
+		assertMalformed(t, bodyErrorOf[cover](`{"image":"QQ"}`), `"image" must be base64`)
+	})
+
+	t.Run("says what a field with the option string takes", func(t *testing.T) {
+		// Such a field takes its number, boolean, or string in a string, as JSON
+		// text of its own.
+		type quotedPreview struct {
+			Quantity int         `json:"quantity,string"`
+			Copies   uint        `json:"copies,string"`
+			Weight   float32     `json:"weight,string"`
+			Limit    *int        `json:"limit,string"`
+			IsGift   bool        `json:"isGift,string"`
+			Note     string      `json:"note,string"`
+			Price    json.Number `json:"price,string"`
+			//lint:ignore SA5008 the test is about the option on a type that it does not apply to
+			Delivery deliveryOption `json:"delivery,string"`
+		}
+
+		for _, test := range []struct {
+			body string
+			text string
+		}{
+			{body: `{"quantity":true}`, text: `"quantity" must be a string that holds a number`},
+			{body: `{"QUANTITY":true}`, text: `"QUANTITY" must be a string that holds a number`},
+			{body: `{"quantity":3}`, text: `"quantity" must be a string that holds a number`},
+			{body: `{"quantity":"three"}`, text: `"quantity" must be a string that holds a number`},
+			{body: `{"quantity":""}`, text: `"quantity" must be a string that holds a number`},
+			{body: `{"quantity":" 3"}`, text: `"quantity" must be a string that holds a number`},
+			{body: `{"quantity":"3e"}`, text: `"quantity" must be a string that holds a number`},
+			{body: `{"quantity":"\"3\""}`, text: `"quantity" must be a string that holds a number`},
+			{body: `{"quantity":"1.5"}`, text: `"quantity" must be an integer`},
+			{body: `{"quantity":"1e400"}`, text: `"quantity" is out of range`},
+			{body: `{"copies":"-1"}`, text: `"copies" is out of range`},
+			{body: `{"weight":"1e40"}`, text: `"weight" is out of range`},
+			{body: `{"limit":true}`, text: `"limit" must be a string that holds a number`},
+			{body: `{"isGift":"yes"}`, text: `"isGift" must be a string that holds a boolean`},
+			{body: `{"isGift":true}`, text: `"isGift" must be a string that holds a boolean`},
+			{body: `{"note":"hello"}`, text: `"note" must be a string that holds a string`},
+			{body: `{"note":1}`, text: `"note" must be a string that holds a string`},
+			{body: `{"price":"\"12\""}`, text: `"price" must be a string that holds a number`},
+			// The option applies to booleans, numbers, and strings only, so
+			// encoding/json ignores it for anything else.
+			{body: `{"delivery":1}`, text: `"delivery" must be an object`},
+		} {
+			t.Run(test.body, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[quotedPreview](test.body), test.text)
+			})
+		}
+	})
+
+	t.Run("keeps the text of the decoder for what it has no words of its own for", func(t *testing.T) {
+		// encoding/json takes no boolean for the key of a map. It ignores the
+		// option string for a time, which encoding/json/v2 refuses, so the
+		// second decoding fails elsewhere and says nothing about the time, nor
+		// where a json.Number is.
+		type shelf struct {
+			ByAvailability map[bool]string `json:"byAvailability"`
+			//lint:ignore SA5008 the test is about the option on a type that it does not apply to
+			ArrivedAt time.Time `json:"arrivedAt,string"`
+			DueOn     time.Time `json:"dueOn"`
+			//lint:ignore SA5008 the test is about the option on a type that it does not apply to
+			Tags  []string    `json:"tags,string"`
+			Price json.Number `json:"price"`
+		}
+
+		for _, test := range []struct {
+			body string
+			text string
+		}{
+			{body: `{"byAvailability":{"true":"a"}}`, text: "json: cannot unmarshal string into Go struct field shelf.byAvailability.true of type bool"},
+			{body: `{"arrivedAt":"yesterday"}`, text: `parsing time "yesterday" as "2006-01-02T15:04:05Z07:00": cannot parse "yesterday" as "2006"`},
+			{body: `{"arrivedAt":"2026-10-05T12:00:00Z","dueOn":"tomorrow"}`,
+				text: `parsing time "tomorrow" as "2006-01-02T15:04:05Z07:00": cannot parse "tomorrow" as "2006"`},
+			{body: `{"tags":["new"],"price":true}`, text: "json: cannot unmarshal bool into Go value of type json.Number"},
+		} {
+			t.Run(test.body, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[shelf](test.body), test.text)
 			})
 		}
 	})
@@ -240,6 +491,21 @@ func TestBodyOf(t *testing.T) {
 		require.ErrorIs(t, err, httpapi.ErrMalformed)
 		assert.EqualError(t, err, "malformed request: an ISBN has 13 digits")
 		assert.ErrorIs(t, err, errNotAnISBN, "the error of the type has to stay inspectable")
+
+		// So does an error of package time, or of encoding/json, whose offset
+		// points into the JSON text of the type, not into the body, where it
+		// happens to point to the name of a field.
+		for _, test := range []struct {
+			body string
+			text string
+		}{
+			{body: `{"publishedOn":"yesterday"}`, text: `parsing time "yesterday" as "2006-01-02": cannot parse "yesterday" as "2006"`},
+			{body: `{"annotations":"x"}`, text: "invalid character 'x' looking for beginning of value"},
+		} {
+			t.Run(test.body, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[catalogEntry](test.body), test.text)
+			})
+		}
 	})
 
 	t.Run("rejects anything but whitespace after the value", func(t *testing.T) {
@@ -291,6 +557,13 @@ func TestBodyOf(t *testing.T) {
 			{label: "in a different case", body: `{"customerId":"42","CUSTOMERID":"43"}`, name: "CUSTOMERID"},
 			{label: "in a different case, with whitespace after the value", body: `{"customerId":"42","CUSTOMERID":"43"}` + " \n", name: "CUSTOMERID"},
 			{label: "with a slash in it", body: `{"a/b":1,"a/b":2}`, name: "a/b"},
+			// encoding/json passes over these failures to refuse the name all
+			// the same, while the second decoding stops at them.
+			{label: "in a different case, after a value of the wrong kind", body: `{"quantity":"three","QUANTITY":"four"}`, name: "QUANTITY"},
+			{label: "in a different case, after a number too large", body: `{"quantity":1e400,"Quantity":1}`, name: "Quantity"},
+			{label: "in a different case, after an unknown field", body: `{"quantiy":3,"quantity":1,"QUANTITY":2}`, name: "QUANTITY"},
+			{label: "in a different case, in an object in a list, after a value of the wrong kind", body: `{"items":[{"bookId":1,"BOOKID":"2"}]}`, name: "BOOKID"},
+			{label: "in a different case, spelled with an escape, after a value of the wrong kind", body: `{"quantity":"three","QUANTITY":4}`, name: "QUANTITY"},
 		} {
 			t.Run(test.label, func(t *testing.T) {
 				request := bodyRequest("application/json", strings.NewReader(test.body))
@@ -301,6 +574,28 @@ func TestBodyOf(t *testing.T) {
 				assert.Zero(t, preview, "nothing half-decoded may be handed back")
 			})
 		}
+
+		for _, test := range []struct {
+			label string
+			body  string
+			name  string
+		}{
+			{label: "in a different case, after the error of a type that decodes itself", body: `{"isbn":"42","ISBN":"9783161484100"}`, name: "ISBN"},
+			{label: "in a different case, after a date of a type that decodes itself", body: `{"publishedOn":"x","PublishedOn":"2026-10-05"}`, name: "PublishedOn"},
+		} {
+			t.Run(test.label, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[catalogEntry](test.body), `duplicate field "`+test.name+`"`)
+			})
+		}
+
+		t.Run("in a different case, after a time that does not parse", func(t *testing.T) {
+			type loan struct {
+				DueOn time.Time `json:"dueOn"`
+				Count int       `json:"count"`
+			}
+
+			assertMalformed(t, bodyErrorOf[loan](`{"dueOn":"x","count":1,"COUNT":2}`), `duplicate field "COUNT"`)
+		})
 	})
 
 	t.Run("still matches names regardless of case", func(t *testing.T) {
@@ -352,9 +647,36 @@ func TestBodyOf(t *testing.T) {
 			assert.True(t, isSyntax, "the error of decoding has to stay wrapped")
 		})
 
+		t.Run("for a name that occurs twice in another case", func(t *testing.T) {
+			err := bodyOf(t, `{"customerId":"42","CUSTOMERID":"43"}`)
+
+			duplicate, isDuplicate := errors.AsType[*jsontext.SyntacticError](err)
+			require.True(t, isDuplicate, "errors.As has to find the error that points to the name")
+			assert.ErrorIs(t, duplicate, jsontext.ErrDuplicateName)
+			assert.Equal(t, jsontext.Pointer("/CUSTOMERID"), duplicate.JSONPointer)
+
+			_, isSyntax := errors.AsType[*json.SyntaxError](err)
+			assert.True(t, isSyntax, "the error of decoding has to stay wrapped")
+		})
+
 		for label, body := range map[string]string{
+			"for a number too large":       `{"quantity":1e400}`,
+			"for a fraction":               `{"quantity":1.5}`,
+			"for a body of the wrong kind": `[]`,
+		} {
+			t.Run(label, func(t *testing.T) {
+				err := bodyOf(t, body)
+
+				_, isMismatch := errors.AsType[*json.UnmarshalTypeError](err)
+				assert.True(t, isMismatch, "errors.As has to find the error of decoding")
+			})
+		}
+
+		for label, body := range map[string]string{
+			"for an empty body":        ``,
 			"for JSON that is not":     `not json`,
 			"for data after the value": `{"customerId":"42"} garbage`,
+			"for a name that occurs twice in another case, after a value of the wrong kind": `{"quantity":"three","QUANTITY":"four"}`,
 		} {
 			t.Run(label, func(t *testing.T) {
 				err := bodyOf(t, body)
@@ -400,6 +722,10 @@ func TestBodyOf(t *testing.T) {
 				message: `malformed request: duplicate field "customerId"`},
 			{label: "not JSON, said to be JSON", contentType: "application/json", body: `not json`, status: http.StatusBadRequest,
 				message: "malformed request: invalid JSON"},
+			{label: "an empty body", contentType: "application/json", body: ``, status: http.StatusBadRequest,
+				message: "malformed request: empty body"},
+			{label: "a number too large", contentType: "application/json", body: `{"quantity":1e400}`, status: http.StatusBadRequest,
+				message: `malformed request: "quantity" is out of range`},
 		} {
 			t.Run(test.label, func(t *testing.T) {
 				response := httptest.NewRecorder()
