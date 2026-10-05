@@ -43,12 +43,10 @@ func toUncheckedNote(_ *http.Request, request uncheckedNoteRequest, _ user) (unc
 }
 
 func uncheckedNoteDecider() architecturekit.Decider[uncheckedNote, notes] {
-	return architecturekit.Decider[uncheckedNote, notes]{
-		State: architecturekit.NewState(notes{}),
-		Decide: func(context.Context, uncheckedNote, notes) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(architecturekit.NewState(notes{}),
+		func(context.Context, uncheckedNote, notes) ([]architecturekit.Event, error) {
 			return nil, nil
-		},
-	}
+		})
 }
 
 // toNotePanicking panics while it turns a request into a command, with an
@@ -96,7 +94,7 @@ func postUncheckedNote(t *testing.T, mux *http.ServeMux, id string) *httptest.Re
 func askAsGolo(t *testing.T, mux *http.ServeMux, path string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request := httptest.NewRequest("QUERY", path, nil)
 	request.Header.Set("X-User", "golo")
 
 	return serve(t, mux, request)
@@ -174,26 +172,26 @@ func TestPanicsInRoutes(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes", toListNotes, func(context.Context, listNotes) ([]noteResponse, error) {
+		httpapi.Query(api, mux, "QUERY /notes", toListNotes, func(context.Context, listNotes) ([]noteResponse, error) {
 			panic("the index is broken")
 		})
 
 		response := askAsGolo(t, mux, "/notes")
 
-		assertPanicAnswered(t, response, logs.String(), "GET", "GET /notes", "the index is broken", "httpapi_test.TestPanicsInRoutes")
+		assertPanicAnswered(t, response, logs.String(), "QUERY", "QUERY /notes", "the index is broken", "httpapi_test.TestPanicsInRoutes")
 	})
 
 	t.Run("a query whose result panics while it is encoded is answered with 500", func(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes", toListNotes, func(context.Context, listNotes) ([]explosive, error) {
+		httpapi.Query(api, mux, "QUERY /notes", toListNotes, func(context.Context, listNotes) ([]explosive, error) {
 			return []explosive{{}}, nil
 		})
 
 		response := askAsGolo(t, mux, "/notes")
 
-		assertPanicAnswered(t, response, logs.String(), "GET", "GET /notes", "the encoder is broken", "httpapi_test.explosive.MarshalJSON")
+		assertPanicAnswered(t, response, logs.String(), "QUERY", "QUERY /notes", "the encoder is broken", "httpapi_test.explosive.MarshalJSON")
 	})
 
 	t.Run("a revisioned query whose answer panics is answered with 500, without a revision", func(t *testing.T) {
@@ -203,13 +201,13 @@ func TestPanicsInRoutes(t *testing.T) {
 
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes", allNotes, func(context.Context, countNotes) (int, error) {
+		httpapi.Query(api, mux, "QUERY /notes", allNotes, func(context.Context, countNotes) (int, error) {
 			panic("the index is broken")
 		}, httpapi.Revisioned(view, time.Second))
 
 		response := askAsGolo(t, mux, "/notes")
 
-		assertPanicAnswered(t, response, logs.String(), "GET", "GET /notes", "the index is broken", "httpapi_test.TestPanicsInRoutes")
+		assertPanicAnswered(t, response, logs.String(), "QUERY", "QUERY /notes", "the index is broken", "httpapi_test.TestPanicsInRoutes")
 		assert.Empty(t, response.Header().Get("ETag"), "a panic was tagged")
 		assert.Empty(t, response.Header().Get(httpapi.HeaderRevision), "a panic carries a revision")
 	})
@@ -221,16 +219,16 @@ func TestPanicsInRoutes(t *testing.T) {
 
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes", allNotes, func(context.Context, countNotes) (explosive, error) {
+		httpapi.Query(api, mux, "QUERY /notes", allNotes, func(context.Context, countNotes) (explosive, error) {
 			return explosive{}, nil
 		}, httpapi.Revisioned(view, time.Second))
 
 		response := askAsGolo(t, mux, "/notes")
 
-		assertPanicAnswered(t, response, logs.String(), "GET", "GET /notes", "the encoder is broken", "httpapi_test.explosive.MarshalJSON")
+		assertPanicAnswered(t, response, logs.String(), "QUERY", "QUERY /notes", "the encoder is broken", "httpapi_test.explosive.MarshalJSON")
 		assert.Empty(t, response.Header().Get("ETag"), "a panic was tagged")
 		assert.Empty(t, response.Header().Get(httpapi.HeaderRevision), "a panic carries a revision")
-		assert.Empty(t, response.Header().Get("Cache-Control"))
+		assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
 	})
 
 	t.Run("a revisioned query whose variance panics is answered with 500", func(t *testing.T) {
@@ -240,13 +238,13 @@ func TestPanicsInRoutes(t *testing.T) {
 
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes", allNotes, countNotesIn(view),
+		httpapi.Query(api, mux, "QUERY /notes", allNotes, countNotesIn(view),
 			httpapi.Revisioned(view, time.Second),
 			httpapi.Varying(func(*http.Request) string { panic("the clock is broken") }))
 
 		response := askAsGolo(t, mux, "/notes")
 
-		assertPanicAnswered(t, response, logs.String(), "GET", "GET /notes", "the clock is broken", "httpapi_test.TestPanicsInRoutes")
+		assertPanicAnswered(t, response, logs.String(), "QUERY", "QUERY /notes", "the clock is broken", "httpapi_test.TestPanicsInRoutes")
 	})
 
 	t.Run("a route passes on http.ErrAbortHandler", func(t *testing.T) {
@@ -328,8 +326,8 @@ func TestPanicsInHandleAndAsk(t *testing.T) {
 			`architecturekit: value for "id" in "/note/{id}" must not be empty`, "httpapi_test.uncheckedNote.Subject")
 	})
 
-	for name, toQuery := range map[string]httpapi.ToQuery[user, listNotes]{
-		"while building the query": func(*http.Request, user) (listNotes, error) { panic("the query is broken") },
+	for name, toQuery := range map[string]httpapi.ToQuery[user, httpapi.NoBody, listNotes]{
+		"while building the query": func(*http.Request, httpapi.NoBody, user) (listNotes, error) { panic("the query is broken") },
 		"while answering":          toListNotes,
 	} {
 		t.Run("Ask returns a panic "+name+" as an internal failure", func(t *testing.T) {
@@ -381,19 +379,14 @@ func TestMissingPartsInHandleAndAsk(t *testing.T) {
 	var (
 		noAPI       *httpapi.API[user]
 		toNoCommand httpapi.ToCommand[user, noteRequest, note]
-		toNoQuery   httpapi.ToQuery[user, listNotes]
+		toNoQuery   httpapi.ToQuery[user, httpapi.NoBody, listNotes]
 		noAnswer    httpapi.Answer[listNotes, []noteResponse]
 	)
 
-	withoutState := noteDecider()
-	withoutState.State = nil
-
-	withoutDecide := noteDecider()
-	withoutDecide.Decide = nil
+	var zeroDecider architecturekit.Decider[note, notes]
 
 	// handleWithout lists the ways to give Handle, along with an API, a nil
-	// function or a decider without one of its parts, with the message it
-	// fails with.
+	// function or the zero Decider, with the message it fails with.
 	handleWithout := map[string]struct {
 		toCommand httpapi.ToCommand[user, noteRequest, note]
 		decider   architecturekit.Decider[note, notes]
@@ -402,20 +395,16 @@ func TestMissingPartsInHandleAndAsk(t *testing.T) {
 		"a function that turns the request into a command": {
 			toNoCommand, noteDecider(), handleWithoutCommand,
 		},
-		"a state in the decider": {
-			toNote, withoutState,
-			"architecturekit/httpapi: Handle needs a decider with a state, not one whose State is nil",
-		},
-		"a function in the decider that decides": {
-			toNote, withoutDecide,
-			"architecturekit/httpapi: Handle needs a decider with a function that decides, not one whose Decide is nil",
+		"a decider made with NewDecider": {
+			toNote, zeroDecider,
+			"architecturekit/httpapi: Handle needs a decider made with NewDecider, not the zero Decider",
 		},
 	}
 
 	// askWithout lists the ways to give Ask a nil function, with the message
 	// it fails with.
 	askWithout := map[string]struct {
-		toQuery httpapi.ToQuery[user, listNotes]
+		toQuery httpapi.ToQuery[user, httpapi.NoBody, listNotes]
 		answer  httpapi.Answer[listNotes, []noteResponse]
 		message string
 	}{
@@ -523,14 +512,14 @@ func TestMissingPartsInHandleAndAsk(t *testing.T) {
 			var logs bytes.Buffer
 			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 			mux := http.NewServeMux()
-			mux.HandleFunc("GET /notes", func(w http.ResponseWriter, r *http.Request) {
+			mux.HandleFunc("QUERY /notes", func(w http.ResponseWriter, r *http.Request) {
 				result, err := httpapi.Ask(r, api, test.toQuery, test.answer)
 				httpapi.RespondResult(w, r, api, result, err)
 			})
 
 			response := askAsGolo(t, mux, "/notes")
 
-			assertPanicAnswered(t, response, logs.String(), "GET", "GET /notes", test.message, "architecturekit/httpapi.Ask[")
+			assertPanicAnswered(t, response, logs.String(), "QUERY", "QUERY /notes", test.message, "architecturekit/httpapi.Ask[")
 			assert.NotContains(t, logs.String(), "nil pointer dereference")
 		})
 	}

@@ -270,11 +270,12 @@ func Load[TState any](
 // panic (see ReadOption). For anything else, use ReadEvents of the client SDK.
 //
 // A bound whose ID is not the ID of an event, such as an empty one, ends the
-// iteration with an error that wraps ErrNotARevision, before the database is
-// asked. Otherwise, the iteration ends with the first error, and stops reading
-// as soon as the caller stops iterating. If the context ends first, it ends
-// with the context's error, so that a read that was cut short never looks
-// complete.
+// iteration with the error of ParseRevision, which wraps ErrNotARevision and
+// names the ID, before the database is asked. It names neither the subjects
+// nor the option, since the ID usually comes from a request. Otherwise, the
+// iteration ends with the first error, and stops reading as soon as the caller
+// stops iterating. If the context ends first, it ends with the context's
+// error, so that a read that was cut short never looks complete.
 func Read(
 	ctx context.Context,
 	store *Store,
@@ -287,9 +288,8 @@ func Read(
 	return func(yield func(eventsourcingdb.Event, error) bool) {
 		doing := fmt.Sprintf("reading %q", subjects.subject)
 
-		if option := settings.invalidBound(); option != "" {
-			yield(eventsourcingdb.Event{}, fmt.Errorf("%w: %s: %s needs the ID of an event",
-				ErrNotARevision, doing, option))
+		if err := settings.checkBounds(); err != nil {
+			yield(eventsourcingdb.Event{}, err)
 			return
 		}
 
@@ -644,12 +644,20 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // and fails with the context's error, also if it ends while the decider
 // decides. Once the write has begun, it is finished, since the client writes
 // without a context.
+//
+// The zero Decider, one that was not made with NewDecider, is a programming
+// error, so Execute panics, before it looks at the command, and names the
+// mistake rather than a nil pointer.
 func Execute[TCommand Command, TState any](
 	ctx context.Context,
 	store *Store,
 	decider Decider[TCommand, TState],
 	cmd TCommand,
 ) ([]eventsourcingdb.Event, error) {
+	if decider.State() == nil {
+		panic("architecturekit: Execute needs a decider made with NewDecider, not the zero Decider")
+	}
+
 	declared, err := checkPreconditions(cmd)
 	if err != nil {
 		return nil, err
@@ -678,7 +686,7 @@ func executeOnce[TCommand Command, TState any](
 ) ([]eventsourcingdb.Event, error) {
 	subject := cmd.Subject()
 
-	state, lastEventID, err := fold(ctx, store, subject, decider.State)
+	state, lastEventID, err := fold(ctx, store, subject, decider.State())
 	if err != nil {
 		return nil, err
 	}
@@ -699,7 +707,7 @@ func executeOnce[TCommand Command, TState any](
 
 	// An event the state has no rule for would leave a subject the state can
 	// not read any more, so then none of the events is written.
-	if err := decider.State.checkRules(subject, events); err != nil {
+	if err := decider.State().checkRules(subject, events); err != nil {
 		return nil, err
 	}
 

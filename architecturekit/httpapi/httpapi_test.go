@@ -63,15 +63,13 @@ func noteDecider() architecturekit.Decider[note, notes] {
 		return current
 	})
 
-	return architecturekit.Decider[note, notes]{
-		State: state,
-		Decide: func(ctx context.Context, cmd note, current notes) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(state,
+		func(ctx context.Context, cmd note, current notes) ([]architecturekit.Event, error) {
 			if current.Count > 0 {
 				return nil, architecturekit.NewDomainError("note %s already exists", cmd.ID)
 			}
 			return []architecturekit.Event{noted{Text: cmd.Text}}, nil
-		},
-	}
+		})
 }
 
 type user struct {
@@ -323,6 +321,27 @@ func TestStatusFor(t *testing.T) {
 	})
 }
 
+func TestCategoryTexts(t *testing.T) {
+	// An error that is written for the caller is answered with its text, so the
+	// text of its category names what is wrong rather than the package it
+	// comes from.
+	for _, test := range []struct {
+		err  error
+		text string
+	}{
+		{httpapi.ErrUnauthorized, "unauthorized"},
+		{httpapi.ErrUnsupportedMediaType, "unsupported media type"},
+		{httpapi.ErrTooLarge, "request body too large"},
+		{httpapi.ErrForbidden, "forbidden"},
+		{httpapi.ErrMalformed, "malformed request"},
+		{httpapi.ErrNotFound, "not found"},
+	} {
+		t.Run(test.text, func(t *testing.T) {
+			assert.EqualError(t, test.err, test.text)
+		})
+	}
+}
+
 func TestRespond(t *testing.T) {
 	t.Run("reports the revision on success", func(t *testing.T) {
 		var logs bytes.Buffer
@@ -477,7 +496,7 @@ func TestRoute(t *testing.T) {
 		})
 
 		assert.Equal(t, http.StatusBadRequest, response.Code)
-		assert.Contains(t, response.Body.String(), "txt", "the answer should name the unknown field")
+		assert.JSONEq(t, `{"message": "malformed request: unknown field \"txt\""}`, response.Body.String(), "the answer should name the unknown field")
 	})
 
 	t.Run("ambiguous JSON is rejected", func(t *testing.T) {
@@ -551,6 +570,7 @@ func TestRoute(t *testing.T) {
 		muxFor(t, deadStore(t)).ServeHTTP(recorder, httpRequest)
 
 		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.JSONEq(t, messageOf(t, "malformed request: the body could not be read"), recorder.Body.String())
 	})
 
 	t.Run("an unreachable store is an internal failure", func(t *testing.T) {
@@ -583,20 +603,10 @@ func TestRoute(t *testing.T) {
 		})
 	})
 
-	t.Run("panics for a decider without a state", func(t *testing.T) {
-		decider := noteDecider()
-		decider.State = nil
+	t.Run("panics for the zero Decider, which was not made with NewDecider", func(t *testing.T) {
+		var decider architecturekit.Decider[note, notes]
 
-		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a decider with a state, not one whose State is nil", func() {
-			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNote, decider)
-		})
-	})
-
-	t.Run("panics for a decider without a function that decides", func(t *testing.T) {
-		decider := noteDecider()
-		decider.Decide = nil
-
-		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a decider with a function that decides, not one whose Decide is nil", func() {
+		assert.PanicsWithValue(t, "architecturekit/httpapi: Route needs a decider made with NewDecider, not the zero Decider", func() {
 			httpapi.Route(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "POST /note", toNote, decider)
 		})
 	})
@@ -623,8 +633,8 @@ func TestRoute(t *testing.T) {
 			{pattern: "GET /note", method: http.MethodGet},
 			{pattern: "HEAD /note", method: http.MethodHead},
 			{pattern: "OPTIONS /note", method: http.MethodOptions},
-			// QUERY asks with a body and changes nothing, like GET, which is how
-			// Revisioned treats it as well.
+			// QUERY asks with a body and changes nothing, like GET, which is why
+			// queries are asked with it (see Query).
 			{pattern: "QUERY /note", method: "QUERY"},
 			{pattern: "GET example.com/note", method: http.MethodGet},
 			// The mux takes a tab for a space.
@@ -883,7 +893,7 @@ func TestUserOf(t *testing.T) {
 		require.True(t, isFound, "errors.As has to find the error of userFrom")
 		assert.Same(t, expired, found)
 
-		assert.Equal(t, "httpapi: unauthorized: the token expired at 2026-10-01T12:00:00Z", err.Error())
+		assert.Equal(t, "unauthorized: the token expired at 2026-10-01T12:00:00Z", err.Error())
 	})
 }
 
@@ -933,13 +943,13 @@ func TestFailingUserFrom(t *testing.T) {
 		},
 		"a query": func(t *testing.T, api *httpapi.API[user]) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
-			httpapi.Query(api, mux, "GET /notes", toListNotes, answerListNotes)
+			httpapi.Query(api, mux, "QUERY /notes", toListNotes, answerListNotes)
 
 			return ask(t, mux, "/notes", "golo")
 		},
 		"a revisioned query": func(t *testing.T, api *httpapi.API[user]) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
-			httpapi.Query(api, mux, "GET /notes", toListNotes, answerListNotes, httpapi.Revisioned(noteView(), time.Second))
+			httpapi.Query(api, mux, "QUERY /notes", toListNotes, answerListNotes, httpapi.Revisioned(noteView(), time.Second))
 
 			return ask(t, mux, "/notes", "golo")
 		},
@@ -982,21 +992,23 @@ var buildFailures = []struct {
 	message string
 	isKept  bool
 }{
-	{"without a category", errors.New("id must not be empty"), http.StatusBadRequest, "httpapi: malformed request: id must not be empty", false},
-	{"that is malformed", fmt.Errorf("%w: id must not be empty", httpapi.ErrMalformed), http.StatusBadRequest, "httpapi: malformed request: id must not be empty", true},
+	{"without a category", errors.New("id must not be empty"), http.StatusBadRequest, "malformed request: id must not be empty", false},
+	{"that is malformed", fmt.Errorf("%w: id must not be empty", httpapi.ErrMalformed), http.StatusBadRequest, "malformed request: id must not be empty", true},
 	{"that is unauthorized", fmt.Errorf("%w: the token has expired", httpapi.ErrUnauthorized), http.StatusUnauthorized, "unauthorized", true},
-	{"that is forbidden", fmt.Errorf("%w: only librarians acquire books", httpapi.ErrForbidden), http.StatusForbidden, "httpapi: forbidden: only librarians acquire books", true},
-	{"that is not found", fmt.Errorf("%w: book 42 is unknown", httpapi.ErrNotFound), http.StatusNotFound, "httpapi: not found: book 42 is unknown", true},
-	{"that is too large", fmt.Errorf("%w: at most 10 books at once", httpapi.ErrTooLarge), http.StatusRequestEntityTooLarge, "httpapi: request body too large: at most 10 books at once", true},
-	{"that is no JSON", fmt.Errorf("%w: text/plain is not application/json", httpapi.ErrUnsupportedMediaType), http.StatusUnsupportedMediaType, "httpapi: unsupported media type: text/plain is not application/json", true},
+	{"that is forbidden", fmt.Errorf("%w: only librarians acquire books", httpapi.ErrForbidden), http.StatusForbidden, "forbidden: only librarians acquire books", true},
+	{"that is not found", fmt.Errorf("%w: book 42 is unknown", httpapi.ErrNotFound), http.StatusNotFound, "not found: book 42 is unknown", true},
+	{"that found no item", fmt.Errorf("finding book 42: %w", query.ErrNoItems), http.StatusNotFound, "not found", true},
+	{"that is not found, and found no item", fmt.Errorf("%w: book 42 is unknown: %w", httpapi.ErrNotFound, query.ErrNoItems), http.StatusNotFound, "not found: book 42 is unknown: no items", true},
+	{"that is too large", fmt.Errorf("%w: at most 10 books at once", httpapi.ErrTooLarge), http.StatusRequestEntityTooLarge, "request body too large: at most 10 books at once", true},
+	{"that is no JSON", fmt.Errorf("%w: text/plain is not application/json", httpapi.ErrUnsupportedMediaType), http.StatusUnsupportedMediaType, "unsupported media type: text/plain is not application/json", true},
 	{"of the domain", architecturekit.NewDomainError("the reader is suspended"), http.StatusUnprocessableEntity, "the reader is suspended", true},
-	{"that is not a revision", fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc"), http.StatusBadRequest, `architecturekit: not a revision: "abc"`, true},
+	{"that is not a revision", fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc"), http.StatusBadRequest, `not a revision: "abc"`, true},
 	{"that is not a revision, but permanent", fmt.Errorf("%w: %w", architecturekit.ErrPermanent, fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc")), http.StatusInternalServerError, "internal server error", true},
 	{"that is a conflict", fmt.Errorf("%w: reading %q", architecturekit.ErrConflict, "/readers/23"), http.StatusConflict, "conflict: the data has changed since it was read", true},
 	{"that is transient", fmt.Errorf("%w: session store at redis://10.0.3.9 is down", architecturekit.ErrTransient), http.StatusServiceUnavailable, "internal server error", true},
 	{"that is permanent", fmt.Errorf("%w: the catalog at /etc/catalog.yaml is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, "internal server error", true},
 	{"that is unverified", fmt.Errorf("%w: the reader is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, "internal server error", true},
-	{"because the caller went away", fmt.Errorf("looking up the reader: %w", context.Canceled), 499, "looking up the reader: context canceled", true},
+	{"because the caller went away", fmt.Errorf("looking up the reader: %w", context.Canceled), 499, "request canceled", true},
 	{"because the deadline ran out", fmt.Errorf("looking up the reader: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, "internal server error", true},
 }
 
@@ -1008,8 +1020,8 @@ func failingToCommand(err error) httpapi.ToCommand[user, noteRequest, note] {
 
 // failingToQuery returns a function that fails to build a query, with the
 // given error.
-func failingToQuery(err error) httpapi.ToQuery[user, listNotes] {
-	return func(*http.Request, user) (listNotes, error) { return listNotes{}, err }
+func failingToQuery(err error) httpapi.ToQuery[user, httpapi.NoBody, listNotes] {
+	return func(*http.Request, httpapi.NoBody, user) (listNotes, error) { return listNotes{}, err }
 }
 
 func TestFailingToCommandAndToQuery(t *testing.T) {
@@ -1025,13 +1037,13 @@ func TestFailingToCommandAndToQuery(t *testing.T) {
 		},
 		"a query": func(t *testing.T, api *httpapi.API[user], err error) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
-			httpapi.Query(api, mux, "GET /notes", failingToQuery(err), answerListNotes)
+			httpapi.Query(api, mux, "QUERY /notes", failingToQuery(err), answerListNotes)
 
 			return ask(t, mux, "/notes", "golo")
 		},
 		"a revisioned query": func(t *testing.T, api *httpapi.API[user], err error) *httptest.ResponseRecorder {
 			mux := http.NewServeMux()
-			httpapi.Query(api, mux, "GET /notes", failingToQuery(err), answerListNotes, httpapi.Revisioned(noteView(), time.Second))
+			httpapi.Query(api, mux, "QUERY /notes", failingToQuery(err), answerListNotes, httpapi.Revisioned(noteView(), time.Second))
 
 			return ask(t, mux, "/notes", "golo")
 		},

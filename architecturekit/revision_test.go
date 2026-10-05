@@ -1,8 +1,10 @@
 package architecturekit_test
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -47,22 +49,7 @@ func TestCompareRevisions(t *testing.T) {
 	})
 
 	t.Run("something that is not a revision is refused", func(t *testing.T) {
-		tests := []struct {
-			name     string
-			revision string
-		}{
-			{"letters", "abc"},
-			{"a fraction", "1.5"},
-			{"a negative number", "-1"},
-			{"a leading space", " 1"},
-			{"a hexadecimal number", "0x10"},
-			{"a plus sign", "+1"},
-			{"one beyond the largest event ID", "9223372036854775808"},
-			{"the largest 64-bit number", "18446744073709551615"},
-			{"a number beyond 64 bits", "99999999999999999999"},
-		}
-
-		for _, test := range tests {
+		for _, test := range notRevisions {
 			t.Run(test.name, func(t *testing.T) {
 				_, err := architecturekit.CompareRevisions(test.revision, "1")
 				assert.ErrorIs(t, err, architecturekit.ErrNotARevision)
@@ -71,6 +58,92 @@ func TestCompareRevisions(t *testing.T) {
 				_, err = architecturekit.CompareRevisions("1", test.revision)
 				assert.ErrorIs(t, err, architecturekit.ErrNotARevision, "on the right")
 			})
+		}
+	})
+}
+
+// notRevisions are values that are not revisions, other than the empty one,
+// which CompareRevisions takes for a view that has seen nothing.
+var notRevisions = []struct {
+	name     string
+	revision string
+}{
+	{"letters", "abc"},
+	{"a fraction", "1.5"},
+	{"a negative number", "-1"},
+	{"a leading space", " 1"},
+	{"a trailing space", "1 "},
+	{"a hexadecimal number", "0x10"},
+	{"a plus sign", "+1"},
+	{"one beyond the largest event ID", "9223372036854775808"},
+	{"the largest 64-bit number", "18446744073709551615"},
+	{"a number beyond 64 bits", "99999999999999999999"},
+}
+
+func TestParseRevision(t *testing.T) {
+	t.Run("returns the number of a revision", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			revision string
+			want     uint64
+		}{
+			{"the first event ID", "0", 0},
+			{"a single digit", "7", 7},
+			{"several digits", "10", 10},
+			{"leading zeros", "002", 2},
+			{"the largest event ID", "9223372036854775807", 1<<63 - 1},
+		}
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				got, err := architecturekit.ParseRevision(test.revision)
+				require.NoError(t, err)
+
+				assert.Equal(t, test.want, got)
+			})
+		}
+	})
+
+	t.Run("refuses the empty string, which is no event ID", func(t *testing.T) {
+		got, err := architecturekit.ParseRevision("")
+
+		require.ErrorIs(t, err, architecturekit.ErrNotARevision)
+		assert.EqualError(t, err, `not a revision: ""`)
+		assert.Zero(t, got)
+	})
+
+	t.Run("refuses what is not a revision, naming the value", func(t *testing.T) {
+		for _, test := range notRevisions {
+			t.Run(test.name, func(t *testing.T) {
+				got, err := architecturekit.ParseRevision(test.revision)
+
+				require.ErrorIs(t, err, architecturekit.ErrNotARevision)
+				assert.EqualError(t, err, fmt.Sprintf("not a revision: %q", test.revision))
+				assert.Zero(t, got)
+			})
+		}
+	})
+
+	t.Run("reads a revision by the rules CompareRevisions applies", func(t *testing.T) {
+		values := []string{"0", "1", "2", "002", "9", "10", "99", "100", "9223372036854775806", "9223372036854775807"}
+		for _, test := range notRevisions {
+			values = append(values, test.revision)
+		}
+
+		for _, left := range values {
+			for _, right := range values {
+				order, compareErr := architecturekit.CompareRevisions(left, right)
+				leftNumber, leftErr := architecturekit.ParseRevision(left)
+				rightNumber, rightErr := architecturekit.ParseRevision(right)
+
+				if leftErr != nil || rightErr != nil {
+					require.Error(t, compareErr, "CompareRevisions accepts %q and %q, which ParseRevision refuses", left, right)
+					continue
+				}
+
+				require.NoError(t, compareErr, "CompareRevisions refuses %q or %q, which ParseRevision accepts", left, right)
+				require.Equal(t, cmp.Compare(leftNumber, rightNumber), order, "comparing %q with %q", left, right)
+			}
 		}
 	})
 }

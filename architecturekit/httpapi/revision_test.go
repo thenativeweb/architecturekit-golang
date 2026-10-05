@@ -49,7 +49,7 @@ func countNotesIn(view *architecturekit.InMemoryView[string, noteItem]) httpapi.
 	}
 }
 
-func allNotes(*http.Request, user) (countNotes, error) { return countNotes{}, nil }
+func allNotes(*http.Request, httpapi.NoBody, user) (countNotes, error) { return countNotes{}, nil }
 
 // servingNotes wires one revisioned query onto a mux.
 func servingNotes(t *testing.T, view *architecturekit.InMemoryView[string, noteItem], wait time.Duration) *http.ServeMux {
@@ -58,14 +58,14 @@ func servingNotes(t *testing.T, view *architecturekit.InMemoryView[string, noteI
 	mux := http.NewServeMux()
 	api := httpapi.NewAPI(deadStore(t), userFrom)
 
-	httpapi.Query(api, mux, "GET /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, wait))
+	httpapi.Query(api, mux, "QUERY /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, wait))
 
 	return mux
 }
 
 // askNotes sends a request as a known user, with optional revision headers.
 func askNotes(mux *http.ServeMux, headers map[string]string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+	request := httptest.NewRequest("QUERY", "/notes", nil)
 	request.Header.Set("X-User", "someone")
 
 	for name, value := range headers {
@@ -81,7 +81,7 @@ func askNotes(mux *http.ServeMux, headers map[string]string) *httptest.ResponseR
 func TestQueryOptions(t *testing.T) {
 	answer := func(context.Context, countNotes) (int, error) { return 0, nil }
 	wire := func(options ...httpapi.QueryOption) {
-		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "GET /notes", allNotes, answer, options...)
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "QUERY /notes", allNotes, answer, options...)
 	}
 	day := func(*http.Request) string { return "2026-10-02" }
 
@@ -137,7 +137,7 @@ func TestQueryOptions(t *testing.T) {
 		view.Seen("3")
 
 		mux := http.NewServeMux()
-		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "GET /notes", allNotes, countNotesIn(view))
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes", allNotes, countNotesIn(view))
 
 		response := askNotes(mux, map[string]string{httpapi.HeaderWaitFor: "99"})
 
@@ -149,7 +149,7 @@ func TestQueryOptions(t *testing.T) {
 	t.Run("a view that is a function is revisioned", func(t *testing.T) {
 		// It is not nil, so the check has to let it through.
 		mux := http.NewServeMux()
-		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "GET /notes", allNotes, answer,
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes", allNotes, answer,
 			httpapi.Revisioned(revisionFunc(func() string { return "7" }), time.Second))
 
 		response := askNotes(mux, nil)
@@ -270,12 +270,12 @@ func TestRevisioned(t *testing.T) {
 		mux := http.NewServeMux()
 		api := httpapi.NewAPI(deadStore(t), userFrom)
 
-		httpapi.Query(api, mux, "GET /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
-		httpapi.Query(api, mux, "GET /other", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
+		httpapi.Query(api, mux, "QUERY /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
+		httpapi.Query(api, mux, "QUERY /other", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
 
 		tag := askNotes(mux, nil).Header().Get("ETag")
 
-		request := httptest.NewRequest(http.MethodGet, "/other", nil)
+		request := httptest.NewRequest("QUERY", "/other", nil)
 		request.Header.Set("X-User", "someone")
 		request.Header.Set("If-None-Match", tag)
 
@@ -301,7 +301,7 @@ func TestRevisioned(t *testing.T) {
 		view.Seen("1")
 
 		// No X-User header, so the request never gets as far as waiting.
-		request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+		request := httptest.NewRequest("QUERY", "/notes", nil)
 		request.Header.Set(httpapi.HeaderWaitFor, "99")
 
 		started := time.Now()
@@ -324,7 +324,7 @@ func TestRevisioned(t *testing.T) {
 			return 0, architecturekit.NewDomainError("nothing to count")
 		}
 
-		httpapi.Query(api, mux, "GET /notes", allNotes, failing, httpapi.Revisioned(view, time.Second))
+		httpapi.Query(api, mux, "QUERY /notes", allNotes, failing, httpapi.Revisioned(view, time.Second))
 
 		response := askNotes(mux, nil)
 
@@ -383,7 +383,7 @@ func TestIfNoneMatch(t *testing.T) {
 		{"the tag without its closing quote", []string{strings.TrimSuffix(tag, `"`)}, http.StatusOK},
 	} {
 		t.Run("with "+test.label+" is answered with "+strconv.Itoa(test.status), func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+			request := httptest.NewRequest("QUERY", "/notes", nil)
 			request.Header.Set("X-User", "someone")
 			for _, line := range test.lines {
 				request.Header.Add("If-None-Match", line)
@@ -404,16 +404,19 @@ func TestIfNoneMatch(t *testing.T) {
 	})
 }
 
-// The read side for a query whose input does not fit into the query string,
-// so that it is sent as the body of a POST request: it counts how many of the
-// given notes there are.
+// The read side for a query whose input is a list, which the body of the
+// request holds: it counts how many of the given notes there are.
 
-type findNotes struct {
+type findNotesRequest struct {
 	Texts []string `json:"texts"`
 }
 
-func toFindNotes(r *http.Request, _ user) (findNotes, error) {
-	return httpapi.BodyOf[findNotes](r)
+type findNotes struct {
+	Texts []string
+}
+
+func toFindNotes(_ *http.Request, request findNotesRequest, _ user) (findNotes, error) {
+	return findNotes(request), nil
 }
 
 func answerFindNotes(view *architecturekit.InMemoryView[string, noteItem]) httpapi.Answer[findNotes, int] {
@@ -449,11 +452,11 @@ func askWith(mux *http.ServeMux, method, target, body string, lines ...string) *
 	return recorder
 }
 
-// TestIfNoneMatchByMethod covers queries that are not read with GET or HEAD,
-// such as one that is sent as POST, since its input does not fit into the
-// query string. HTTP has 304 for GET and HEAD only, and 412 for every other
-// method (RFC 9110, 13.1.2).
-func TestIfNoneMatchByMethod(t *testing.T) {
+// TestIfNoneMatchWithABody covers a query that asks with a body. HTTP has 304
+// for QUERY, which it treats like GET (RFC 10008), and the tag holds the
+// query that the body is turned into, so a body that asks something else does
+// not match, while one that asks the same in other words does.
+func TestIfNoneMatchWithABody(t *testing.T) {
 	const found = `{"texts":["one","two"]}`
 
 	view := noteView()
@@ -463,16 +466,12 @@ func TestIfNoneMatchByMethod(t *testing.T) {
 	mux := http.NewServeMux()
 	api := httpapi.NewAPI(deadStore(t), userFrom)
 
-	httpapi.Query(api, mux, "GET /notes", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
-	httpapi.Query(api, mux, "POST /notes/found", toFindNotes, answerFindNotes(view), httpapi.Revisioned(view, time.Second))
+	httpapi.Query(api, mux, "QUERY /notes/found", toFindNotes, answerFindNotes(view), httpapi.Revisioned(view, time.Second))
 
-	// A pattern without a method takes every method.
-	httpapi.Query(api, mux, "/notes/any", allNotes, countNotesIn(view), httpapi.Revisioned(view, time.Second))
-
-	tagOf := func(t *testing.T, method, target, body string) string {
+	tagOf := func(t *testing.T, body string) string {
 		t.Helper()
 
-		response := askWith(mux, method, target, body)
+		response := askWith(mux, "QUERY", "/notes/found", body)
 		require.Equal(t, http.StatusOK, response.Code)
 
 		tag := response.Header().Get("ETag")
@@ -481,58 +480,17 @@ func TestIfNoneMatchByMethod(t *testing.T) {
 		return tag
 	}
 
-	t.Run("a GET with the tag is answered with 304", func(t *testing.T) {
-		tag := tagOf(t, http.MethodGet, "/notes", "")
+	t.Run("with the tag is answered with 304", func(t *testing.T) {
+		tag := tagOf(t, found)
 
-		response := askWith(mux, http.MethodGet, "/notes", "", tag)
-
-		require.Equal(t, http.StatusNotModified, response.Code)
-		assert.Empty(t, response.Body.String(), "304 carried a body")
-	})
-
-	t.Run("a HEAD with the tag is answered with 304", func(t *testing.T) {
-		tag := tagOf(t, http.MethodGet, "/notes", "")
-
-		response := askWith(mux, http.MethodHead, "/notes", "", tag)
+		response := askWith(mux, "QUERY", "/notes/found", found, tag)
 
 		require.Equal(t, http.StatusNotModified, response.Code)
 		assert.Empty(t, response.Body.String(), "304 carried a body")
-	})
 
-	t.Run("a POST with the tag is answered with 412", func(t *testing.T) {
-		tag := tagOf(t, http.MethodPost, "/notes/found", found)
-
-		response := askWith(mux, http.MethodPost, "/notes/found", found, tag)
-
-		require.Equal(t, http.StatusPreconditionFailed, response.Code)
-
-		assert.Equal(t, tag, response.Header().Get("ETag"), "412 says which answer is current, as 304 does")
+		assert.Equal(t, tag, response.Header().Get("ETag"), "304 says which answer is current")
 		assert.Equal(t, "4", response.Header().Get(httpapi.HeaderRevision))
 		assert.Equal(t, "private, no-cache", response.Header().Get("Cache-Control"))
-
-		assert.Equal(t, "application/json", response.Header().Get("Content-Type"))
-		assert.JSONEq(t, `{"message":"precondition failed: the current answer matches If-None-Match"}`, response.Body.String())
-	})
-
-	t.Run("a POST without the tag is answered in full", func(t *testing.T) {
-		tag := tagOf(t, http.MethodPost, "/notes/found", found)
-
-		for _, lines := range [][]string{nil, {`"other"`}, {`W/"other", "third"`}} {
-			response := askWith(mux, http.MethodPost, "/notes/found", found, lines...)
-
-			require.Equal(t, http.StatusOK, response.Code, "with %q", lines)
-			assert.Equal(t, "1\n", response.Body.String(), "with %q", lines)
-			assert.Equal(t, tag, response.Header().Get("ETag"), "with %q", lines)
-		}
-	})
-
-	t.Run("a POST that asks something else is answered in full", func(t *testing.T) {
-		tag := tagOf(t, http.MethodPost, "/notes/found", found)
-
-		response := askWith(mux, http.MethodPost, "/notes/found", `{"texts":["one"]}`, tag)
-
-		require.Equal(t, http.StatusOK, response.Code, "the tag of another body matched")
-		assert.Equal(t, "1\n", response.Body.String())
 	})
 
 	for _, test := range []struct {
@@ -544,46 +502,60 @@ func TestIfNoneMatchByMethod(t *testing.T) {
 		{"a list over several lines that holds the tag", func(tag string) []string { return []string{`"other"`, tag} }},
 		{"*", func(string) []string { return []string{"*"} }},
 	} {
-		t.Run("a POST with "+test.label+" is answered with 412", func(t *testing.T) {
-			tag := tagOf(t, http.MethodPost, "/notes/found", found)
+		t.Run("with "+test.label+" is answered with 304", func(t *testing.T) {
+			tag := tagOf(t, found)
 
-			response := askWith(mux, http.MethodPost, "/notes/found", found, test.lines(tag)...)
+			response := askWith(mux, "QUERY", "/notes/found", found, test.lines(tag)...)
 
-			require.Equal(t, http.StatusPreconditionFailed, response.Code)
+			require.Equal(t, http.StatusNotModified, response.Code)
 			assert.Equal(t, tag, response.Header().Get("ETag"))
 		})
 	}
 
-	t.Run("a POST with * is answered in full if the answer has no tag", func(t *testing.T) {
+	t.Run("without the tag is answered in full", func(t *testing.T) {
+		tag := tagOf(t, found)
+
+		for _, lines := range [][]string{nil, {`"other"`}, {`W/"other", "third"`}} {
+			response := askWith(mux, "QUERY", "/notes/found", found, lines...)
+
+			require.Equal(t, http.StatusOK, response.Code, "with %q", lines)
+			assert.Equal(t, "1\n", response.Body.String(), "with %q", lines)
+			assert.Equal(t, tag, response.Header().Get("ETag"), "with %q", lines)
+		}
+	})
+
+	t.Run("that asks something else is answered in full", func(t *testing.T) {
+		tag := tagOf(t, found)
+
+		response := askWith(mux, "QUERY", "/notes/found", `{"texts":["one"]}`, tag)
+
+		require.Equal(t, http.StatusOK, response.Code, "the tag of another body matched")
+		assert.Equal(t, "1\n", response.Body.String())
+	})
+
+	t.Run("that asks the same in other words is answered with 304", func(t *testing.T) {
+		tag := tagOf(t, found)
+
+		// Names match fields regardless of case, so both decode into the same
+		// query as found.
+		for _, body := range []string{`{ "texts" : [ "one", "two" ] }`, `{"Texts":["one","two"]}`} {
+			response := askWith(mux, "QUERY", "/notes/found", body, tag)
+
+			require.Equal(t, http.StatusNotModified, response.Code, "with %s", body)
+			assert.Equal(t, tag, response.Header().Get("ETag"), "with %s", body)
+		}
+	})
+
+	t.Run("with * is answered in full if the answer has no tag", func(t *testing.T) {
 		empty := http.NewServeMux()
 		nothing := noteView()
 
-		httpapi.Query(api, empty, "POST /notes/found", toFindNotes, answerFindNotes(nothing), httpapi.Revisioned(nothing, time.Second))
+		httpapi.Query(api, empty, "QUERY /notes/found", toFindNotes, answerFindNotes(nothing), httpapi.Revisioned(nothing, time.Second))
 
-		response := askWith(empty, http.MethodPost, "/notes/found", found, "*")
+		response := askWith(empty, "QUERY", "/notes/found", found, "*")
 
 		assert.Equal(t, http.StatusOK, response.Code, "an answer without a tag was taken for unchanged")
 	})
-
-	for method, status := range map[string]int{
-		http.MethodGet:     http.StatusNotModified,
-		http.MethodHead:    http.StatusNotModified,
-		"QUERY":            http.StatusNotModified,
-		http.MethodPost:    http.StatusPreconditionFailed,
-		http.MethodPut:     http.StatusPreconditionFailed,
-		http.MethodPatch:   http.StatusPreconditionFailed,
-		http.MethodDelete:  http.StatusPreconditionFailed,
-		http.MethodOptions: http.StatusPreconditionFailed,
-	} {
-		t.Run(method+" with the tag, on a route for every method, is answered with "+strconv.Itoa(status), func(t *testing.T) {
-			tag := tagOf(t, method, "/notes/any", "")
-
-			response := askWith(mux, method, "/notes/any", "", tag)
-
-			require.Equal(t, status, response.Code)
-			assert.Equal(t, tag, response.Header().Get("ETag"))
-		})
-	}
 }
 
 // The read side for callers who are told apart: everybody owns notes, and
@@ -605,7 +577,7 @@ func ownedNoteView() *architecturekit.InMemoryView[string, ownedNote] {
 
 // askOwnNotes builds the query from the caller, and refuses the one caller who
 // may not read notes at all.
-func askOwnNotes(_ *http.Request, caller user) (ownNotes, error) {
+func askOwnNotes(_ *http.Request, _ httpapi.NoBody, caller user) (ownNotes, error) {
 	if caller.UserID == "mallory" {
 		return ownNotes{}, httpapi.ErrForbidden
 	}
@@ -642,13 +614,13 @@ func servingOwnNotes(t *testing.T, wait time.Duration) *http.ServeMux {
 	mux := http.NewServeMux()
 	api := httpapi.NewAPI(deadStore(t), userFrom)
 
-	httpapi.Query(api, mux, "GET /notes", askOwnNotes, answerOwnNotes(view), httpapi.Revisioned(view, wait))
+	httpapi.Query(api, mux, "QUERY /notes", askOwnNotes, answerOwnNotes(view), httpapi.Revisioned(view, wait))
 
 	return mux
 }
 
 func askNotesAs(mux *http.ServeMux, caller string, headers map[string]string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(http.MethodGet, "/notes", nil)
+	request := httptest.NewRequest("QUERY", "/notes", nil)
 	request.Header.Set("X-User", caller)
 
 	for name, value := range headers {
@@ -736,8 +708,8 @@ func TestTagsOfCallers(t *testing.T) {
 
 		type filtered struct{ Keep func(noteItem) bool }
 
-		httpapi.Query(api, mux, "GET /notes",
-			func(*http.Request, user) (filtered, error) {
+		httpapi.Query(api, mux, "QUERY /notes",
+			func(*http.Request, httpapi.NoBody, user) (filtered, error) {
 				return filtered{Keep: func(noteItem) bool { return true }}, nil
 			},
 			func(context.Context, filtered) (int, error) { return 0, nil },
@@ -825,7 +797,7 @@ func TestVarying(t *testing.T) {
 		mux := http.NewServeMux()
 		api := httpapi.NewAPI(deadStore(t), userFrom)
 
-		httpapi.Query(api, mux, "GET /notes", allNotes, countNotesIn(view),
+		httpapi.Query(api, mux, "QUERY /notes", allNotes, countNotesIn(view),
 			httpapi.Revisioned(view, time.Second),
 			httpapi.Varying(func(*http.Request) string { return day }))
 

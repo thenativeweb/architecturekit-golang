@@ -119,15 +119,14 @@ type inMemoryViewOptions[TItem any] struct {
 // The view sets the field on every change, so handlers do not.
 //
 // The revision of an item fits a precondition on the last event of a subject,
-// such as eventsourcingdb.NewIsSubjectOnEventIDPrecondition, only if the item
-// stands for exactly one subject, and the projection applies every event type
-// of that subject to the item. Otherwise the two drift apart as soon as an
-// event lands in the subject that the view does not apply to the item, and
-// every command with the revision of the item fails with a conflict, until an
-// event changes the item again. For an event type the item does not change
-// for, such as one the state ignores, call Update with a change that does
-// nothing, which only moves the revision on. For an item that gathers several
-// subjects, use OnStateRead instead.
+// such as OnEventID, only if the item stands for exactly one subject, and the
+// projection applies every event type of that subject to the item. Otherwise
+// the two drift apart as soon as an event lands in the subject that the view
+// does not apply to the item, and every command with the revision of the item
+// fails with a conflict, until an event changes the item again. For an event
+// type the item does not change for, such as one the state ignores, call
+// Update with a change that does nothing, which only moves the revision on.
+// For an item that gathers several subjects, use OnStateRead instead.
 //
 // Without this option, the view keeps the revisions to itself.
 //
@@ -782,14 +781,13 @@ type appliedEvent struct {
 }
 
 // appliedEventOf reads the event a change of the view applies from its ID and
-// the context. It refuses an ID that CompareRevisions would refuse, so that the
-// view never keeps an ID it can not compare with the next one, and fails where
-// the mistake is made. Unlike a revision, the ID must not be empty either,
-// since an empty one would come before every revision, so that every change
-// with it would be skipped silently.
+// the context. It refuses an ID that ParseRevision refuses, so that the view
+// never keeps an ID it can not compare with the next one, and fails where the
+// mistake is made. That includes the empty ID, which would come before every
+// revision, so that every change with it would be skipped silently.
 func appliedEventOf(ctx context.Context, eventID string) (appliedEvent, error) {
-	number, isSet, err := revisionNumber(eventID)
-	if err != nil || !isSet {
+	number, err := ParseRevision(eventID)
+	if err != nil {
 		return appliedEvent{}, fmt.Errorf("%w: %w: an operation on a view needs the ID of the event it applies, not %q",
 			ErrPermanent, ErrNotARevision, eventID)
 	}

@@ -74,12 +74,18 @@ func TestStep(t *testing.T) {
 	t.Run("refuses a state that it cannot copy", func(t *testing.T) {
 		before := tally{Entries: []string{"3", "4"}}
 
+		// The error names every kind of value that a copy shares, since any of
+		// them makes a state need a Clone function.
+		const refused = "permanent failure: architecturekit_test.tally holds slices, maps, pointers, channels, " +
+			"functions or interfaces, so it needs a Clone function to be stepped without changing the given state"
+
 		_, err := architecturekit.Step(tallyState(), before, reset{})
 		require.ErrorIs(t, err, architecturekit.ErrPermanent, "a state without Clone is refused permanently")
-		assert.ErrorContains(t, err, "Clone", "the error should point to Clone")
+		assert.EqualError(t, err, refused)
 
 		_, err = architecturekit.StepStored(tallyState(), before, stored((reset{}).EventType(), `{}`))
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a state without Clone is refused permanently")
+		assert.EqualError(t, err, refused)
 
 		assert.Equal(t, []string{"3", "4"}, before.Entries, "the given state changed")
 	})

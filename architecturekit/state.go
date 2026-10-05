@@ -31,8 +31,8 @@ type Event interface {
 // events may be written.
 //
 // Preconditions is where optimistic concurrency, idempotency and uniqueness
-// live. Every command declares at least one, made with Require, OnStateRead, or
-// Unconditionally, and the kit adds none of its own.
+// live. Every command declares at least one (see Precondition), and the kit
+// adds none of its own.
 type Command interface {
 	Subject() string
 	Preconditions() []Precondition
@@ -85,14 +85,15 @@ type EventSchema struct {
 // a copy of it, in Execute, Load, Replay, and ReplayStored alike, so that an
 // Evolve rule never changes what the next read starts from.
 //
-// An initial value that consists of values only, or whose maps, slices and
-// pointers are nil, needs nothing else, since a copy shares no data with it.
-// One that holds a map, a slice with room for elements, or a pointer that is
-// not nil, at any depth, shares that with every copy, so the state needs a
-// Clone function to copy it. Without one, every read fails with an error of
-// the category ErrPermanent, rather than let an Evolve rule write into the
-// initial value. A slice without room for elements, such as []string{}, needs
-// none, since appending to it allocates a new array.
+// An initial value that consists of values only, or whose maps, slices,
+// pointers and channels are nil, needs nothing else, since a copy shares no
+// data with it. One that holds a map, a pointer or a channel that is not nil,
+// or a slice with room for elements, at any depth, shares that with every
+// copy, so the state needs a Clone function to copy it. Without one, every
+// read fails with an error of the category ErrPermanent, rather than let an
+// Evolve rule write into the initial value. A slice without room for
+// elements, such as []string{}, needs none, since appending to it allocates a
+// new array.
 func NewState[TState any](initial TState) *State[TState] {
 	return &State[TState]{
 		initial: initial,
@@ -223,9 +224,9 @@ func (s *State[TState]) FromLatest[TEvent Event]() *State[TState] {
 }
 
 // Clone lets a store with a state cache cache this state, although it holds
-// slices, maps or pointers. The function must return a copy that shares no
-// data with the original, so that changing one of them never changes the
-// other.
+// slices, maps, pointers, channels, functions or interfaces. The function must
+// return a copy that shares no data with the original, so that changing one of
+// them never changes the other.
 //
 // Without it, such a state is not cached, and every command reads its events
 // as without a cache, because commands that ran at the same time would
@@ -234,8 +235,9 @@ func (s *State[TState]) FromLatest[TEvent Event]() *State[TState] {
 //
 // The same function lets Step and StepStored leave the given state unchanged,
 // and copies the initial value at the start of every read. An initial value
-// that holds a map, a slice with room for elements, or a pointer that is not
-// nil needs it, since reading would change it otherwise (see NewState).
+// that holds a map, a pointer or a channel that is not nil, or a slice with
+// room for elements, needs it, since reading would change it otherwise (see
+// NewState).
 //
 // Calling Clone twice is a programming error, so it panics while the state is
 // being built.
@@ -280,8 +282,8 @@ func (s *State[TState]) copyOfInitial() (TState, error) {
 
 	if s.sharesInitial && s.clone == nil {
 		var zero TState
-		return zero, fmt.Errorf("%w: %s holds slices, maps or pointers in its initial value, so it needs a "+
-			"Clone function to start every read from a copy of the initial value", ErrPermanent, reflect.TypeFor[TState]())
+		return zero, fmt.Errorf("%w: %s holds slices, maps, pointers or channels in its initial value, so it "+
+			"needs a Clone function to start every read from a copy of the initial value", ErrPermanent, reflect.TypeFor[TState]())
 	}
 
 	return s.copyOf(s.initial), nil
@@ -323,10 +325,65 @@ func (s *State[TState]) checkRules(subject string, events []Event) error {
 	return nil
 }
 
-// Decider connects a state with the decision made on it.
+// Decider connects a state with the decision made on it. Create one with
+// NewDecider.
+//
+// The zero value, such as a variable that was declared but never set, has
+// neither a state nor a decision, so its State returns nil. Calling its
+// Decide, or handing it to Execute, to the test fixture of architecturekittest,
+// or to Route of httpapi is a programming error, so they panic, while Handle
+// fails with an error. Either way, the text names the mistake rather than a
+// nil pointer.
 type Decider[TCommand Command, TState any] struct {
-	State  *State[TState]
-	Decide func(ctx context.Context, cmd TCommand, state TState) ([]Event, error)
+	state  *State[TState]
+	decide func(ctx context.Context, cmd TCommand, state TState) ([]Event, error)
+}
+
+// NewDecider creates a decider that decides on the given state with the given
+// function. For every command, Execute reads the state of the subject of the
+// command, and decide returns the events to write, or an error if the command
+// is refused. The types of the command and the state come from the arguments,
+// so that none of them has to be given:
+//
+//	var borrowBook = architecturekit.NewDecider(bookState,
+//	  func(ctx context.Context, cmd BorrowBook, book Book) ([]architecturekit.Event, error) {
+//	    if book.IsBorrowed {
+//	      return nil, architecturekit.NewDomainError("book %s is already borrowed", cmd.BookID)
+//	    }
+//
+//	    return []architecturekit.Event{BookBorrowed{BorrowedBy: cmd.ReaderID}}, nil
+//	  })
+//
+// A nil state or a nil function is a programming error, so NewDecider panics,
+// rather than the first command failing.
+func NewDecider[TCommand Command, TState any](
+	state *State[TState],
+	decide func(ctx context.Context, cmd TCommand, state TState) ([]Event, error),
+) Decider[TCommand, TState] {
+	if state == nil {
+		panic("architecturekit: NewDecider needs a state, not nil")
+	}
+	if decide == nil {
+		panic("architecturekit: NewDecider needs a function that decides, not nil")
+	}
+
+	return Decider[TCommand, TState]{state: state, decide: decide}
+}
+
+// State returns the state the decider decides on, or nil for the zero value.
+func (d Decider[TCommand, TState]) State() *State[TState] {
+	return d.state
+}
+
+// Decide decides on a command, given the state, with the function the decider
+// was created with, and returns what that function returns. The zero value
+// has no such function, so it panics, naming the mistake.
+func (d Decider[TCommand, TState]) Decide(ctx context.Context, cmd TCommand, state TState) ([]Event, error) {
+	if d.decide == nil {
+		panic("architecturekit: Decide needs a decider made with NewDecider, not the zero Decider")
+	}
+
+	return d.decide(ctx, cmd, state)
 }
 
 // Replay folds a sequence of events into a state. It is meant for tests, where
@@ -392,10 +449,10 @@ func ReplayStored[TState any](
 // unchanged, so that the state before and after the event are both at hand,
 // e.g. for a history that tells what an event changed.
 //
-// So that current stays unchanged, a state that holds slices, maps or
-// pointers needs a Clone function; without one, Step fails permanently. A
-// state that consists of values only needs none. If the event fails, Step
-// returns current.
+// So that current stays unchanged, a state that holds slices, maps, pointers,
+// channels, functions or interfaces needs a Clone function; without one, Step
+// fails permanently. A state that consists of values only needs none. If the
+// event fails, Step returns current.
 func Step[TState any](state *State[TState], current TState, event Event) (TState, error) {
 	if err := state.checkCopyable(); err != nil {
 		return current, err
@@ -437,8 +494,8 @@ func (s *State[TState]) checkCopyable() error {
 		return nil
 	}
 
-	return fmt.Errorf("%w: %s holds slices, maps or pointers, so it needs a Clone function "+
-		"to be stepped without changing the given state", ErrPermanent, reflect.TypeFor[TState]())
+	return fmt.Errorf("%w: %s holds slices, maps, pointers, channels, functions or interfaces, so it needs a "+
+		"Clone function to be stepped without changing the given state", ErrPermanent, reflect.TypeFor[TState]())
 }
 
 // evolveBy applies the rule for a typed event.

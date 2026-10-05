@@ -29,7 +29,7 @@ type pageOfNotes struct {
 }
 
 // toPageOfNotes takes the event from the query string, without checking it.
-func toPageOfNotes(r *http.Request, _ user) (pageOfNotes, error) {
+func toPageOfNotes(r *http.Request, _ httpapi.NoBody, _ user) (pageOfNotes, error) {
 	return pageOfNotes{After: r.URL.Query().Get("after")}, nil
 }
 
@@ -86,8 +86,9 @@ func messageOf(t *testing.T, message string) string {
 }
 
 func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
-	const notARevision = `architecturekit: not a revision: "abc"`
-	const notABound = `architecturekit: not a revision: reading "/note": AfterEvent("abc") needs the ID of an event`
+	// The caller knows neither the subject nor the option of Read, so the
+	// text names the value only, wherever it is refused.
+	const notARevision = `not a revision: "abc"`
 
 	queries := map[string]struct {
 		wire    func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux)
@@ -95,26 +96,26 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 	}{
 		"a query answers a bound of Read that is not the ID of an event": {
 			wire: func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux) {
-				httpapi.Query(api, mux, "GET /notes", toPageOfNotes, readingNotesAfter(emptyDatabase(t, false)))
+				httpapi.Query(api, mux, "QUERY /notes", toPageOfNotes, readingNotesAfter(emptyDatabase(t, false)))
 			},
-			message: notABound,
+			message: notARevision,
 		},
 		"a revisioned query answers a bound of Read that is not the ID of an event": {
 			wire: func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux) {
-				httpapi.Query(api, mux, "GET /notes", toPageOfNotes, readingNotesAfter(emptyDatabase(t, false)),
+				httpapi.Query(api, mux, "QUERY /notes", toPageOfNotes, readingNotesAfter(emptyDatabase(t, false)),
 					httpapi.Revisioned(noteView(), time.Second))
 			},
-			message: notABound,
+			message: notARevision,
 		},
 		"a query answers a revision to compare that is not one": {
 			wire: func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux) {
-				httpapi.Query(api, mux, "GET /notes", toPageOfNotes, comparingWith(noteView()))
+				httpapi.Query(api, mux, "QUERY /notes", toPageOfNotes, comparingWith(noteView()))
 			},
 			message: notARevision,
 		},
 		"a query answers a revision to wait for that is not one": {
 			wire: func(t *testing.T, api *httpapi.API[user], mux *http.ServeMux) {
-				httpapi.Query(api, mux, "GET /notes", toPageOfNotes, waitingIn(noteView()))
+				httpapi.Query(api, mux, "QUERY /notes", toPageOfNotes, waitingIn(noteView()))
 			},
 			message: notARevision,
 		},
@@ -141,7 +142,7 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 
 	t.Run("a query answers a bound of Read that is the ID of an event", func(t *testing.T) {
 		mux := http.NewServeMux()
-		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "GET /notes", toPageOfNotes, readingNotesAfter(emptyDatabase(t, false)))
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, "QUERY /notes", toPageOfNotes, readingNotesAfter(emptyDatabase(t, false)))
 
 		response := ask(t, mux, "/notes?after=0", "golo")
 
@@ -159,7 +160,7 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, httpapi.StatusFor(err))
 	})
 
-	t.Run("Respond and RespondResult answer it with 400 and the error, without logging it", func(t *testing.T) {
+	t.Run("Respond, RespondResult, and RespondError answer it with 400 and the error, without logging it", func(t *testing.T) {
 		_, refused := architecturekit.CompareRevisions("abc", "")
 		require.ErrorIs(t, refused, architecturekit.ErrNotARevision)
 
@@ -169,6 +170,9 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 			},
 			"RespondResult": func(w http.ResponseWriter, r *http.Request, api *httpapi.API[user]) {
 				httpapi.RespondResult(w, r, api, []noteResponse(nil), refused)
+			},
+			"RespondError": func(w http.ResponseWriter, r *http.Request, api *httpapi.API[user]) {
+				httpapi.RespondError(w, r, api, refused)
 			},
 		}
 
@@ -193,7 +197,7 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 		var logs bytes.Buffer
 		api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
 		mux := http.NewServeMux()
-		httpapi.Query(api, mux, "GET /notes", toPageOfNotes, func(context.Context, pageOfNotes) ([]string, error) {
+		httpapi.Query(api, mux, "QUERY /notes", toPageOfNotes, func(context.Context, pageOfNotes) ([]string, error) {
 			_, err := architecturekit.CompareRevisions("broken", "0")
 			return nil, fmt.Errorf("%w: the view holds %w", architecturekit.ErrPermanent, err)
 		})
@@ -203,6 +207,6 @@ func TestAnsweringAValueThatIsNotARevision(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, response.Code)
 		assert.JSONEq(t, `{"message": "internal server error"}`, response.Body.String())
 		assert.Equal(t, 1, strings.Count(logs.String(), "httpapi: internal failure"))
-		assert.Contains(t, logs.String(), "the view holds architecturekit: not a revision")
+		assert.Contains(t, logs.String(), "the view holds not a revision")
 	})
 }

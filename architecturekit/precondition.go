@@ -10,7 +10,9 @@ import (
 // written. Every command declares at least one, so that writing without any
 // check is always a decision, never an oversight.
 //
-// Create one with Require, OnStateRead, or Unconditionally.
+// Create one with OnPristineSubject, OnPopulatedSubject, OnEventID,
+// OnStateRead, or Unconditionally, or with Require for any other precondition
+// of the client SDK, such as an EventQL query.
 type Precondition struct {
 	kind     preconditionKind
 	database eventsourcingdb.Precondition
@@ -24,12 +26,44 @@ const (
 	unconditionallyKind
 )
 
-// Require makes a precondition of the client SDK one of the command, for
-// example a revision the caller hands over:
+// Require makes a precondition of the client SDK one of the command, for one
+// that the kit has no function of its own for, such as an EventQL query:
 //
-//	architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition(c.Subject(), c.ExpectedEventID))
+//	architecturekit.Require(eventsourcingdb.NewIsEventQLQueryTruePrecondition(query))
+//
+// For a subject that has to be pristine or populated, or on a certain event,
+// use OnPristineSubject, OnPopulatedSubject, or OnEventID, which need no
+// import of the client SDK.
 func Require(precondition eventsourcingdb.Precondition) Precondition {
 	return Precondition{kind: requiredKind, database: precondition}
+}
+
+// OnPristineSubject lets the events be written only if the subject has no
+// events yet, which is what a command that creates something usually
+// declares. It is the same as Require with
+// eventsourcingdb.NewIsSubjectPristinePrecondition.
+func OnPristineSubject(subject string) Precondition {
+	return Require(eventsourcingdb.NewIsSubjectPristinePrecondition(subject))
+}
+
+// OnPopulatedSubject lets the events be written only if the subject has events
+// already, for a command that acts on something that has to exist. It is the
+// same as Require with eventsourcingdb.NewIsSubjectPopulatedPrecondition.
+func OnPopulatedSubject(subject string) Precondition {
+	return Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition(subject))
+}
+
+// OnEventID lets the events be written only if the last event of the subject
+// is the one with the given ID, for a command that was decided on a revision
+// the caller hands over:
+//
+//	architecturekit.OnEventID(c.Subject(), c.ExpectedEventID)
+//
+// It is the same as Require with
+// eventsourcingdb.NewIsSubjectOnEventIDPrecondition. For the revision of the
+// state that Execute reads, use OnStateRead instead.
+func OnEventID(subject, eventID string) Precondition {
+	return Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition(subject, eventID))
 }
 
 // OnStateRead lets the events be written only if nothing has been written to
@@ -49,7 +83,9 @@ func Unconditionally() Precondition {
 }
 
 // Database returns the precondition of the client SDK that Require made this
-// one from, or false if it was not made with Require.
+// one from, or false if it was not made with Require. OnPristineSubject,
+// OnPopulatedSubject, and OnEventID make theirs with Require, so they return
+// one as well.
 func (p Precondition) Database() (eventsourcingdb.Precondition, bool) {
 	return p.database, p.kind == requiredKind
 }
@@ -67,10 +103,11 @@ func (p Precondition) IsUnconditional() bool {
 
 // CheckPreconditions fails with an error of the category ErrPermanent if a
 // command declares its preconditions in a way Execute can not honor: none at
-// all, a requirement of nil, Unconditionally together with others, or one not
-// made with Require, OnStateRead, or Unconditionally. Execute checks this
-// before it reads anything, and the test fixture of architecturekittest uses
-// CheckPreconditions to refuse such a command the same way.
+// all, a requirement of nil, Unconditionally together with others, or a zero
+// Precondition, which none of the functions that create one returns. Execute
+// checks this before it reads anything, and the test fixture of
+// architecturekittest uses CheckPreconditions to refuse such a command the
+// same way.
 func CheckPreconditions(cmd Command) error {
 	_, err := checkPreconditions(cmd)
 	return err
@@ -99,8 +136,8 @@ func checkPreconditions(cmd Command) ([]Precondition, error) {
 					ErrPermanent, cmd)
 			}
 		default:
-			return nil, fmt.Errorf("%w: %T declares a precondition not made with Require, OnStateRead, or Unconditionally",
-				ErrPermanent, cmd)
+			return nil, fmt.Errorf("%w: %T declares a zero Precondition, which none of OnPristineSubject, "+
+				"OnPopulatedSubject, OnEventID, OnStateRead, Require, or Unconditionally returns", ErrPermanent, cmd)
 		}
 	}
 

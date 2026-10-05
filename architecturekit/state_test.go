@@ -1,6 +1,8 @@
 package architecturekit_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -130,5 +132,88 @@ func TestDomainError(t *testing.T) {
 
 		var domainError *architecturekit.DomainError
 		assert.ErrorAs(t, err, &domainError)
+	})
+}
+
+// contextKey marks the context that a test hands to a decider, so that the
+// test can tell that the decider received it.
+type contextKey struct{}
+
+func TestNewDecider(t *testing.T) {
+	t.Run("creates a decider that decides on the given state with the given function", func(t *testing.T) {
+		state := counterState()
+
+		var (
+			receivedContext context.Context
+			receivedCommand increment
+			receivedState   counter
+		)
+
+		// The types of the command and the state are inferred from the
+		// arguments, so that none of them has to be given.
+		decider := architecturekit.NewDecider(state,
+			func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+				receivedContext, receivedCommand, receivedState = ctx, cmd, current
+				return []architecturekit.Event{incremented{By: cmd.By}}, errors.New("refused for the test")
+			})
+
+		assert.Same(t, state, decider.State())
+
+		ctx := context.WithValue(context.Background(), contextKey{}, "the context of the test")
+		events, err := decider.Decide(ctx, increment{subject: "/counter/1", By: 2}, counter{Total: 40})
+
+		assert.Equal(t, []architecturekit.Event{incremented{By: 2}}, events)
+		assert.EqualError(t, err, "refused for the test")
+		assert.Equal(t, "the context of the test", receivedContext.Value(contextKey{}))
+		assert.Equal(t, increment{subject: "/counter/1", By: 2}, receivedCommand)
+		assert.Equal(t, counter{Total: 40}, receivedState)
+	})
+
+	t.Run("panics for a nil state", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: NewDecider needs a state, not nil", func() {
+			architecturekit.NewDecider(nil,
+				func(context.Context, increment, counter) ([]architecturekit.Event, error) { return nil, nil })
+		})
+	})
+
+	t.Run("panics for a nil function that decides", func(t *testing.T) {
+		assert.PanicsWithValue(t, "architecturekit: NewDecider needs a function that decides, not nil", func() {
+			architecturekit.NewDecider[increment](counterState(), nil)
+		})
+	})
+}
+
+func TestDecider(t *testing.T) {
+	t.Run("has no state as the zero value", func(t *testing.T) {
+		var decider architecturekit.Decider[increment, counter]
+
+		assert.Nil(t, decider.State())
+	})
+
+	t.Run("panics in Decide as the zero value, naming the mistake", func(t *testing.T) {
+		var decider architecturekit.Decider[increment, counter]
+
+		assert.PanicsWithValue(t, "architecturekit: Decide needs a decider made with NewDecider, not the zero Decider", func() {
+			_, _ = decider.Decide(context.Background(), increment{subject: "/counter/1", By: 1}, counter{})
+		})
+	})
+
+	t.Run("panics in Execute as the zero value, naming the mistake", func(t *testing.T) {
+		var decider architecturekit.Decider[increment, counter]
+		store := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
+
+		assert.PanicsWithValue(t, "architecturekit: Execute needs a decider made with NewDecider, not the zero Decider", func() {
+			_, _ = architecturekit.Execute(context.Background(), store, decider, increment{subject: "/counter/1", By: 1})
+		})
+	})
+
+	t.Run("panics in Execute as the zero value before it checks the command", func(t *testing.T) {
+		var decider architecturekit.Decider[increment, counter]
+		store := architecturekit.NewStore(deadClient(t), "https://thenativeweb.io")
+
+		// The command declares no precondition, which Execute refuses.
+		assert.PanicsWithValue(t, "architecturekit: Execute needs a decider made with NewDecider, not the zero Decider", func() {
+			_, _ = architecturekit.Execute(context.Background(), store, decider, increment{subject: "/counter/1", By: 1}.declaring())
+		})
 	})
 }

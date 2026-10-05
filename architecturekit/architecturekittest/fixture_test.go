@@ -14,8 +14,13 @@ import (
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// spy captures the fixture's failure messages instead of ending a test.
+// spy captures the fixture's failure messages instead of ending a test. It
+// embeds testing.TB, which has an unexported method, so that it is one, and
+// overrides what the fixtures use. The embedded testing.TB is nil, so a
+// fixture that used anything else would panic.
 type spy struct {
+	testing.TB
+
 	failures []string
 }
 
@@ -192,9 +197,8 @@ var (
 )
 
 func decider() architecturekit.Decider[open, account] {
-	return architecturekit.Decider[open, account]{
-		State: accountState(),
-		Decide: func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(accountState(),
+		func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
 			if current.IsOpen {
 				return nil, fmt.Errorf("%w: owned by %s", errAccountAlreadyOpen, current.Owner)
 			}
@@ -210,8 +214,7 @@ func decider() architecturekit.Decider[open, account] {
 			}
 
 			return []architecturekit.Event{opened{Owner: cmd.Owner}}, nil
-		},
-	}
+		})
 }
 
 // emitDecider emits exactly what it was handed, which is how the tests reach
@@ -243,12 +246,10 @@ func emitDecider() architecturekit.Decider[emit, account] {
 
 // emitDeciderOn emits exactly what it was handed, on the given state.
 func emitDeciderOn(state *architecturekit.State[account]) architecturekit.Decider[emit, account] {
-	return architecturekit.Decider[emit, account]{
-		State: state,
-		Decide: func(ctx context.Context, cmd emit, _ account) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(state,
+		func(ctx context.Context, cmd emit, _ account) ([]architecturekit.Event, error) {
 			return cmd.events, nil
-		},
-	}
+		})
 }
 
 // --- the happy paths and the fixture's own failure paths ---
@@ -266,6 +267,14 @@ func TestGiven(t *testing.T) {
 		architecturekittest.Given(recorder, decider(), unheardOf{})
 
 		recorder.expectFailure(t, "given:")
+	})
+
+	t.Run("panics for the zero Decider, naming the mistake", func(t *testing.T) {
+		var zeroDecider architecturekit.Decider[open, account]
+
+		assert.PanicsWithValue(t, "architecturekittest: Given needs a decider made with NewDecider, not the zero Decider", func() {
+			architecturekittest.Given(t, zeroDecider)
+		})
 	})
 }
 
@@ -355,7 +364,7 @@ func TestThenFailed(t *testing.T) {
 
 		require.Len(t, recorder.failures, 1)
 		assert.Equal(t,
-			"expected an error matching architecturekit: domain rule violated, got 1 event(s): [test.account.opened]",
+			"expected an error matching domain rule violated, got 1 event(s): [test.account.opened]",
 			recorder.firstFailure())
 	})
 
@@ -367,7 +376,7 @@ func TestThenFailed(t *testing.T) {
 			ThenFailed(architecturekit.ErrTransient)
 
 		recorder.expectFailure(t,
-			"expected an error matching architecturekit: transient failure, got account is already open")
+			"expected an error matching transient failure, got account is already open")
 	})
 }
 
@@ -415,6 +424,14 @@ func TestGivenStored(t *testing.T) {
 		})
 
 		recorder.expectFailure(t, "given stored:")
+	})
+
+	t.Run("panics for the zero Decider, naming the mistake", func(t *testing.T) {
+		var zeroDecider architecturekit.Decider[open, account]
+
+		assert.PanicsWithValue(t, "architecturekittest: GivenStored needs a decider made with NewDecider, not the zero Decider", func() {
+			architecturekittest.GivenStored(t, zeroDecider)
+		})
 	})
 }
 
@@ -511,6 +528,23 @@ func TestPreconditionsOf(t *testing.T) {
 				architecturekittest.OnEventID("/account/3", "9"),
 				architecturekittest.OnQuery("FROM e IN events PROJECT INTO true"),
 				architecturekittest.OnStateRead(),
+			)
+	})
+
+	t.Run("the preconditions of the kit that need no client SDK", func(t *testing.T) {
+		architecturekittest.Given(t, decider()).
+			When(open{
+				Owner: "golo",
+				preconditions: []architecturekit.Precondition{
+					architecturekit.OnPristineSubject("/account/1"),
+					architecturekit.OnPopulatedSubject("/account/2"),
+					architecturekit.OnEventID("/account/3", "9"),
+				},
+			}).
+			ThenPreconditions(
+				architecturekittest.OnPristineSubject("/account/1"),
+				architecturekittest.OnPopulatedSubject("/account/2"),
+				architecturekittest.OnEventID("/account/3", "9"),
 			)
 	})
 
@@ -859,7 +893,7 @@ func TestWhenChecksPreconditions(t *testing.T) {
 		{
 			name:          "a zero value",
 			preconditions: []architecturekit.Precondition{{}},
-			cause:         "not made with Require, OnStateRead, or Unconditionally",
+			cause:         "declares a zero Precondition, which none of OnPristineSubject, OnPopulatedSubject, OnEventID, OnStateRead, Require, or Unconditionally returns",
 		},
 		{
 			name:          "a requirement of nothing",
@@ -917,10 +951,11 @@ func TestWhenChecksPreconditions(t *testing.T) {
 
 		spying := decider()
 		decide := spying.Decide
-		spying.Decide = func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
-			decided = true
-			return decide(ctx, cmd, current)
-		}
+		spying = architecturekit.NewDecider(spying.State(),
+			func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
+				decided = true
+				return decide(ctx, cmd, current)
+			})
 
 		architecturekittest.Given(t, spying).
 			When(open{Owner: "golo", preconditions: []architecturekit.Precondition{}}).
@@ -1057,9 +1092,34 @@ func TestThenPreconditions(t *testing.T) {
 
 func TestSpy(t *testing.T) {
 	t.Run("Helper is harmless", func(t *testing.T) {
-		// Helper only exists to satisfy the interface.
+		// Helper only exists so that the spy takes the place of a test, with
+		// nothing to mark as a helper.
 		recorder := &spy{}
 		recorder.Helper()
 		recorder.expectNoFailure(t)
+	})
+}
+
+func TestTestingTB(t *testing.T) {
+	t.Run("is what every fixture takes", func(t *testing.T) {
+		// The fixtures take the testing.TB of the standard library, not an
+		// interface of the kit's own, so that a function of a type with
+		// testing.TB, such as a helper that tests and benchmarks share, can
+		// be one of them.
+		var (
+			_ func(testing.TB, architecturekit.Decider[open, account], ...architecturekit.Event) *architecturekittest.Fixture[open, account] = architecturekittest.Given[open, account]
+
+			_ func(testing.TB, architecturekit.Decider[open, account], ...eventsourcingdb.Event) *architecturekittest.Fixture[open, account] = architecturekittest.GivenStored[open, account]
+
+			_ func(testing.TB, architecturekit.Projection, ...eventsourcingdb.Event) = architecturekittest.Project
+
+			_ func(testing.TB, architecturekit.Transactional, ...eventsourcingdb.Event) = architecturekittest.ProjectTransactional
+
+			_ func(testing.TB, architecturekit.View[owner]) []owner = architecturekittest.ItemsOf[owner]
+
+			_ func(testing.TB, architecturekit.Projection, architecturekit.Mode) = architecturekittest.ExpectMode
+
+			_ func(testing.TB, architecturekit.View[owner], ...owner) = architecturekittest.ExpectItems[owner]
+		)
 	})
 }

@@ -113,9 +113,8 @@ func counterState() *architecturekit.State[counter] {
 }
 
 func counterDecider() architecturekit.Decider[increment, counter] {
-	return architecturekit.Decider[increment, counter]{
-		State: counterState(),
-		Decide: func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(counterState(),
+		func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
 			if cmd.By == 0 {
 				return nil, nil
 			}
@@ -123,8 +122,7 @@ func counterDecider() architecturekit.Decider[increment, counter] {
 				return nil, architecturekit.NewDomainError("limit of %d would be exceeded", cmd.Limit)
 			}
 			return []architecturekit.Event{incremented{By: cmd.By}}, nil
-		},
-	}
+		})
 }
 
 // subjectFor gives every test its own subject, so that tests do not interfere
@@ -219,10 +217,8 @@ func (c annotate) Preconditions() []architecturekit.Precondition {
 
 // noteDecider emits exactly the event it was handed.
 func noteDecider() architecturekit.Decider[annotate, note] {
-	return architecturekit.Decider[annotate, note]{
-		State: noteState(),
-		Decide: func(ctx context.Context, cmd annotate, current note) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(noteState(),
+		func(ctx context.Context, cmd annotate, current note) ([]architecturekit.Event, error) {
 			return []architecturekit.Event{cmd.event}, nil
-		},
-	}
+		})
 }

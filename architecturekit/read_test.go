@@ -443,8 +443,8 @@ func TestReadWithInvalidEventIDs(t *testing.T) {
 				assert.ErrorIs(t, errs[0], architecturekit.ErrNotARevision)
 				assert.NotErrorIs(t, errs[0], architecturekit.ErrPermanent)
 				assert.NotErrorIs(t, errs[0], architecturekit.ErrTransient)
-				assert.EqualError(t, errs[0],
-					`architecturekit: not a revision: reading "/books/42": `+name+`("`+id+`") needs the ID of an event`)
+				assert.EqualError(t, errs[0], `not a revision: "`+id+`"`,
+					"the text is for the caller, who knows neither the subject nor the option")
 				assert.False(t, asked.Load(), "the database must not be asked")
 			})
 		}
@@ -457,8 +457,18 @@ func TestReadWithInvalidEventIDs(t *testing.T) {
 			architecturekit.FromEvent("1"), architecturekit.BeforeEvent("abc"))
 
 		require.Len(t, errs, 1)
-		assert.EqualError(t, errs[0], `architecturekit: not a revision: reading "/books/42": BeforeEvent("abc") needs the ID of an event`)
+		assert.EqualError(t, errs[0], `not a revision: "abc"`)
 		assert.False(t, asked.Load(), "the database must not be asked")
+	})
+
+	t.Run("refuses the lower bound first, if neither is fine", func(t *testing.T) {
+		store, _ := unaskedDatabase(t)
+
+		_, errs := readAll(t, store, architecturekit.ExactSubject("/books/42"),
+			architecturekit.AfterEvent("abc"), architecturekit.UpToEvent("xyz"))
+
+		require.Len(t, errs, 1)
+		assert.EqualError(t, errs[0], `not a revision: "abc"`)
 	})
 
 	t.Run("asks the database for IDs that are fine", func(t *testing.T) {

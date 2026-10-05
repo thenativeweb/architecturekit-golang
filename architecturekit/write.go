@@ -24,14 +24,14 @@ type EventOn struct {
 // ErrConflict. Write never decides again on a conflict, since there is nothing
 // to decide.
 //
-// Like a command, a write declares at least one precondition, made with
-// Require, or Unconditionally to write without any. OnStateRead has nothing to
-// guard, since Write reads no state. That, an event without a subject or one
-// that is nil, and the other mistakes Execute refuses in the preconditions of
-// a command make Write fail with an error of the category ErrPermanent,
-// without writing anything. A nil pointer of a concrete type counts as nil.
-// So does an event whose data can not be encoded as JSON, for example because
-// it holds a float NaN, as with Execute.
+// Like a command, a write declares at least one precondition, such as
+// OnPristineSubject or one made with Require, or Unconditionally to write
+// without any. OnStateRead has nothing to guard, since Write reads no state.
+// That, an event without a subject or one that is nil, and the other mistakes
+// Execute refuses in the preconditions of a command make Write fail with an
+// error of the category ErrPermanent, without writing anything. A nil pointer
+// of a concrete type counts as nil. So does an event whose data can not be
+// encoded as JSON, for example because it holds a float NaN, as with Execute.
 // Writing no events writes nothing and returns nil, but the preconditions are
 // checked first, so a write of no events still declares them, for example
 // with Unconditionally.
@@ -99,15 +99,15 @@ func writePreconditions(declared []Precondition) ([]eventsourcingdb.Precondition
 			}
 			resolved = append(resolved, precondition.database)
 		case onStateReadKind:
-			return nil, fmt.Errorf("%w: a write reads no state, so OnStateRead has nothing to guard, use Require instead",
-				ErrPermanent)
+			return nil, fmt.Errorf("%w: a write reads no state, so OnStateRead has nothing to guard, "+
+				"use OnPristineSubject, OnPopulatedSubject, OnEventID, or Require instead", ErrPermanent)
 		case unconditionallyKind:
 			if len(declared) > 1 {
 				return nil, fmt.Errorf("%w: a write combines Unconditionally with other preconditions", ErrPermanent)
 			}
 		default:
-			return nil, fmt.Errorf("%w: a write declares a precondition not made with Require or Unconditionally",
-				ErrPermanent)
+			return nil, fmt.Errorf("%w: a write declares a zero Precondition, which none of OnPristineSubject, "+
+				"OnPopulatedSubject, OnEventID, OnStateRead, Require, or Unconditionally returns", ErrPermanent)
 		}
 	}
 

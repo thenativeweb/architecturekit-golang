@@ -172,23 +172,20 @@ func readSettingsOf(subjects Subjects, options []ReadOption) readSettings {
 	return settings
 }
 
-// invalidBound returns the option of a bound whose ID is not the ID of an
-// event, or an empty string if both bounds are fine. FromLatestEvent has no ID,
-// and leaves the lower bound of the database empty.
-func (s readSettings) invalidBound() string {
-	switch {
-	case s.database.LowerBound != nil && !isEventID(s.database.LowerBound.ID):
-		return s.lowerBound
-	case s.database.UpperBound != nil && !isEventID(s.database.UpperBound.ID):
-		return s.upperBound
-	default:
-		return ""
-	}
-}
+// checkBounds returns the error of ParseRevision for the first bound whose ID
+// is not the ID of an event, which, unlike a revision, an empty ID is not, the
+// lower bound first, or nil if both bounds are fine. FromLatestEvent has no
+// ID, and leaves the lower bound of the database empty.
+func (s readSettings) checkBounds() error {
+	for _, bound := range []*eventsourcingdb.Bound{s.database.LowerBound, s.database.UpperBound} {
+		if bound == nil {
+			continue
+		}
 
-// isEventID tells whether the ID can be the one of an event, which, unlike a
-// revision, an empty ID can not.
-func isEventID(id string) bool {
-	_, isSet, err := revisionNumber(id)
-	return err == nil && isSet
+		if _, err := ParseRevision(bound.ID); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

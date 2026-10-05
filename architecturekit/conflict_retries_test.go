@@ -24,9 +24,8 @@ func interferingDecider(t *testing.T, times int) (architecturekit.Decider[increm
 	counted := &interfered{}
 	decide := counterDecider().Decide
 
-	return architecturekit.Decider[increment, counter]{
-		State: counterState(),
-		Decide: func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(counterState(),
+		func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
 			counted.decisions++
 
 			if counted.decisions <= times {
@@ -40,8 +39,7 @@ func interferingDecider(t *testing.T, times int) (architecturekit.Decider[increm
 			}
 
 			return decide(ctx, cmd, current)
-		},
-	}, counted
+		}), counted
 }
 
 func retryingStore(t *testing.T, retries int) *architecturekit.Store {
@@ -120,10 +118,11 @@ func TestWithConflictRetries(t *testing.T) {
 
 		decider, counted := interferingDecider(t, 10)
 		decide := decider.Decide
-		decider.Decide = func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
-			cancel()
-			return decide(ctx, cmd, current)
-		}
+		decider = architecturekit.NewDecider(decider.State(),
+			func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+				cancel()
+				return decide(ctx, cmd, current)
+			})
 
 		_, err := architecturekit.Execute(ctx, retryingStore(t, 2), decider,
 			increment{subject: subjectFor(t), By: 1}.onStateRead())

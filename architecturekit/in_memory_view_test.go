@@ -355,7 +355,7 @@ func TestInMemoryView(t *testing.T) {
 
 						assert.ErrorIs(t, err, architecturekit.ErrPermanent)
 						assert.ErrorIs(t, err, architecturekit.ErrNotARevision)
-						assert.EqualError(t, err, "architecturekit: permanent failure: architecturekit: not a revision: "+
+						assert.EqualError(t, err, "permanent failure: not a revision: "+
 							"an operation on a view needs the ID of the event it applies, not "+strconv.Quote(eventID))
 						assert.Zero(t, result, "an error comes without an outcome or a count")
 						assert.False(t, fixture.ran, "a function that was handed over must not run")
@@ -1003,8 +1003,7 @@ func projectIncrementAndReset(t *testing.T, followsResets bool) (counterItem, []
 func TestRevisionIn(t *testing.T) {
 	// The decider ignores resets, as a state does with events that matter for no
 	// decision.
-	decider := counterDecider()
-	decider.State = resetIgnoringState()
+	decider := architecturekit.NewDecider(resetIgnoringState(), counterDecider().Decide)
 
 	t.Run("panics on a nil function", func(t *testing.T) {
 		assert.PanicsWithValue(t, "architecturekit: RevisionIn needs a function, not nil", func() {

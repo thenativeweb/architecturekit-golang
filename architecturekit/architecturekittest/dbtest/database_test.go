@@ -48,12 +48,10 @@ var journalState = architecturekit.NewState(journal{}).
 		return current
 	})
 
-var enterDecider = architecturekit.Decider[enter, journal]{
-	State: journalState,
-	Decide: func(_ context.Context, cmd enter, _ journal) ([]architecturekit.Event, error) {
+var enterDecider = architecturekit.NewDecider(journalState,
+	func(_ context.Context, cmd enter, _ journal) ([]architecturekit.Event, error) {
 		return []architecturekit.Event{entered{Text: cmd.Text}}, nil
-	},
-}
+	})
 
 const journalSource = "https://architecturekit.test"
 

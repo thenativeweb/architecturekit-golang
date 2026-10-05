@@ -21,7 +21,7 @@ import (
 // how long a projection takes.
 
 // ErrNotARevision means a revision could not be read as one.
-var ErrNotARevision = errors.New("architecturekit: not a revision")
+var ErrNotARevision = errors.New("not a revision")
 
 // Revisioned is optional. A view implements it when it knows how far its
 // projection has come, which lets a reader wait for a revision instead of
@@ -141,7 +141,7 @@ func (p *trackedResumable) SaveCheckpoint(ctx context.Context, eventID string) e
 // Revisions are compared as numbers, never as text: the database writes them
 // as decimal strings, and "10" sorts before "9" as text. A revision is a
 // decimal number from 0 to 2^63-1, the range of the database's event IDs;
-// anything else is refused with ErrNotARevision.
+// anything else is refused with ErrNotARevision, as ParseRevision refuses it.
 func CompareRevisions(left, right string) (int, error) {
 	// Both sides are read before either is compared, so that a revision that
 	// is not one is refused even when the other side is empty.
@@ -170,23 +170,41 @@ func CompareRevisions(left, right string) (int, error) {
 	return cmp.Compare(leftNumber, rightNumber), nil
 }
 
-// revisionNumber reads a revision as a number. A revision that is not set has
-// no number, which is what the second result says.
-//
-// The database numbers its events with signed 64-bit integers, so a revision
-// ends at 2^63-1; a larger number is no event ID it could ever hand out, and
-// it refuses one as a precondition.
+// revisionNumber reads a revision as a number, as ParseRevision does, except
+// for the empty revision, which it takes for one that is not set. That has no
+// number, which is what the second result says.
 func revisionNumber(revision string) (uint64, bool, error) {
 	if revision == "" {
 		return 0, false, nil
 	}
 
-	number, err := strconv.ParseUint(revision, 10, 63)
+	number, err := ParseRevision(revision)
 	if err != nil {
-		return 0, false, fmt.Errorf("%w: %q", ErrNotARevision, revision)
+		return 0, false, err
 	}
 
 	return number, true, nil
+}
+
+// ParseRevision reads a revision as the number it stands for, by the rules
+// that CompareRevisions applies: a revision is a decimal number from 0 to
+// 2^63-1. Anything else is refused with an error that wraps ErrNotARevision
+// and names the value, and so is the empty string, which CompareRevisions
+// takes for a view that has seen nothing, but which is the ID of no event.
+//
+// Use it to check a revision that comes from outside, such as one a caller
+// hands over, and to get at its number.
+//
+// The database numbers its events with signed 64-bit integers, so a revision
+// ends at 2^63-1; a larger number is no event ID it could ever hand out, and
+// it refuses one as a precondition.
+func ParseRevision(revision string) (uint64, error) {
+	number, err := strconv.ParseUint(revision, 10, 63)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %q", ErrNotARevision, revision)
+	}
+
+	return number, nil
 }
 
 // RevisionOf is the highest event ID among written events, which is the

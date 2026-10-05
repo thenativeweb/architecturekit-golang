@@ -412,12 +412,10 @@ func TestExecute(t *testing.T) {
 					return nil, errors.New("this one cannot be migrated")
 				}))
 
-		decider := architecturekit.Decider[increment, counter]{
-			State: state,
-			Decide: func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
+		decider := architecturekit.NewDecider(state,
+			func(ctx context.Context, cmd increment, current counter) ([]architecturekit.Event, error) {
 				return []architecturekit.Event{incremented{By: 1}}, nil
-			},
-		}
+			})
 
 		_, err = architecturekit.Execute(context.Background(), store, decider,
 			increment{subject: subject, By: 1})
@@ -433,12 +431,10 @@ func emittingDecider(
 	state *architecturekit.State[counter],
 	events ...architecturekit.Event,
 ) architecturekit.Decider[increment, counter] {
-	return architecturekit.Decider[increment, counter]{
-		State: state,
-		Decide: func(context.Context, increment, counter) ([]architecturekit.Event, error) {
+	return architecturekit.NewDecider(state,
+		func(context.Context, increment, counter) ([]architecturekit.Event, error) {
 			return events, nil
-		},
-	}
+		})
 }
 
 // fixtureRefusal returns the error with which the test fixture of
@@ -461,8 +457,13 @@ func fixtureRefusal(t *testing.T, decider architecturekit.Decider[increment, cou
 }
 
 // failureRecorder takes the failures of the test fixture in place of a
-// *testing.T, so that a test can read them.
+// *testing.T, so that a test can read them. It embeds testing.TB, which has
+// an unexported method, so that it is one, and overrides what the fixture
+// uses. The embedded testing.TB is nil, so a fixture that used anything else
+// would panic.
 type failureRecorder struct {
+	testing.TB
+
 	failures []string
 }
 

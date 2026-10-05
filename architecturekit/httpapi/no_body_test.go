@@ -106,7 +106,7 @@ func TestNoBody(t *testing.T) {
 
 				assert.Equal(t, http.StatusBadRequest, response.Code)
 				assert.JSONEq(t,
-					`{"message": "httpapi: malformed request: this route takes no body, so the body has to be empty, or {}"}`,
+					`{"message": "malformed request: this route takes no body, so the body has to be empty, or {}"}`,
 					response.Body.String())
 			})
 		}
@@ -144,7 +144,7 @@ func TestNoBody(t *testing.T) {
 				response := serve(t, mux, closing("application/json", strings.NewReader("")))
 
 				assert.Equal(t, http.StatusBadRequest, response.Code)
-				assert.Contains(t, response.Body.String(), "unexpected end of JSON input")
+				assert.Contains(t, response.Body.String(), "empty body")
 			})
 		}
 	})
@@ -202,7 +202,7 @@ func TestNoBody(t *testing.T) {
 		_, err := httpapi.BodyOf[httpapi.NoBody](bodyRequest("", strings.NewReader(`{"text":"hello"}`)))
 
 		require.ErrorIs(t, err, httpapi.ErrMalformed)
-		assert.EqualError(t, err, "httpapi: malformed request: this route takes no body, so the body has to be empty, or {}")
+		assert.EqualError(t, err, "malformed request: this route takes no body, so the body has to be empty, or {}")
 	})
 
 	t.Run("BodyOf reads no more than the limit", func(t *testing.T) {
@@ -222,7 +222,8 @@ func TestNoBody(t *testing.T) {
 	t.Run("BodyOf refuses a body that can not be read", func(t *testing.T) {
 		_, err := httpapi.BodyOf[httpapi.NoBody](bodyRequest("", failingReader{}))
 
-		assert.ErrorIs(t, err, httpapi.ErrMalformed)
+		require.ErrorIs(t, err, httpapi.ErrMalformed)
+		assert.EqualError(t, err, "malformed request: the body could not be read")
 		assert.ErrorIs(t, err, errBrokenBody, "the error of reading has to stay inspectable")
 	})
 
@@ -286,7 +287,7 @@ var sameOrigins = []struct {
 	{label: "an old browser on the same host", secFetchSite: "", origin: "http://example.com"},
 }
 
-const fromAnotherOrigin = "httpapi: forbidden: a command without a body is not accepted from another origin"
+const fromAnotherOrigin = "forbidden: a request without a body is not accepted from another origin"
 
 func TestNoBodyFromAnotherOrigin(t *testing.T) {
 	for _, test := range crossOrigins {

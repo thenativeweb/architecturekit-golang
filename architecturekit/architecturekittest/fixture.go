@@ -4,6 +4,9 @@
 // state, and a projection is driven with events handed to it directly. A test
 // that needs a real database gets one from the dbtest package, which is kept
 // apart so that this one builds without Docker.
+//
+// Every function here that can fail a test takes the testing.TB of the test,
+// such as its *testing.T, or the *testing.B of a benchmark.
 package architecturekittest
 
 import (
@@ -12,35 +15,37 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"testing"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// TestingT is the part of *testing.T that the fixtures need. It is an
-// interface so that the fixtures themselves can be tested.
-type TestingT interface {
-	Helper()
-	Fatalf(format string, args ...any)
-}
-
 // Fixture holds the state a command will decide on.
 type Fixture[TCommand architecturekit.Command, TState any] struct {
-	t       TestingT
+	t       testing.TB
 	decider architecturekit.Decider[TCommand, TState]
 	state   TState
 }
 
 // Given builds the state from typed events, which is how a test usually
 // spells out a history.
+//
+// The zero Decider, one that was not made with architecturekit.NewDecider, is
+// a programming error, so Given panics, and names the mistake rather than a
+// nil pointer.
 func Given[TCommand architecturekit.Command, TState any](
-	t TestingT,
+	t testing.TB,
 	decider architecturekit.Decider[TCommand, TState],
 	history ...architecturekit.Event,
 ) *Fixture[TCommand, TState] {
 	t.Helper()
 
-	state, err := architecturekit.Replay(decider.State, history...)
+	if decider.State() == nil {
+		panic("architecturekittest: Given needs a decider made with NewDecider, not the zero Decider")
+	}
+
+	state, err := architecturekit.Replay(decider.State(), history...)
 	if err != nil {
 		t.Fatalf("given: %v", err)
 	}
@@ -51,14 +56,20 @@ func Given[TCommand architecturekit.Command, TState any](
 // GivenStored builds the state from events in their stored shape, running the
 // upcasters on the way. Use it to test that an older event type still arrives
 // correctly, which typed events cannot show.
+//
+// Like Given, it panics for the zero Decider.
 func GivenStored[TCommand architecturekit.Command, TState any](
-	t TestingT,
+	t testing.TB,
 	decider architecturekit.Decider[TCommand, TState],
 	history ...eventsourcingdb.Event,
 ) *Fixture[TCommand, TState] {
 	t.Helper()
 
-	state, err := architecturekit.ReplayStored(decider.State, history...)
+	if decider.State() == nil {
+		panic("architecturekittest: GivenStored needs a decider made with NewDecider, not the zero Decider")
+	}
+
+	state, err := architecturekit.ReplayStored(decider.State(), history...)
 	if err != nil {
 		t.Fatalf("given stored: %v", err)
 	}
@@ -93,7 +104,7 @@ func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState
 		err = checkNotNil(cmd.Subject(), events)
 	}
 	if err == nil {
-		err = checkRules(f.decider.State, cmd.Subject(), events)
+		err = checkRules(f.decider.State(), cmd.Subject(), events)
 	}
 
 	var encoded [][]byte
@@ -114,7 +125,7 @@ func (f *Fixture[TCommand, TState]) When(cmd TCommand) *Outcome[TCommand, TState
 // Outcome is what a command did. Every assertion returns the outcome again, so
 // they can be chained.
 type Outcome[TCommand architecturekit.Command, TState any] struct {
-	t      TestingT
+	t      testing.TB
 	cmd    TCommand
 	state  TState
 	events []architecturekit.Event

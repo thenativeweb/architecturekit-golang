@@ -476,6 +476,13 @@ func TestFirst(t *testing.T) {
 func TestSingle(t *testing.T) {
 	isDune := func(b book) bool { return b.Year == 1965 }
 
+	t.Run("says what it found, without the name of the package", func(t *testing.T) {
+		// An application may hand the error on to a caller, wrapped together
+		// with an error of its own, so the text speaks of items, not of Go.
+		assert.EqualError(t, query.ErrNoItems, "no items")
+		assert.EqualError(t, query.ErrTooManyItems, "more than one item")
+	})
+
 	t.Run("insists on exactly one", func(t *testing.T) {
 		only, err := query.Single(query.Where(books(), isDune))
 		require.NoError(t, err)

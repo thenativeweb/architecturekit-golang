@@ -2,6 +2,7 @@ package architecturekit
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -10,8 +11,9 @@ import (
 // in braces, as in "/tenant/{tenant}/workshop/{workshop}".
 //
 // A scheme works in both directions. Build composes a subject from values, and
-// Match takes one apart again, which a projection needs to recover the
-// aggregate ID that the events themselves do not carry.
+// Match takes one apart again, or Value takes a single value out of it, which
+// a projection needs to recover the aggregate ID that the events themselves do
+// not carry.
 //
 // EventSourcingDB allows only ASCII letters and digits, underscores, and
 // hyphens in a segment of a subject, so this is what the literal segments of
@@ -107,7 +109,7 @@ func (s *SubjectScheme) Placeholders() []string {
 // and panics. Values that come from outside, such as an ID in a request, may
 // well be like that, so check them with Check first.
 func (s *SubjectScheme) Build(values ...string) string {
-	if err := s.Check(values...); err != nil {
+	if err := s.check(values, true); err != nil {
 		panic(err.Error())
 	}
 
@@ -134,20 +136,41 @@ func (s *SubjectScheme) Build(values ...string) string {
 // allows in a segment of a subject, which are A-Z, a-z, 0-9, underscores, and
 // hyphens. It is what Build insists on, as an error rather than a panic, for
 // values that come from outside.
+//
+// The error may reach the caller of an API, for example through ToCommand of
+// httpapi, so it names the placeholder of a value, but neither the package nor
+// the pattern, as in: value for "id" must not be empty. The panic of Build
+// names both, since it is for the developer.
 func (s *SubjectScheme) Check(values ...string) error {
+	return s.check(values, false)
+}
+
+// check tells whether the values can compose a subject, for Check, or for
+// Build if isForDeveloper is set, in which case the error names the package
+// and the pattern as well.
+func (s *SubjectScheme) check(values []string, isForDeveloper bool) error {
 	if len(values) != len(s.placeholders) {
-		return fmt.Errorf("architecturekit: pattern %q needs %d value(s), got %d",
-			s.pattern, len(s.placeholders), len(values))
+		if isForDeveloper {
+			return fmt.Errorf("architecturekit: pattern %q needs %d value(s), got %d",
+				s.pattern, len(s.placeholders), len(values))
+		}
+
+		return fmt.Errorf("the subject needs %d value(s), got %d", len(s.placeholders), len(values))
+	}
+
+	prefix, inPattern := "", ""
+	if isForDeveloper {
+		prefix, inPattern = "architecturekit: ", fmt.Sprintf(" in %q", s.pattern)
 	}
 
 	for i, value := range values {
 		if value == "" {
-			return fmt.Errorf("architecturekit: value for %q in %q must not be empty",
-				s.placeholders[i], s.pattern)
+			return fmt.Errorf("%svalue for %q%s must not be empty",
+				prefix, s.placeholders[i], inPattern)
 		}
 		if !hasOnlySubjectCharacters(value) {
-			return fmt.Errorf("architecturekit: value %q for %q in %q may only contain %s",
-				value, s.placeholders[i], s.pattern, subjectCharacters)
+			return fmt.Errorf("%svalue %q for %q%s may only contain %s",
+				prefix, value, s.placeholders[i], inPattern, subjectCharacters)
 		}
 	}
 
@@ -158,6 +181,11 @@ func (s *SubjectScheme) Check(values ...string) error {
 // the pattern, which is an ordinary case for a projection reading recursively
 // across several schemes. A subject with a value that Check refuses does not
 // follow it either, so that Match takes apart only what Build composes.
+//
+// The map holds the value of every placeholder of the pattern, and looking up
+// any other name in it, such as one with a typo, yields an empty string. To
+// take a single value out of a subject, use Value, which panics for such a
+// name instead.
 func (s *SubjectScheme) Match(subject string) (map[string]string, bool) {
 	if !strings.HasPrefix(subject, "/") {
 		return nil, false
@@ -188,6 +216,26 @@ func (s *SubjectScheme) Match(subject string) (map[string]string, bool) {
 	}
 
 	return values, true
+}
+
+// Value takes the value of a single placeholder out of a subject. It reports
+// false if the subject does not follow the pattern, as Match does. To take
+// several values out of the same subject, use Match.
+//
+// A placeholder that the pattern does not have, such as one with a typo, is a
+// programming error and panics, whatever the subject is, rather than yield an
+// empty value, as the map that Match returns would.
+func (s *SubjectScheme) Value(subject, placeholder string) (string, bool) {
+	if !slices.Contains(s.placeholders, placeholder) {
+		panic(fmt.Sprintf("architecturekit: pattern %q has no placeholder %q", s.pattern, placeholder))
+	}
+
+	values, ok := s.Match(subject)
+	if !ok {
+		return "", false
+	}
+
+	return values[placeholder], true
 }
 
 // subjectCharacters names the characters that EventSourcingDB allows in a
