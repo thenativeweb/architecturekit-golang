@@ -108,7 +108,7 @@ func TestParseRevision(t *testing.T) {
 		got, err := architecturekit.ParseRevision("")
 
 		require.ErrorIs(t, err, architecturekit.ErrNotARevision)
-		assert.EqualError(t, err, `architecturekit: not a revision: ""`)
+		assert.EqualError(t, err, `not a revision: ""`)
 		assert.Zero(t, got)
 	})
 
@@ -118,7 +118,7 @@ func TestParseRevision(t *testing.T) {
 				got, err := architecturekit.ParseRevision(test.revision)
 
 				require.ErrorIs(t, err, architecturekit.ErrNotARevision)
-				assert.EqualError(t, err, fmt.Sprintf("architecturekit: not a revision: %q", test.revision))
+				assert.EqualError(t, err, fmt.Sprintf("not a revision: %q", test.revision))
 				assert.Zero(t, got)
 			})
 		}
