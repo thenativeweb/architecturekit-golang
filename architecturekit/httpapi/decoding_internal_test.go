@@ -560,30 +560,45 @@ func TestDescribeDecoding(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps a value that does not fit without a type, as a type that decodes itself reports it", func(t *testing.T) {
+	t.Run("says that a value that does not fit without a type can not be decoded", func(t *testing.T) {
 		// A type that decodes itself may fail with a failure of
 		// encoding/json/v2 that does not name its type, which encoding/json
-		// hands back without a type as well, wherever the failure points to.
+		// hands back without a type as well, whose text can not be told. The
+		// path is that of encoding/json/v2, if the failure is the type's, and
+		// else that of the body, since that of encoding/json points into the
+		// JSON text of the type, if there is one.
 		for _, test := range []struct {
 			label    string
 			body     string
 			mismatch *json.UnmarshalTypeError
 			detailed error
+			text     string
 		}{
-			{label: "to a value", body: `{"isbn":1}`,
-				mismatch: &json.UnmarshalTypeError{}, detailed: &jsonv2.SemanticError{JSONPointer: "/isbn", ByteOffset: 8}},
-			{label: "to the key of a map", body: `{"floors":{"x":1}}`,
-				mismatch: &json.UnmarshalTypeError{}, detailed: &jsonv2.SemanticError{JSONPointer: "/floors/x", ByteOffset: 11}},
-			{label: "nowhere, with a path of encoding/json", body: `{"count":1}`,
-				mismatch: &json.UnmarshalTypeError{Field: "count"}, detailed: errors.New("another failure")},
-			{label: "nowhere, without a path", body: `{"count":1}`,
-				mismatch: &json.UnmarshalTypeError{}, detailed: nil},
+			{label: "for a failure without a type, which points to a value", body: `{"isbn":1}`,
+				mismatch: &json.UnmarshalTypeError{}, detailed: &jsonv2.SemanticError{JSONPointer: "/isbn", ByteOffset: 8},
+				text: `"isbn" can not be decoded`},
+			{label: "for a failure without a type, which points to the key of a map", body: `{"floors":{"x":1}}`,
+				mismatch: &json.UnmarshalTypeError{}, detailed: &jsonv2.SemanticError{JSONPointer: "/floors/x", ByteOffset: 11},
+				text: `"floors.x" can not be decoded`},
+			{label: "for a failure of a type that decodes itself", body: `{"isbn":1}`,
+				mismatch: &json.UnmarshalTypeError{}, detailed: &jsonv2.SemanticError{GoType: reflect.TypeFor[isbn](), JSONPointer: "/isbn", ByteOffset: 8},
+				text: `"isbn" can not be decoded`},
+			{label: "for a failure of a time", body: `{"dueOn":"x","isbn":1}`,
+				mismatch: &json.UnmarshalTypeError{}, detailed: &jsonv2.SemanticError{GoType: reflect.TypeFor[time.Time](), JSONPointer: "/dueOn", ByteOffset: 9},
+				text: "the body can not be decoded"},
+			{label: "for another failure, with a path of encoding/json", body: `{"count":1}`,
+				mismatch: &json.UnmarshalTypeError{Field: "count"}, detailed: errors.New("another failure"),
+				text: "the body can not be decoded"},
+			{label: "without a failure", body: `{"count":1}`,
+				mismatch: &json.UnmarshalTypeError{}, detailed: nil,
+				text: "the body can not be decoded"},
 		} {
 			t.Run(test.label, func(t *testing.T) {
 				var err error
 				require.NotPanics(t, func() { err = describeDecoding(bodyType, []byte(test.body), test.mismatch, test.detailed) })
 
-				assert.Same(t, test.mismatch, err)
+				assert.EqualError(t, err, test.text)
+				assert.ErrorIs(t, err, test.mismatch, "the error of decoding has to stay wrapped")
 			})
 		}
 	})

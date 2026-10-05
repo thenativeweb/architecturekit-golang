@@ -43,7 +43,23 @@ const exampleTime = "2026-10-05T12:00:00Z"
 // encoding/json/v2 does. The error of a type that decodes itself comes back as
 // it is, and for any other failure that it has no words for, it says that the
 // value can not be decoded.
+//
+// So it does for an error of a type that decodes itself that can not tell its
+// text (see hasText), naming the value by the path of encoding/json/v2, if
+// the failure there is the type's, or else the body.
 func describeDecoding(bodyType reflect.Type, body []byte, err, detailed error) error {
+	described := describeFailure(bodyType, body, err, detailed)
+	if !hasText(described) {
+		return describeUndecodable(ownPointerOf(detailed), err)
+	}
+
+	return described
+}
+
+// describeFailure says what is wrong with a body, as describeDecoding does,
+// but hands back the error of a type that decodes itself as it is, whether it
+// can tell its text or not.
+func describeFailure(bodyType reflect.Type, body []byte, err, detailed error) error {
 	// A string field with the option string holds JSON text of its own, a
 	// string in quotes, whose mistakes encoding/json reports as a value that
 	// does not fit, wrapping a *json.SyntaxError. So that comes first.
@@ -174,7 +190,10 @@ func describeNamesake(bodyType reflect.Type, body []byte, syntax *json.SyntaxErr
 func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.UnmarshalTypeError, err, detailed error) error {
 	// encoding/json names the type of every value that it refuses itself, so
 	// a value without one is that of a type that decodes itself, which failed
-	// with a failure of encoding/json/v2 that does not name its type.
+	// with a failure of encoding/json/v2 that does not name its type, or with
+	// such a value of its own. It comes back as it is, like any other error of
+	// such a type, although its text can not be told unless another error
+	// wraps it with a text of its own (see describeDecoding).
 	if mismatch.Type == nil {
 		return err
 	}
@@ -625,6 +644,35 @@ func ownFailureOf(detailed error) (*jsonv2.SemanticError, bool) {
 	}
 
 	return failure, true
+}
+
+// ownPointerOf returns the pointer of the failure that encoding/json/v2
+// reports, given detailed, if it is that of a type that decodes itself, which
+// may also be one that does not name its type, and else the empty pointer.
+func ownPointerOf(detailed error) jsontext.Pointer {
+	if own, isOwn := ownFailureOf(detailed); isOwn {
+		return own.JSONPointer
+	}
+
+	if failure, isFailure := errors.AsType[*jsonv2.SemanticError](detailed); isFailure && failure.GoType == nil {
+		return failure.JSONPointer
+	}
+
+	return ""
+}
+
+// hasText reports whether err can tell its text. It can not if its Error
+// method panics, as that of a *json.UnmarshalTypeError without a type does,
+// or if its text holds the text of such a panic, which fmt writes as
+// "%!v(PANIC=Error method: ...)" when it writes an error that wraps one.
+func hasText(err error) (canTell bool) {
+	defer func() {
+		if recover() != nil {
+			canTell = false
+		}
+	}()
+
+	return !strings.Contains(err.Error(), "(PANIC=")
 }
 
 // pointsTo reports whether err holds a syntax error that points to the

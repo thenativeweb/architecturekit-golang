@@ -7,6 +7,7 @@ import (
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -172,6 +173,57 @@ type shelfIndex int
 
 func (*shelfIndex) UnmarshalJSON([]byte) error {
 	return &jsonv2.SemanticError{Err: &json.UnmarshalTypeError{Value: "string"}}
+}
+
+// shelfRow refuses anything with a value that does not fit, which does not
+// name its type, so that its text can not be told.
+type shelfRow int
+
+func (*shelfRow) UnmarshalJSON([]byte) error {
+	return &json.UnmarshalTypeError{Value: "string"}
+}
+
+// shelfLabel refuses anything with an error whose text names what is wrong,
+// around a value that does not fit, which does not name its type.
+type shelfLabel string
+
+func (*shelfLabel) UnmarshalJSON([]byte) error {
+	return &labelledError{text: "a label has letters only", wrapped: &json.UnmarshalTypeError{Value: "number"}}
+}
+
+// labelledError has a text of its own, whatever the error it wraps says.
+type labelledError struct {
+	text    string
+	wrapped error
+}
+
+func (failure *labelledError) Error() string { return failure.text }
+
+func (failure *labelledError) Unwrap() error { return failure.wrapped }
+
+// errUnspeakable is what brokenError wraps.
+var errUnspeakable = errors.New("unspeakable")
+
+// brokenError fails to say what it is.
+type brokenError struct{}
+
+func (*brokenError) Error() string { panic("an error that can not say what it is") }
+
+func (*brokenError) Unwrap() error { return errUnspeakable }
+
+// shelfColor refuses anything with an error that fails to say what it is.
+type shelfColor string
+
+func (*shelfColor) UnmarshalJSON([]byte) error {
+	return &brokenError{}
+}
+
+// shelfSize refuses anything with an error that holds one that fails to say
+// what it is, whose text holds the text of the panic that fmt caught.
+type shelfSize int
+
+func (*shelfSize) UnmarshalJSON([]byte) error {
+	return fmt.Errorf("no such size: %w", &brokenError{})
 }
 
 // stockEntry holds types that decode themselves next to fields whose names
@@ -749,30 +801,61 @@ func TestBodyOf(t *testing.T) {
 		})
 	})
 
-	t.Run("keeps the error of a type that decodes itself that names no type, rather than panic", func(t *testing.T) {
-		// A failure of encoding/json/v2 that a type reports without its type
+	t.Run("says that a value can not be decoded, where the error of a type that decodes itself can not tell its text", func(t *testing.T) {
+		// A value that does not fit without a type can not tell its text, and
+		// a failure of encoding/json/v2 that a type reports without its type
 		// is one that encoding/json hands back without a type as well.
 		type shelving struct {
 			Code   shelfCode         `json:"code"`
 			Index  shelfIndex        `json:"index"`
 			ByCode map[shelfCode]int `json:"byCode"`
+			Row    shelfRow          `json:"row"`
+			Color  shelfColor        `json:"color"`
+			Size   shelfSize         `json:"size"`
 		}
 
-		for _, body := range []string{`{"code":"x"}`, `{"index":1}`, `{"byCode":{"x":1}}`} {
-			t.Run(body, func(t *testing.T) {
+		for _, test := range []struct {
+			body string
+			text string
+		}{
+			{body: `{"code":"x"}`, text: `"code" can not be decoded`},
+			{body: `{"index":1}`, text: `"index" can not be decoded`},
+			// encoding/json/v2 does not say where the key is that the type
+			// refused, so it is not clear which value.
+			{body: `{"byCode":{"x":1}}`, text: "the body can not be decoded"},
+			{body: `{"row":1}`, text: `"row" can not be decoded`},
+			{body: `{"color":"red"}`, text: `"color" can not be decoded`},
+			{body: `{"size":1}`, text: `"size" can not be decoded`},
+		} {
+			t.Run(test.body, func(t *testing.T) {
 				var err error
-				require.NotPanics(t, func() { err = bodyErrorOf[shelving](body) })
+				require.NotPanics(t, func() { err = bodyErrorOf[shelving](test.body) })
 
-				require.ErrorIs(t, err, httpapi.ErrMalformed)
-
-				mismatch, isMismatch := errors.AsType[*json.UnmarshalTypeError](err)
-				require.True(t, isMismatch, "errors.As has to find the error of decoding")
-				assert.Nil(t, mismatch.Type)
+				assertMalformed(t, err, test.text)
 			})
 		}
 
-		t.Run("and keeps it inspectable", func(t *testing.T) {
+		t.Run("and keeps the error of the type inspectable", func(t *testing.T) {
+			mismatch, isMismatch := errors.AsType[*json.UnmarshalTypeError](bodyErrorOf[shelving](`{"index":1}`))
+			require.True(t, isMismatch, "errors.As has to find the error of decoding")
+			assert.Nil(t, mismatch.Type)
+
 			assert.ErrorIs(t, bodyErrorOf[shelving](`{"code":"x"}`), errNoSuchShelf)
+			assert.ErrorIs(t, bodyErrorOf[shelving](`{"color":"red"}`), errUnspeakable)
+			assert.ErrorIs(t, bodyErrorOf[shelving](`{"size":1}`), errUnspeakable)
+		})
+
+		t.Run("but keeps a text that it can tell, whatever its error wraps", func(t *testing.T) {
+			type labelling struct {
+				Label shelfLabel `json:"label"`
+			}
+
+			err := bodyErrorOf[labelling](`{"label":1}`)
+
+			assertMalformed(t, err, "a label has letters only")
+
+			_, isMismatch := errors.AsType[*json.UnmarshalTypeError](err)
+			assert.True(t, isMismatch, "errors.As has to find the error of the type")
 		})
 	})
 

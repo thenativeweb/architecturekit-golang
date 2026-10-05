@@ -892,12 +892,14 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // map whose keys are times have to be times.
 //
 // The error of a type that decodes itself keeps its own text, as it is, also
-// for a type of a library, such as netip.Addr. Any other failure that there
-// are no words for, such as a value of a type that JSON has no kind for, says
-// that the value can not be decoded, or that the body can not be decoded, if
-// it is not clear which value. Either way, the error wraps the error of
-// decoding, so that errors.As finds it, such as a *json.UnmarshalTypeError
-// that names the field.
+// for a type of a library, such as netip.Addr, as long as it can tell its
+// text, which it can not if its Error method panics, as that of a
+// *json.UnmarshalTypeError without a type does. Such an error, and any other
+// failure that there are no words for, such as a value of a type that JSON has
+// no kind for, says that the value can not be decoded, or that the body can
+// not be decoded, if it is not clear which value. Either way, the error wraps
+// the error of decoding, so that errors.As finds it, such as a
+// *json.UnmarshalTypeError that names the field.
 //
 // If TBody is NoBody, the request is read without a body instead. A request
 // that a browser sends from another origin is ErrForbidden then, before the
