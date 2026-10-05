@@ -92,6 +92,15 @@ func TestIgnore(t *testing.T) {
 		}
 	})
 
+	t.Run("panics on a pointer as the event type, also if its EventType function has a pointer receiver", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: Ignore needs the event type architecturekit_test.reset, not the pointer *architecturekit_test.reset",
+			func() { architecturekit.NewState(counter{}).Ignore[*reset]() })
+		assert.PanicsWithValue(t,
+			"architecturekit: Ignore needs the event type architecturekit_test.pointed, not the pointer *architecturekit_test.pointed",
+			func() { architecturekit.NewState(counter{}).Ignore[*pointed]() })
+	})
+
 	t.Run("panics on FromLatest for an ignored event type", func(t *testing.T) {
 		assert.PanicsWithValue(t,
 			`architecturekit: event type "io.thenativeweb.test.reset" has no Evolve rule on this state`,

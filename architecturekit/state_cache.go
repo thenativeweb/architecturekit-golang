@@ -3,6 +3,7 @@ package architecturekit
 import (
 	"container/list"
 	"maps"
+	"math"
 	"reflect"
 	"slices"
 	"sync"
@@ -31,6 +32,10 @@ type stateCacheEntry struct {
 // state; if they are not, they are two different states, which need two
 // different types.
 type stateShape struct {
+	// source is the *State the shape was built from. Holding it keeps the
+	// *State alive, so that no other one can take its address.
+	source any
+
 	initial    any
 	evolved    []string
 	ignored    []string
@@ -42,6 +47,7 @@ type stateShape struct {
 // initial value, since the cache keeps the shape for as long as the entry.
 func shapeOf[TState any](state *State[TState]) stateShape {
 	shape := stateShape{
+		source:     state,
 		initial:    state.copyOf(state.initial),
 		evolved:    slices.Sorted(maps.Keys(state.evolve)),
 		ignored:    slices.Sorted(maps.Keys(state.ignored)),
@@ -54,12 +60,133 @@ func shapeOf[TState any](state *State[TState]) stateShape {
 	return shape
 }
 
+// equals reports whether two shapes describe states that are built alike. Two
+// shapes of the very same *State are equal without comparing anything. Of two
+// different ones, the initial values are compared with isSame, so that an
+// initial value equals itself even if it holds a function or a NaN.
 func (s stateShape) equals(other stateShape) bool {
-	return reflect.DeepEqual(s.initial, other.initial) &&
+	if s.source == other.source {
+		return true
+	}
+
+	return isSame(reflect.ValueOf(s.initial), reflect.ValueOf(other.initial), map[sameVisit]bool{}) &&
 		slices.Equal(s.evolved, other.evolved) &&
 		slices.Equal(s.ignored, other.ignored) &&
 		slices.Equal(s.upcasted, other.upcasted) &&
 		s.fromLatest == other.fromLatest
+}
+
+// sameVisit names two references that isSame compares, a pointer, a map or a
+// slice each. A slice is named by its length as well, since two slices of
+// different lengths may start at the same element.
+type sameVisit struct {
+	left, right uintptr
+	length      int
+	valueType   reflect.Type
+}
+
+// isSame reports whether two values are deeply equal, as reflect.DeepEqual
+// does, except that every value equals itself, which DeepEqual does not
+// promise. Two functions are the same if both are nil or both are not, since
+// functions can not be compared, and two floats are the same if they are
+// equal or both NaN, as are the parts of two complex numbers. Map keys are
+// looked up as Go looks them up, though, so a map with a NaN key, which Go
+// never finds again, does not equal itself.
+//
+// visited holds the references compared so far. One that is compared again is
+// taken to be the same, so that a cycle ends; if it is not, the comparison
+// that is under way finds out.
+func isSame(left, right reflect.Value, visited map[sameVisit]bool) bool {
+	if !left.IsValid() || !right.IsValid() {
+		return left.IsValid() == right.IsValid()
+	}
+	if left.Type() != right.Type() {
+		return false
+	}
+
+	switch left.Kind() {
+	case reflect.Func:
+		return left.IsNil() == right.IsNil()
+
+	case reflect.Float32, reflect.Float64:
+		return isSameFloat(left.Float(), right.Float())
+
+	case reflect.Complex64, reflect.Complex128:
+		return isSameFloat(real(left.Complex()), real(right.Complex())) &&
+			isSameFloat(imag(left.Complex()), imag(right.Complex()))
+
+	case reflect.Interface:
+		// The value of a nil interface is invalid, as is the value a nil
+		// pointer points to.
+		return isSame(left.Elem(), right.Elem(), visited)
+
+	case reflect.Pointer:
+		return isVisited(left, right, 0, visited) || isSame(left.Elem(), right.Elem(), visited)
+
+	case reflect.Map:
+		if left.IsNil() != right.IsNil() || left.Len() != right.Len() {
+			return false
+		}
+		if isVisited(left, right, 0, visited) {
+			return true
+		}
+		for key, value := range left.Seq2() {
+			if !isSame(value, right.MapIndex(key), visited) {
+				return false
+			}
+		}
+		return true
+
+	case reflect.Slice:
+		if left.IsNil() != right.IsNil() || left.Len() != right.Len() {
+			return false
+		}
+		return isVisited(left, right, left.Len(), visited) || isSameElements(left, right, visited)
+
+	case reflect.Array:
+		return isSameElements(left, right, visited)
+
+	case reflect.Struct:
+		for i := range left.NumField() {
+			if !isSame(left.Field(i), right.Field(i), visited) {
+				return false
+			}
+		}
+		return true
+
+	default:
+		return left.Equal(right)
+	}
+}
+
+// isSameFloat reports whether two floats are equal, or both NaN.
+func isSameFloat(left, right float64) bool {
+	return left == right || (math.IsNaN(left) && math.IsNaN(right))
+}
+
+// isSameElements compares the elements of two arrays, or of two slices of
+// the same length.
+func isSameElements(left, right reflect.Value, visited map[sameVisit]bool) bool {
+	for i := range left.Len() {
+		if !isSame(left.Index(i), right.Index(i), visited) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isVisited reports whether two references are compared already, and records
+// them otherwise.
+func isVisited(left, right reflect.Value, length int, visited map[sameVisit]bool) bool {
+	visit := sameVisit{left: left.Pointer(), right: right.Pointer(), length: length, valueType: left.Type()}
+	if visited[visit] {
+		return true
+	}
+
+	visited[visit] = true
+
+	return false
 }
 
 // stateCache holds the states of the most recently used subjects, together

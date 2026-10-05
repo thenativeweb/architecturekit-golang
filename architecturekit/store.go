@@ -84,6 +84,12 @@ type storeSettings struct {
 // alike, but compute something else, are not told apart: one of them gets the
 // cached state of the other, without an error.
 //
+// The very same *State is not compared at all. The initial values of two
+// different ones are compared as reflect.DeepEqual compares them, except that
+// every value equals itself: two functions in them are equal if both are nil
+// or both are not, and two floats if they are equal or both NaN, as are the
+// parts of two complex numbers.
+//
 // A negative number of subjects is a programming error, so it panics.
 func WithStateCache(maxSubjects int) StoreOption {
 	if maxSubjects < 0 {
@@ -162,7 +168,14 @@ func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
 // kit itself does not; give the projections names with Named, so that the log
 // tells them apart. A panic in observe ends the run, as a panic in the
 // projection does (see StartProjection).
+//
+// A nil function is a programming error, so it panics, rather than silently
+// observing nothing.
 func WithReconnectObserver(observe func(Reconnect)) StoreOption {
+	if observe == nil {
+		panic("architecturekit: WithReconnectObserver needs a function, not nil")
+	}
+
 	return func(settings *storeSettings) {
 		settings.reconnectObserver = observe
 	}
