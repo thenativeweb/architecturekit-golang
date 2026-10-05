@@ -1,8 +1,10 @@
 package architecturekit
 
 import (
+	"math"
 	"reflect"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 	"unsafe"
@@ -75,8 +77,8 @@ func TestStateCache(t *testing.T) {
 		cache := newStateCache(10)
 		key := stateCacheKey{stateType: reflect.TypeFor[int](), subject: "/books/42"}
 
-		cache.put(key, stateShape{evolved: []string{"borrowed"}}, 1, "1")
-		cache.put(key, stateShape{evolved: []string{"returned"}}, 2, "2")
+		cache.put(key, stateShape{source: NewState(0), evolved: []string{"borrowed"}}, 1, "1")
+		cache.put(key, stateShape{source: NewState(0), evolved: []string{"returned"}}, 2, "2")
 
 		entry, _ := cache.get(key)
 		assert.Equal(t, 1, entry.state, "the cached state must stay")
@@ -88,6 +90,7 @@ func TestStateShape(t *testing.T) {
 	type book struct{ IsBorrowed bool }
 
 	base := stateShape{
+		source:     NewState(book{}),
 		initial:    book{},
 		evolved:    []string{"acquired", "borrowed", "reviewed"},
 		ignored:    []string{"reviewed"},
@@ -128,9 +131,48 @@ func TestStateShape(t *testing.T) {
 		}, false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			assert.Equal(t, testCase.equals, base.equals(testCase.change(base)))
+			// The shapes are of two different states, so they are compared.
+			changed := testCase.change(base)
+			changed.source = NewState(book{})
+
+			assert.Equal(t, testCase.equals, base.equals(changed))
 		})
 	}
+
+	t.Run("is equal to a shape of the very same state without comparing anything", func(t *testing.T) {
+		changed := base
+		changed.initial = book{IsBorrowed: true}
+
+		assert.True(t, base.equals(changed))
+	})
+
+	t.Run("is equal for the very same state although its initial value does not equal itself", func(t *testing.T) {
+		// Go never finds a NaN key again, so the initial value differs from
+		// itself even when compared by isSame, but the very same state is not
+		// compared at all.
+		state := NewState(map[float64]int{math.NaN(): 1})
+		alike := NewState(map[float64]int{math.NaN(): 1})
+
+		assert.True(t, shapeOf(state).equals(shapeOf(state)))
+		assert.False(t, shapeOf(state).equals(shapeOf(alike)))
+	})
+
+	t.Run("is equal for states built alike whose initial values hold a function or a NaN", func(t *testing.T) {
+		type formatted struct {
+			Format func(int) string
+			Mean   float64
+		}
+
+		build := func() *State[formatted] {
+			return NewState(formatted{Format: strconv.Itoa, Mean: math.NaN()})
+		}
+
+		assert.True(t, shapeOf(build()).equals(shapeOf(build())))
+		assert.False(t, shapeOf(build()).equals(shapeOf(NewState(formatted{Mean: math.NaN()}))),
+			"a nil function must differ from one that is not")
+		assert.False(t, shapeOf(build()).equals(shapeOf(NewState(formatted{Format: strconv.Itoa}))),
+			"a NaN must differ from 0")
+	})
 
 	t.Run("is read from how a state is built", func(t *testing.T) {
 		upcasters := NewUpcasters()
@@ -145,12 +187,153 @@ func TestStateShape(t *testing.T) {
 		state.UpcastWith(upcasters)
 
 		assert.Equal(t, stateShape{
+			source:     state,
 			initial:    book{IsBorrowed: true},
 			evolved:    []string{"acquired", "borrowed", "reviewed"},
 			ignored:    []string{"reviewed"},
 			upcasted:   []string{"lent"},
 			fromLatest: "acquired",
 		}, shapeOf(state))
+	})
+}
+
+func TestIsSame(t *testing.T) {
+	type withHidden struct {
+		count  int
+		format func(int) string
+		mean   float64
+	}
+
+	type node struct {
+		Value float64
+		Next  *node
+	}
+
+	nan := math.NaN()
+	negativeZero := math.Copysign(0, -1)
+	pointsTo := func(value float64) *float64 { return &value }
+	shared := pointsTo(1)
+	channel := make(chan int)
+
+	for _, testCase := range []struct {
+		name        string
+		left, right any
+		isSame      bool
+	}{
+		{"two nil values", nil, nil, true},
+		{"nil and a value", nil, 0, false},
+		{"values of different types", 1, int64(1), false},
+		{"floats of different types", float32(1), 1.0, false},
+		{"equal ints", 1, 1, true},
+		{"different ints", 1, 2, false},
+		{"equal strings", "42", "42", true},
+		{"different strings", "42", "23", false},
+		{"the same channel", channel, channel, true},
+		{"different channels", channel, make(chan int), false},
+		{"two nil functions", (func())(nil), (func())(nil), true},
+		{"two functions that are not nil", strconv.Itoa, func(int) string { return "" }, true},
+		{"a nil function and one that is not", (func(int) string)(nil), strconv.Itoa, false},
+		{"NaN and NaN", nan, nan, true},
+		{"NaN of float32 and NaN of float32", float32(nan), float32(nan), true},
+		{"equal floats", 1.5, 1.5, true},
+		{"different floats", 1.5, 2.5, false},
+		{"0 and -0, whose bits differ", 0.0, negativeZero, false},
+		{"complex numbers with NaN", complex(nan, nan), complex(nan, nan), true},
+		{"complex numbers of float32 with NaN", complex64(complex(nan, 1)), complex64(complex(nan, 1)), true},
+		{"complex numbers with different real parts", complex(1, 2), complex(3, 2), false},
+		{"complex numbers with different imaginary parts", complex(1, 2), complex(1, 3), false},
+		{"interfaces that hold NaN", struct{ Any any }{nan}, struct{ Any any }{nan}, true},
+		{"interfaces that hold different values", struct{ Any any }{1}, struct{ Any any }{2}, false},
+		{"a nil interface and one that holds a value", struct{ Any any }{}, struct{ Any any }{1}, false},
+		{"two nil pointers", (*float64)(nil), (*float64)(nil), true},
+		{"a nil pointer and one that is not", (*float64)(nil), pointsTo(1), false},
+		{"pointers to NaN", pointsTo(nan), pointsTo(nan), true},
+		{"pointers to different values", pointsTo(1), pointsTo(2), false},
+		{"a pointer that appears twice and two pointers to different values", []*float64{shared, shared},
+			[]*float64{pointsTo(1), pointsTo(2)}, false},
+		{"maps with NaN values", map[string]float64{"mean": nan}, map[string]float64{"mean": nan}, true},
+		{"a nil map and an empty one", map[string]int(nil), map[string]int{}, false},
+		{"maps of different lengths", map[string]int{"a": 1}, map[string]int{"a": 1, "b": 2}, false},
+		{"maps with different keys", map[string]int{"a": 1}, map[string]int{"b": 1}, false},
+		{"maps with different values", map[string]int{"a": 1}, map[string]int{"a": 2}, false},
+		{"maps with a NaN key, which Go never finds again", map[float64]int{nan: 1}, map[float64]int{nan: 1}, false},
+		{"slices of functions", []func(){func() {}}, []func(){func() {}}, true},
+		{"slices with NaN", []float64{1, nan}, []float64{1, nan}, true},
+		{"a nil slice and an empty one", []int(nil), []int{}, false},
+		{"slices of different lengths", []int{1}, []int{1, 2}, false},
+		{"slices with different elements", []int{1, 2}, []int{1, 3}, false},
+		{"arrays with NaN", [2]float64{nan, 1}, [2]float64{nan, 1}, true},
+		{"arrays with different elements", [2]int{1, 2}, [2]int{1, 3}, false},
+		{"structs with unexported functions and NaN", withHidden{1, strconv.Itoa, nan}, withHidden{1, strconv.Itoa, nan}, true},
+		{"structs that differ in an unexported field", withHidden{1, nil, nan}, withHidden{2, nil, nan}, false},
+		{"times with a location", time.Date(2026, 10, 5, 0, 0, 0, 0, time.FixedZone("CEST", 7200)),
+			time.Date(2026, 10, 5, 0, 0, 0, 0, time.FixedZone("CEST", 7200)), true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			left, right := reflect.ValueOf(testCase.left), reflect.ValueOf(testCase.right)
+
+			assert.Equal(t, testCase.isSame, isSame(left, right, map[sameVisit]bool{}))
+			assert.Equal(t, testCase.isSame, isSame(right, left, map[sameVisit]bool{}), "the comparison must be symmetric")
+		})
+	}
+
+	t.Run("ends a cycle of pointers", func(t *testing.T) {
+		cycle := func(value float64) *node {
+			first := &node{Value: value}
+			first.Next = &node{Value: nan, Next: first}
+			return first
+		}
+
+		assert.True(t, isSame(reflect.ValueOf(cycle(1)), reflect.ValueOf(cycle(1)), map[sameVisit]bool{}))
+		assert.False(t, isSame(reflect.ValueOf(cycle(1)), reflect.ValueOf(cycle(2)), map[sameVisit]bool{}))
+	})
+
+	t.Run("ends a cycle of maps", func(t *testing.T) {
+		cycle := func(value float64) map[string]any {
+			cycle := map[string]any{"value": value}
+			cycle["self"] = cycle
+			return cycle
+		}
+
+		assert.True(t, isSame(reflect.ValueOf(cycle(nan)), reflect.ValueOf(cycle(nan)), map[sameVisit]bool{}))
+		assert.False(t, isSame(reflect.ValueOf(cycle(1)), reflect.ValueOf(cycle(2)), map[sameVisit]bool{}))
+	})
+
+	t.Run("ends a cycle of slices", func(t *testing.T) {
+		cycle := func(value float64) []any {
+			cycle := []any{nil, value}
+			cycle[0] = cycle
+			return cycle
+		}
+
+		assert.True(t, isSame(reflect.ValueOf(cycle(nan)), reflect.ValueOf(cycle(nan)), map[sameVisit]bool{}))
+		assert.False(t, isSame(reflect.ValueOf(cycle(1)), reflect.ValueOf(cycle(2)), map[sameVisit]bool{}))
+	})
+
+	t.Run("tells apart pointers of different types to the same address", func(t *testing.T) {
+		type pair struct{ First, Second int }
+
+		left := &pair{First: 1, Second: 2}
+		right := &pair{First: 1, Second: 3}
+
+		// The first fields are the same, and their addresses are those of the
+		// pairs, which differ in their second fields.
+		assert.False(t, isSame(
+			reflect.ValueOf([]any{&left.First, left}),
+			reflect.ValueOf([]any{&right.First, right}),
+			map[sameVisit]bool{}))
+	})
+
+	t.Run("tells apart slices of different lengths that start at the same elements", func(t *testing.T) {
+		left := []int{1, 2}
+		right := []int{1, 3}
+
+		// The first elements are the same, the second ones are not, so the
+		// longer slices differ, although they start where the shorter ones do.
+		assert.False(t, isSame(
+			reflect.ValueOf([][]int{left[:1], left[:2]}),
+			reflect.ValueOf([][]int{right[:1], right[:2]}),
+			map[sameVisit]bool{}))
 	})
 }
 

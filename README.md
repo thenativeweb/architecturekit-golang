@@ -900,6 +900,8 @@ The cache tells states apart by their type, not by the object. A state that is b
 
 *Note that the cache can not compare the `Evolve` functions themselves. Two states of the same type that are built alike, but compute something else, are not told apart.*
 
+*Note that the very same state is not compared at all. The initial values of two different states of the same type are compared as `reflect.DeepEqual` compares them, except that every value equals itself: two functions in them are equal if both are `nil` or both are not, since functions can not be compared, and two floating-point or complex numbers if their bits are, so that `NaN` equals `NaN`.*
+
 A cached state is handed to several commands, possibly at the same time. That is safe for a state that consists of values only, such as the `Book` state above. A state that holds slices, maps, pointers, channels, functions, or interfaces, such as a field of type `error` or `any`, is only cached if it has a `Clone` function, which returns a copy that shares no data with the original. An interface counts as well, since it can hold any of the others. For example, a shelf that collects the IDs of the books that `BookShelved` events put on it needs one:
 
 ```go

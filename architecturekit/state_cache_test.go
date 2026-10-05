@@ -2,7 +2,9 @@ package architecturekit_test
 
 import (
 	"context"
+	"math"
 	"slices"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -63,6 +65,58 @@ func sumState() *architecturekit.State[int] {
 	return architecturekit.NewState(0).
 		Evolve(func(sum int, event incremented) int { return sum + event.By }).
 		Evolve(func(int, reset) int { return 0 })
+}
+
+// formatted holds a function in its initial value, and averaged a NaN, as the
+// mean of no values. reflect.DeepEqual considers neither of them equal to
+// itself.
+type formatted struct {
+	Total  int
+	Format func(int) string
+}
+
+func formattedState(evolved *atomic.Int64, format func(int) string) *architecturekit.State[formatted] {
+	return architecturekit.NewState(formatted{Format: format}).
+		Evolve(func(current formatted, event incremented) formatted {
+			evolved.Add(1)
+			current.Total += event.By
+			return current
+		}).
+		Clone(func(current formatted) formatted { return current })
+}
+
+type averaged struct {
+	Total int
+	Count int
+	Mean  float64
+}
+
+func averagedState(evolved *atomic.Int64, mean float64) *architecturekit.State[averaged] {
+	return architecturekit.NewState(averaged{Mean: mean}).
+		Evolve(func(current averaged, event incremented) averaged {
+			evolved.Add(1)
+			current.Total += event.By
+			current.Count++
+			current.Mean = float64(current.Total) / float64(current.Count)
+			return current
+		})
+}
+
+// loadCachedTwice loads a subject with first, writes another event past the
+// store, as another process would, and loads the subject with second, all on
+// a store with a state cache.
+func loadCachedTwice[TState any](t *testing.T, first, second *architecturekit.State[TState]) TState {
+	t.Helper()
+
+	store := cachedStore(t, 10)
+	subject := subjectFor(t)
+
+	writeRaw(t, subject, incremented{By: 3}, incremented{By: 4})
+	load(t, store, first, subject)
+
+	writeRaw(t, subject, incremented{By: 5})
+
+	return load(t, store, second, subject)
 }
 
 // cachedStore returns a store with a state cache on the test database.
@@ -169,6 +223,61 @@ func TestLoadWithStateCache(t *testing.T) {
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
 		assert.ErrorContains(t, err, "two different states of type int")
 		assert.ErrorContains(t, err, subject, "the error must name the subject")
+	})
+
+	t.Run("caches a state whose initial value holds a function", func(t *testing.T) {
+		var evolved atomic.Int64
+		state := formattedState(&evolved, strconv.Itoa)
+
+		assert.Equal(t, 12, loadCachedTwice(t, state, state).Total)
+		assert.Equal(t, int64(3), evolved.Load(), "the second read must continue from the cached state")
+	})
+
+	t.Run("caches states built alike whose initial values hold a function", func(t *testing.T) {
+		var evolved atomic.Int64
+
+		current := loadCachedTwice(t, formattedState(&evolved, strconv.Itoa), formattedState(&evolved, strconv.Itoa))
+
+		assert.Equal(t, 12, current.Total)
+		assert.Equal(t, int64(3), evolved.Load(), "the second state must continue from the cached one")
+	})
+
+	t.Run("caches a state whose initial value holds a NaN", func(t *testing.T) {
+		var evolved atomic.Int64
+		state := averagedState(&evolved, math.NaN())
+
+		assert.Equal(t, averaged{Total: 12, Count: 3, Mean: 4}, loadCachedTwice(t, state, state))
+		assert.Equal(t, int64(3), evolved.Load(), "the second read must continue from the cached state")
+	})
+
+	t.Run("caches states built alike whose initial values hold a NaN", func(t *testing.T) {
+		var evolved atomic.Int64
+
+		current := loadCachedTwice(t, averagedState(&evolved, math.NaN()), averagedState(&evolved, math.NaN()))
+
+		assert.Equal(t, averaged{Total: 12, Count: 3, Mean: 4}, current)
+		assert.Equal(t, int64(3), evolved.Load(), "the second state must continue from the cached one")
+	})
+
+	t.Run("reports two states of the same type whose initial values differ by a function or a NaN", func(t *testing.T) {
+		store := cachedStore(t, 10)
+		subject := subjectFor(t)
+
+		var evolved atomic.Int64
+
+		writeRaw(t, subject, incremented{By: 3})
+
+		load(t, store, formattedState(&evolved, strconv.Itoa), subject)
+		_, err := architecturekit.Load(context.Background(), store, formattedState(&evolved, nil), subject)
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, "two different states of type architecturekit_test.formatted")
+
+		load(t, store, averagedState(&evolved, math.NaN()), subject)
+		_, err = architecturekit.Load(context.Background(), store, averagedState(&evolved, 0), subject)
+
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent)
+		assert.ErrorContains(t, err, "two different states of type architecturekit_test.averaged")
 	})
 
 	t.Run("hands a state the cached state of another one of the same type that is built alike", func(t *testing.T) {
