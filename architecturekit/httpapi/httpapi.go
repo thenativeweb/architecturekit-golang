@@ -1,8 +1,8 @@
 // Package httpapi exposes commands and queries over HTTP, lets a caller read
-// its own writes (see Revisioned and Await), and answers the health checks of
-// an orchestrator (see Readiness and Liveness). It is optional: the kit's core
-// knows nothing about transports, and everything here can be replaced by a
-// handler of your own.
+// its own writes (see Revisioned, Awaiting and Await), and answers the health
+// checks of an orchestrator (see Readiness and Liveness). It is optional: the
+// kit's core knows nothing about transports, and everything here can be
+// replaced by a handler of your own.
 package httpapi
 
 import (
@@ -597,8 +597,8 @@ const statusClientClosedRequest = 499
 //
 // An error that wraps architecturekit.ErrNotARevision maps to 400, since the
 // value that is not a revision was handed over, such as a bound of
-// architecturekit.Read or the revision a view is to wait for, which usually
-// come from the request. An error of the category architecturekit.ErrPermanent
+// architecturekit.Read, the event ID of architecturekit.OnEventID, or the
+// revision a view is to wait for, which usually come from the request. An error of the category architecturekit.ErrPermanent
 // maps to 500 even then, since an ID that the server stored or made itself is
 // broken. An error that wraps architecturekit.ErrEmptyRange maps to 400 the
 // same way, since bounds of architecturekit.Read that leave no room for an
@@ -658,7 +658,7 @@ func StatusFor(err error) int {
 
 // Respond writes the kit's default answer to a command. On success, that is
 // the revision the command wrote, the ID of the last event, which a caller
-// hands to a query to read its own writes (see Revisioned):
+// hands to a query to read its own writes (see Revisioned and Awaiting):
 //
 //	{"revision": "42"}
 //

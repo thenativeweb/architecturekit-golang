@@ -195,7 +195,7 @@ func (r *ProjectionRun) Err() error {
 // nil then. It returns nil only then, so that an error that is nil always
 // means that every run has caught up:
 //
-//	if err := architecturekit.WaitCaughtUp(ctx, catalog, readers); err != nil {
+//	if err := architecturekit.WaitCaughtUp(ctx, catalogRun, readersRun); err != nil {
 //	  return err
 //	}
 //

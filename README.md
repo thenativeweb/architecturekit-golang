@@ -2714,7 +2714,7 @@ A query that holds a function or a channel can not be written into an `ETag`, an
 
 *Note that the constants `httpapi.HeaderWaitFor` and `httpapi.HeaderRevision` contain the names of the two headers.*
 
-*Note that `Revisioned` panics for a `nil` view or a negative wait, and so does giving it twice. A `nil` pointer counts as a `nil` view, such as a view that was declared but never created with `NewInMemoryView`.*
+*Note that `Revisioned` panics for a `nil` view or a negative wait, and so does giving it twice, or along with `Awaiting`. A `nil` pointer counts as a `nil` view, such as a view that was declared but never created with `NewInMemoryView`.*
 
 #### Depending on More Than the Read Model
 
