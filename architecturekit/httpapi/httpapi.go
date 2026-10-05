@@ -555,6 +555,10 @@ const statusClientClosedRequest = 499
 // StatusFor maps an error to an HTTP status. It asks for error categories
 // rather than concrete errors, so new failures do not need a new case here.
 //
+// A query that expects exactly one item and finds none, such as one of
+// query.Single, fails with query.ErrNoItems, which maps to 404 without having
+// to be translated into ErrNotFound.
+//
 // An error that wraps architecturekit.ErrNotARevision maps to 400, since the
 // value that is not a revision was handed over, such as a bound of
 // architecturekit.Read or the revision a view is to wait for, which usually
