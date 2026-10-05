@@ -109,7 +109,7 @@ func (s *SubjectScheme) Placeholders() []string {
 // and panics. Values that come from outside, such as an ID in a request, may
 // well be like that, so check them with Check first.
 func (s *SubjectScheme) Build(values ...string) string {
-	if err := s.Check(values...); err != nil {
+	if err := s.check(values, true); err != nil {
 		panic(err.Error())
 	}
 
@@ -136,20 +136,41 @@ func (s *SubjectScheme) Build(values ...string) string {
 // allows in a segment of a subject, which are A-Z, a-z, 0-9, underscores, and
 // hyphens. It is what Build insists on, as an error rather than a panic, for
 // values that come from outside.
+//
+// The error may reach the caller of an API, for example through ToCommand of
+// httpapi, so it names the placeholder of a value, but neither the package nor
+// the pattern, as in: value for "id" must not be empty. The panic of Build
+// names both, since it is for the developer.
 func (s *SubjectScheme) Check(values ...string) error {
+	return s.check(values, false)
+}
+
+// check tells whether the values can compose a subject, for Check, or for
+// Build if isForDeveloper is set, in which case the error names the package
+// and the pattern as well.
+func (s *SubjectScheme) check(values []string, isForDeveloper bool) error {
 	if len(values) != len(s.placeholders) {
-		return fmt.Errorf("architecturekit: pattern %q needs %d value(s), got %d",
-			s.pattern, len(s.placeholders), len(values))
+		if isForDeveloper {
+			return fmt.Errorf("architecturekit: pattern %q needs %d value(s), got %d",
+				s.pattern, len(s.placeholders), len(values))
+		}
+
+		return fmt.Errorf("the subject needs %d value(s), got %d", len(s.placeholders), len(values))
+	}
+
+	prefix, inPattern := "", ""
+	if isForDeveloper {
+		prefix, inPattern = "architecturekit: ", fmt.Sprintf(" in %q", s.pattern)
 	}
 
 	for i, value := range values {
 		if value == "" {
-			return fmt.Errorf("architecturekit: value for %q in %q must not be empty",
-				s.placeholders[i], s.pattern)
+			return fmt.Errorf("%svalue for %q%s must not be empty",
+				prefix, s.placeholders[i], inPattern)
 		}
 		if !hasOnlySubjectCharacters(value) {
-			return fmt.Errorf("architecturekit: value %q for %q in %q may only contain %s",
-				value, s.placeholders[i], s.pattern, subjectCharacters)
+			return fmt.Errorf("%svalue %q for %q%s may only contain %s",
+				prefix, value, s.placeholders[i], inPattern, subjectCharacters)
 		}
 	}
 

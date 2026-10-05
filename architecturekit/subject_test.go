@@ -2,6 +2,7 @@ package architecturekit_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -184,11 +185,56 @@ func TestSubjectScheme(t *testing.T) {
 
 	t.Run("says which characters a value may contain", func(t *testing.T) {
 		scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
-		message := `architecturekit: value "go.cqrs" for "workshop" in "/tenant/{tenant}/workshop/{workshop}" ` +
-			`may only contain A-Z, a-z, 0-9, underscores, and hyphens`
 
-		assert.EqualError(t, scheme.Check("acme", "go.cqrs"), message)
-		assert.PanicsWithValue(t, message, func() { scheme.Build("acme", "go.cqrs") })
+		assert.EqualError(t, scheme.Check("acme", "go.cqrs"),
+			`value "go.cqrs" for "workshop" may only contain A-Z, a-z, 0-9, underscores, and hyphens`)
+		assert.PanicsWithValue(t,
+			`architecturekit: value "go.cqrs" for "workshop" in "/tenant/{tenant}/workshop/{workshop}" `+
+				`may only contain A-Z, a-z, 0-9, underscores, and hyphens`,
+			func() { scheme.Build("acme", "go.cqrs") })
+	})
+
+	t.Run("names only the placeholder when it checks, but the package and the pattern when it builds", func(t *testing.T) {
+		// What Check returns may reach the caller of an API, through ToCommand,
+		// while what Build panics with is for the developer.
+		scheme := architecturekit.NewSubjectScheme("/tenant/{tenant}/workshop/{workshop}")
+
+		for _, test := range []struct {
+			name    string
+			values  []string
+			checked string
+			built   string
+		}{
+			{
+				"too few values", []string{"acme"},
+				`the subject needs 2 value(s), got 1`,
+				`architecturekit: pattern "/tenant/{tenant}/workshop/{workshop}" needs 2 value(s), got 1`,
+			},
+			{
+				"too many values", []string{"acme", "go-cqrs", "more"},
+				`the subject needs 2 value(s), got 3`,
+				`architecturekit: pattern "/tenant/{tenant}/workshop/{workshop}" needs 2 value(s), got 3`,
+			},
+			{
+				"an empty value", []string{"", "go-cqrs"},
+				`value for "tenant" must not be empty`,
+				`architecturekit: value for "tenant" in "/tenant/{tenant}/workshop/{workshop}" must not be empty`,
+			},
+			{
+				"a value with a character the database does not allow", []string{"acme", "go/cqrs"},
+				`value "go/cqrs" for "workshop" may only contain A-Z, a-z, 0-9, underscores, and hyphens`,
+				`architecturekit: value "go/cqrs" for "workshop" in "/tenant/{tenant}/workshop/{workshop}" ` +
+					`may only contain A-Z, a-z, 0-9, underscores, and hyphens`,
+			},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				err := scheme.Check(test.values...)
+
+				assert.EqualError(t, err, test.checked)
+				assert.Nil(t, errors.Unwrap(err), "the error wraps nothing")
+				assert.PanicsWithValue(t, test.built, func() { scheme.Build(test.values...) })
+			})
+		}
 	})
 
 	t.Run("refuses values with characters the database does not allow", func(t *testing.T) {
@@ -218,10 +264,12 @@ func TestSubjectScheme(t *testing.T) {
 			t.Run(test.name, func(t *testing.T) {
 				err := scheme.Check(test.value)
 				require.Error(t, err, "%q should be refused", test.value)
-				assert.ErrorContains(t, err, `"workshop"`)
-				assert.ErrorContains(t, err, "may only contain A-Z, a-z, 0-9, underscores, and hyphens")
+				assert.EqualError(t, err, fmt.Sprintf(
+					`value %q for "workshop" may only contain A-Z, a-z, 0-9, underscores, and hyphens`, test.value))
 
-				assert.PanicsWithValue(t, err.Error(), func() { scheme.Build(test.value) })
+				assert.PanicsWithValue(t, fmt.Sprintf(`architecturekit: value %q for "workshop" in "/workshop/{workshop}" `+
+					`may only contain A-Z, a-z, 0-9, underscores, and hyphens`, test.value),
+					func() { scheme.Build(test.value) })
 			})
 		}
 	})
