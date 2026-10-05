@@ -40,7 +40,8 @@ type readSettings struct {
 // FromEvent reads the events from the one with the given ID on, including it.
 //
 // The ID is a string, as everywhere else in the kit. One that is not the ID of
-// an event, such as an empty one, makes Read fail with ErrNotARevision.
+// an event, such as an empty one, makes Read fail with ErrNotARevision, and
+// bounds that leave no room for an event make it fail with ErrEmptyRange.
 func FromEvent(id string) ReadOption {
 	return lowerBound("FromEvent", id, eventsourcingdb.BoundTypeInclusive)
 }
@@ -49,7 +50,8 @@ func FromEvent(id string) ReadOption {
 // Hand over the ID of the last event of a page to read the next one.
 //
 // The ID is a string, as everywhere else in the kit. One that is not the ID of
-// an event, such as an empty one, makes Read fail with ErrNotARevision.
+// an event, such as an empty one, makes Read fail with ErrNotARevision, and
+// bounds that leave no room for an event make it fail with ErrEmptyRange.
 func AfterEvent(id string) ReadOption {
 	return lowerBound("AfterEvent", id, eventsourcingdb.BoundTypeExclusive)
 }
@@ -57,7 +59,8 @@ func AfterEvent(id string) ReadOption {
 // UpToEvent reads the events up to the one with the given ID, including it.
 //
 // The ID is a string, as everywhere else in the kit. One that is not the ID of
-// an event, such as an empty one, makes Read fail with ErrNotARevision.
+// an event, such as an empty one, makes Read fail with ErrNotARevision, and
+// bounds that leave no room for an event make it fail with ErrEmptyRange.
 func UpToEvent(id string) ReadOption {
 	return upperBound("UpToEvent", id, eventsourcingdb.BoundTypeInclusive)
 }
@@ -66,7 +69,8 @@ func UpToEvent(id string) ReadOption {
 // out.
 //
 // The ID is a string, as everywhere else in the kit. One that is not the ID of
-// an event, such as an empty one, makes Read fail with ErrNotARevision.
+// an event, such as an empty one, makes Read fail with ErrNotARevision, and
+// bounds that leave no room for an event make it fail with ErrEmptyRange.
 func BeforeEvent(id string) ReadOption {
 	return upperBound("BeforeEvent", id, eventsourcingdb.BoundTypeExclusive)
 }
@@ -91,7 +95,9 @@ func upperBound(name, id string, boundType eventsourcingdb.BoundType) ReadOption
 
 // NewestFirst hands out the newest event first, rather than the oldest one.
 // The bounds stay what they are, so together with BeforeEvent, it reads the
-// events before the given one, newest first, which pages backwards.
+// events before the given one, newest first, which pages backwards. A page
+// that ends with the event 0 is the last one, since BeforeEvent("0") leaves
+// no room for an event, which makes Read fail with ErrEmptyRange.
 func NewestFirst() ReadOption {
 	return func(settings *readSettings) {
 		settings.set(&settings.order, "order", "NewestFirst()")

@@ -622,11 +622,12 @@ const statusClientClosedRequest = 499
 // An error that wraps architecturekit.ErrNotARevision maps to 400, since the
 // value that is not a revision was handed over, such as a bound of
 // architecturekit.Read, the event ID of architecturekit.OnEventID, or the
-// revision a view is to wait for, which usually come from the request. An error of the category architecturekit.ErrPermanent
-// maps to 500 even then, since an ID that the server stored or made itself is
-// broken. An error that wraps architecturekit.ErrEmptyRange maps to 400 the
-// same way, since bounds of architecturekit.Read that leave no room for an
-// event usually come from the request as well.
+// revision a view is to wait for, which usually come from the request. An
+// error of the category architecturekit.ErrPermanent maps to 500 even then,
+// since an ID that the server stored or made itself is broken. An error that
+// wraps architecturekit.ErrEmptyRange maps to 400 the same way, since bounds
+// of architecturekit.Read that leave no room for an event usually come from
+// the request as well.
 //
 // An error because the context ended belongs to no category. If the request
 // was canceled, which happens when the caller goes away, it maps to 499, which

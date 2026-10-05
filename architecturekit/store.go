@@ -88,7 +88,8 @@ type storeSettings struct {
 // different ones are compared as reflect.DeepEqual compares them, except that
 // every value equals itself: two functions in them are equal if both are nil
 // or both are not, and two floats if they are equal or both NaN, as are the
-// parts of two complex numbers.
+// parts of two complex numbers. Only a map with a NaN key does not equal
+// itself, since Go never finds such a key again.
 //
 // A negative number of subjects is a programming error, so it panics.
 func WithStateCache(maxSubjects int) StoreOption {
