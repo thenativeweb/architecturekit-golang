@@ -490,6 +490,16 @@ func TestCopyOfInitial(t *testing.T) {
 }
 
 func TestClone(t *testing.T) {
+	t.Run("panics on a nil function, also one that was declared but never set", func(t *testing.T) {
+		var declared func([]int) []int
+
+		for _, clone := range []func([]int) []int{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: Clone needs a function, not nil", func() {
+				NewState([]int{}).Clone(clone)
+			})
+		}
+	})
+
 	t.Run("panics when called twice", func(t *testing.T) {
 		assert.Panics(t, func() {
 			NewState([]int{}).

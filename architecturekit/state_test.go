@@ -59,7 +59,41 @@ func TestReplay(t *testing.T) {
 	})
 }
 
+// pointed is an event whose EventType function has a pointer receiver, so that
+// only *pointed is an Event, which the kit refuses all the same.
+type pointed struct {
+	By int `json:"by"`
+}
+
+func (*pointed) EventType() string { return "io.thenativeweb.test.pointed" }
+
 func TestEvolve(t *testing.T) {
+	t.Run("panics on a nil function while the state is being built, also one that was declared but never set", func(t *testing.T) {
+		var declared func(counter, incremented) counter
+
+		for _, evolve := range []func(counter, incremented) counter{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: Evolve needs a function, not nil", func() {
+				architecturekit.NewState(counter{}).Evolve(evolve)
+			})
+		}
+	})
+
+	t.Run("panics on a pointer as the event type while the state is being built", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: Evolve needs the event type architecturekit_test.incremented, not the pointer *architecturekit_test.incremented",
+			func() {
+				architecturekit.NewState(counter{}).Evolve(func(current counter, _ *incremented) counter { return current })
+			})
+	})
+
+	t.Run("panics on a pointer as the event type also if its EventType function has a pointer receiver", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: Evolve needs the event type architecturekit_test.pointed, not the pointer *architecturekit_test.pointed",
+			func() {
+				architecturekit.NewState(counter{}).Evolve(func(current counter, _ *pointed) counter { return current })
+			})
+	})
+
 	t.Run("panics on duplicate event type", func(t *testing.T) {
 		defer func() {
 			recovered := recover()

@@ -650,9 +650,16 @@ func (v *InMemoryView[TKey, TItem]) compact() {
 // before the change.
 //
 // Add indexes before the view is used, since adding one reads every item.
+//
+// A nil function is a programming error, so it panics while the view is being
+// built, rather than once the first item arrives.
 func (v *InMemoryView[TKey, TItem]) Index[TValue comparable](
 	valueOf func(TItem) TValue,
 ) *InMemoryIndex[TKey, TItem, TValue] {
+	if valueOf == nil {
+		panic("architecturekit: Index needs a function, not nil")
+	}
+
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 

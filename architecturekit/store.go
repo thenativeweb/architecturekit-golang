@@ -168,7 +168,14 @@ func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
 // kit itself does not; give the projections names with Named, so that the log
 // tells them apart. A panic in observe ends the run, as a panic in the
 // projection does (see StartProjection).
+//
+// A nil function is a programming error, so it panics, rather than silently
+// observing nothing.
 func WithReconnectObserver(observe func(Reconnect)) StoreOption {
+	if observe == nil {
+		panic("architecturekit: WithReconnectObserver needs a function, not nil")
+	}
+
 	return func(settings *storeSettings) {
 		settings.reconnectObserver = observe
 	}

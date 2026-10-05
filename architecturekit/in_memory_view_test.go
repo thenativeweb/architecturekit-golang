@@ -577,6 +577,17 @@ var viewChanges = map[string]func(ctx context.Context, f *viewFixture, target vi
 }
 
 func TestInMemoryIndex(t *testing.T) {
+	t.Run("panics on a nil function while the view is being built, also one that was declared but never set", func(t *testing.T) {
+		var declared func(book) string
+
+		for _, valueOf := range []func(book) string{nil, declared} {
+			// The view is empty, so nothing would call the function yet.
+			assert.PanicsWithValue(t, "architecturekit: Index needs a function, not nil", func() {
+				bookView().Index(valueOf)
+			})
+		}
+	})
+
 	t.Run("looks up items by value", func(t *testing.T) {
 		view := bookView()
 		mustInsert(t, view, "1", book{ID: "a", Shelf: "left"})

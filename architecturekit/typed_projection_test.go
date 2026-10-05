@@ -142,6 +142,34 @@ func TestTypedProjection(t *testing.T) {
 		assert.NotErrorIs(t, err, architecturekit.ErrPermanent, "the kit must not categorise the error of a handler")
 	})
 
+	t.Run("panics on a nil handler while the projection is being built, also one that was declared but never set", func(t *testing.T) {
+		var declared func(context.Context, architecturekit.Envelope[credited]) error
+
+		for _, handle := range []func(context.Context, architecturekit.Envelope[credited]) error{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: On needs a function, not nil", func() {
+				architecturekit.NewProjection().On(handle)
+			})
+		}
+	})
+
+	t.Run("panics on a pointer as the event type while the projection is being built", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: On needs the event type architecturekit_test.credited, not the pointer *architecturekit_test.credited",
+			func() {
+				architecturekit.NewProjection().
+					On(func(context.Context, architecturekit.Envelope[*credited]) error { return nil })
+			})
+	})
+
+	t.Run("panics on a pointer as the event type also if its EventType function has a pointer receiver", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: On needs the event type architecturekit_test.pointed, not the pointer *architecturekit_test.pointed",
+			func() {
+				architecturekit.NewProjection().
+					On(func(context.Context, architecturekit.Envelope[*pointed]) error { return nil })
+			})
+	})
+
 	t.Run("panics on duplicate handler", func(t *testing.T) {
 		ignore := func(context.Context, architecturekit.Envelope[credited]) error { return nil }
 

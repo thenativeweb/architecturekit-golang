@@ -268,7 +268,7 @@ var bookState = architecturekit.NewState(Book{}).
 
 The event type is taken from the event's `EventType` function, so it does not have to be repeated.
 
-*Note that calling `Evolve` twice for the same event type panics.*
+*Note that calling `Evolve` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer as the event type, such as `*BookBorrowed` rather than `BookBorrowed`.*
 
 Every read starts from a copy of the initial value, so an `Evolve` function may change the state it gets without changing what the next read starts from. A copy shares nothing with a value like `Book{}`, and neither with an initial value whose maps, slices, pointers and channels are `nil`, so leave them `nil`, and let the `Evolve` functions create them when they need them. If the initial value holds a map, a pointer or a channel that is not `nil`, or a slice with room for elements, every copy shares it, and the state needs a `Clone` function that copies it (see [Caching States](#caching-states)). Without one, reading the state fails with an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)), rather than let an `Evolve` function change the initial value of every later read.
 
@@ -284,7 +284,7 @@ var bookState = architecturekit.NewState(Book{}).
   Ignore[BookInspected]()
 ```
 
-*Note that the data of an ignored event is not decoded, but its schema is still part of `Schemas`, since the event is still written. Ignoring an event type that has an `Evolve` rule, or ignoring it twice, panics, and so does calling `FromLatest` for it.*
+*Note that the data of an ignored event is not decoded, but its schema is still part of `Schemas`, since the event is still written. Ignoring an event type that has an `Evolve` rule, or ignoring it twice, panics, and so does calling `FromLatest` for it. So does ignoring a pointer as the event type, as with `Evolve`.*
 
 *Note that `Execute` refuses to write an event that the state of the decider has no rule for, since the state could not read the subject any more afterwards (see [Executing Commands](#executing-commands)). To find out whether a state has a rule for an event type, call the `HasRule` function on the state with the event type.*
 
@@ -402,7 +402,7 @@ for _, event := range writtenEvents {
 }
 ```
 
-*Note that `Decode` fails with an error of the category `ErrPermanent` for an event of another type, rather than leaving the fields of the wrong struct empty, and for data that does not fit the type.*
+*Note that `Decode` fails with an error of the category `ErrPermanent` for an event of another type, rather than leaving the fields of the wrong struct empty, and for data that does not fit the type. A pointer as the type, such as `*BookAcquired`, makes it panic, as with `Evolve`.*
 
 *Note that `Execute` only reads the events of the command's subject itself, not those of nested subjects.*
 
@@ -882,7 +882,7 @@ bookState.
 
 *Note that the database looks for the type under which an event is stored. If the event type is the result of an upcaster, events stored under the older type are not found, and all events are read.*
 
-*Note that calling `FromLatest` for an event type without an `Evolve` rule, or calling it twice, panics.*
+*Note that calling `FromLatest` for an event type without an `Evolve` rule, or for a pointer as the event type, or calling it twice, panics.*
 
 ### Caching States
 
@@ -925,7 +925,7 @@ Without a `Clone` function, such a state is read as without a cache. The same fu
 
 *Note that a `time.Time` counts as a value, since its location never changes.*
 
-*Note that a number of `0` keeps no states, the same as leaving out the option, so that a configuration can turn the cache off. A negative number makes `WithStateCache` panic, and calling `Clone` twice panics as well.*
+*Note that a number of `0` keeps no states, the same as leaving out the option, so that a configuration can turn the cache off. A negative number makes `WithStateCache` panic, and calling `Clone` twice, or with `nil`, panics as well.*
 
 ### Loading States
 
@@ -1349,6 +1349,8 @@ Several items may share a value. The index follows every change to the view, als
 
 *Note that adding an index reads every item, so add indexes before the view is used.*
 
+*Note that calling `Index` with `nil` as the function panics.*
+
 To keep items somewhere else, for example in a database, implement the `View` interface, which consists of the `All` function. It returns an iterator over the items and errors. A database fails not only before it reads the rows, but also while it reads them, for example when the connection breaks halfway. So hand out such an error with an empty item, and stop. Stop as well, and close the rows, as soon as the iterator is told to stop, which happens when the caller has seen enough, for example with `Take` or `First` (see [Defining Queries](#defining-queries)):
 
 ```go
@@ -1463,7 +1465,7 @@ To have the projection see the same events as the state, hand over the same set 
 catalogProjection.UpcastWith(libraryUpcasters)
 ```
 
-*Note that calling `On` twice for the same event type panics.*
+*Note that calling `On` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer as the event type, as with `Evolve`.*
 
 #### Handling Every Event
 
@@ -1554,7 +1556,7 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
 )
 ```
 
-*Note that an initial delay of zero or less panics, since the projections would then read again without any pause, and so does a maximum delay below the initial one.*
+*Note that an initial delay of zero or less panics, since the projections would then read again without any pause, and so does a maximum delay below the initial one. Calling `WithReconnectObserver` with `nil` panics as well.*
 
 The observer receives a `Reconnect` with these fields:
 

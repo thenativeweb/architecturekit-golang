@@ -58,6 +58,19 @@ func TestDecode(t *testing.T) {
 		assert.Zero(t, envelope)
 	})
 
+	t.Run("panics on a pointer as the event type, also if its EventType function has a pointer receiver", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: Decode needs the event type architecturekit_test.incremented, not the pointer *architecturekit_test.incremented",
+			func() { _, _ = architecturekit.Decode[*incremented](stored) })
+
+		pointedStored := stored
+		pointedStored.Type = "io.thenativeweb.test.pointed"
+
+		assert.PanicsWithValue(t,
+			"architecturekit: Decode needs the event type architecturekit_test.pointed, not the pointer *architecturekit_test.pointed",
+			func() { _, _ = architecturekit.Decode[*pointed](pointedStored) })
+	})
+
 	t.Run("decodes the events Execute returns", func(t *testing.T) {
 		written, err := architecturekit.Execute(context.Background(), requireStore(t), counterDecider(),
 			increment{subject: subjectFor(t), By: 3})

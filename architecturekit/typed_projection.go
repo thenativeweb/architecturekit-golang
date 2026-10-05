@@ -63,12 +63,17 @@ func NewProjection() *TypedProjection {
 //
 // Registering the same event type twice is a programming error, so it panics
 // while the projection is being built rather than silently overwriting a
-// handler.
+// handler. So does a nil handler, rather than the first event that arrives,
+// and a pointer as the event type, such as *BookBorrowed instead of
+// BookBorrowed.
 func (p *TypedProjection) On[TEvent Event](
 	handle func(ctx context.Context, event Envelope[TEvent]) error,
 ) *TypedProjection {
-	var zero TEvent
-	eventType := zero.EventType()
+	if handle == nil {
+		panic("architecturekit: On needs a function, not nil")
+	}
+
+	eventType := eventTypeOf[TEvent]("On")
 
 	if _, exists := p.handlers[eventType]; exists {
 		panic(fmt.Sprintf("architecturekit: event type %q already has a handler on this projection", eventType))
@@ -95,10 +100,13 @@ func (p *TypedProjection) On[TEvent Event](
 // into it, makes Decode fail with an error of the category ErrPermanent, since
 // decoding it again yields the same result. Checking the type matters: decoding
 // into the wrong struct would otherwise quietly leave its fields empty.
+//
+// A pointer as the event type, such as *BookBorrowed instead of BookBorrowed,
+// is a programming error, so Decode panics, as On does.
 func Decode[TEvent Event](event eventsourcingdb.Event) (Envelope[TEvent], error) {
 	var data TEvent
 
-	if eventType := data.EventType(); event.Type != eventType {
+	if eventType := eventTypeOf[TEvent]("Decode"); event.Type != eventType {
 		return Envelope[TEvent]{}, fmt.Errorf("%w: event %s is of type %q, not %q",
 			ErrPermanent, event.ID, event.Type, eventType)
 	}

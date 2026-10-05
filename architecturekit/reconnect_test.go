@@ -401,6 +401,18 @@ func TestStartProjectionWithReconnects(t *testing.T) {
 	})
 }
 
+func TestWithReconnectObserver(t *testing.T) {
+	t.Run("panics on a nil function, also one that was declared but never set", func(t *testing.T) {
+		var declared func(architecturekit.Reconnect)
+
+		for _, observe := range []func(architecturekit.Reconnect){nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: WithReconnectObserver needs a function, not nil", func() {
+				architecturekit.WithReconnectObserver(observe)
+			})
+		}
+	})
+}
+
 func TestWithReconnectDelays(t *testing.T) {
 	t.Run("panics on an initial delay of zero", func(t *testing.T) {
 		assert.PanicsWithValue(t,

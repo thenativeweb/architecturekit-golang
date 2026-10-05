@@ -72,6 +72,15 @@ func TestFromLatest(t *testing.T) {
 		architecturekit.NewState(counter{}).FromLatest[reset]()
 	})
 
+	t.Run("panics on a pointer as the event type, also if its EventType function has a pointer receiver", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: FromLatest needs the event type architecturekit_test.reset, not the pointer *architecturekit_test.reset",
+			func() { counterState().FromLatest[*reset]() })
+		assert.PanicsWithValue(t,
+			"architecturekit: FromLatest needs the event type architecturekit_test.pointed, not the pointer *architecturekit_test.pointed",
+			func() { counterState().FromLatest[*pointed]() })
+	})
+
 	t.Run("panics when called twice", func(t *testing.T) {
 		defer func() {
 			recovered := recover()
