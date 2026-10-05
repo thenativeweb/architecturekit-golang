@@ -32,9 +32,11 @@ type EventOn struct {
 // error of the category ErrPermanent, without writing anything. A nil pointer
 // of a concrete type counts as nil. So does an event whose data can not be
 // encoded as JSON, for example because it holds a float NaN, as with Execute.
-// Writing no events writes nothing and returns nil, but the preconditions are
-// checked first, so a write of no events still declares them, for example
-// with Unconditionally.
+// An ID of OnEventID that is not a revision makes Write fail with the error
+// of ParseRevision, which wraps ErrNotARevision, as with Execute, without
+// writing anything. Writing no events writes nothing and returns nil, but the
+// preconditions are checked first, so a write of no events still declares
+// them, for example with Unconditionally.
 //
 // Write knows no state, so unlike Execute, it does not refuse an event that a
 // state reading its subject has no rule for. Reading the subject with that
@@ -82,7 +84,8 @@ func Write(
 
 // writePreconditions checks the preconditions of a write the way
 // checkPreconditions does those of a command, except that OnStateRead has
-// nothing to refer to, and turns them into the ones the database checks.
+// nothing to refer to, and turns them into the ones the database checks. Like
+// checkPreconditions, it checks the IDs of OnEventID last.
 func writePreconditions(declared []Precondition) ([]eventsourcingdb.Precondition, error) {
 	if len(declared) == 0 {
 		return nil, fmt.Errorf("%w: a write declares no preconditions, use Unconditionally to write without any",
@@ -105,10 +108,17 @@ func writePreconditions(declared []Precondition) ([]eventsourcingdb.Precondition
 			if len(declared) > 1 {
 				return nil, fmt.Errorf("%w: a write combines Unconditionally with other preconditions", ErrPermanent)
 			}
+		case onEventIDKind:
+			database, _ := precondition.Database()
+			resolved = append(resolved, database)
 		default:
 			return nil, fmt.Errorf("%w: a write declares a zero Precondition, which none of OnPristineSubject, "+
 				"OnPopulatedSubject, OnEventID, OnStateRead, Require, or Unconditionally returns", ErrPermanent)
 		}
+	}
+
+	if err := checkEventIDs(declared); err != nil {
+		return nil, err
 	}
 
 	return resolved, nil

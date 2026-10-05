@@ -16,6 +16,11 @@ import (
 type Precondition struct {
 	kind     preconditionKind
 	database eventsourcingdb.Precondition
+
+	// subject and eventID are what OnEventID was given. The ID is checked
+	// before anything is read, since it usually comes from the caller.
+	subject string
+	eventID string
 }
 
 type preconditionKind int
@@ -24,6 +29,7 @@ const (
 	requiredKind preconditionKind = iota + 1
 	onStateReadKind
 	unconditionallyKind
+	onEventIDKind
 )
 
 // Require makes a precondition of the client SDK one of the command, for one
@@ -59,11 +65,17 @@ func OnPopulatedSubject(subject string) Precondition {
 //
 //	architecturekit.OnEventID(c.Subject(), c.ExpectedEventID)
 //
-// It is the same as Require with
-// eventsourcingdb.NewIsSubjectOnEventIDPrecondition. For the revision of the
-// state that Execute reads, use OnStateRead instead.
+// The ID usually comes from the caller, so Execute checks it with
+// ParseRevision before it reads anything. One that is not a revision, such as
+// an empty one, makes Execute fail with the error of ParseRevision, which
+// wraps ErrNotARevision and names the ID, as Read does for a bound, rather
+// than with a malformed request that the database refuses. Write refuses it
+// the same way. Otherwise, it is the same as Require with
+// eventsourcingdb.NewIsSubjectOnEventIDPrecondition, which leaves the ID to
+// the database. For the revision of the state that Execute reads, use
+// OnStateRead instead.
 func OnEventID(subject, eventID string) Precondition {
-	return Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition(subject, eventID))
+	return Precondition{kind: onEventIDKind, subject: subject, eventID: eventID}
 }
 
 // OnStateRead lets the events be written only if nothing has been written to
@@ -82,11 +94,16 @@ func Unconditionally() Precondition {
 	return Precondition{kind: unconditionallyKind}
 }
 
-// Database returns the precondition of the client SDK that Require made this
-// one from, or false if it was not made with Require. OnPristineSubject,
-// OnPopulatedSubject, and OnEventID make theirs with Require, so they return
-// one as well.
+// Database returns the precondition of the client SDK that the database
+// checks for this one: the one Require made it from, which is how
+// OnPristineSubject and OnPopulatedSubject make theirs, or the one of
+// eventsourcingdb.NewIsSubjectOnEventIDPrecondition for OnEventID. For any
+// other, it returns false.
 func (p Precondition) Database() (eventsourcingdb.Precondition, bool) {
+	if p.kind == onEventIDKind {
+		return eventsourcingdb.NewIsSubjectOnEventIDPrecondition(p.subject, p.eventID), true
+	}
+
 	return p.database, p.kind == requiredKind
 }
 
@@ -104,8 +121,11 @@ func (p Precondition) IsUnconditional() bool {
 // CheckPreconditions fails with an error of the category ErrPermanent if a
 // command declares its preconditions in a way Execute can not honor: none at
 // all, a requirement of nil, Unconditionally together with others, or a zero
-// Precondition, which none of the functions that create one returns. Execute
-// checks this before it reads anything, and the test fixture of
+// Precondition, which none of the functions that create one returns. If
+// nothing of that is wrong, it fails with the error of ParseRevision for the
+// first ID of OnEventID that is not a revision, which wraps ErrNotARevision,
+// so that a mistake in the code is not hidden behind one of the caller.
+// Execute checks this before it reads anything, and the test fixture of
 // architecturekittest uses CheckPreconditions to refuse such a command the
 // same way.
 func CheckPreconditions(cmd Command) error {
@@ -135,13 +155,38 @@ func checkPreconditions(cmd Command) ([]Precondition, error) {
 				return nil, fmt.Errorf("%w: %T combines Unconditionally with other preconditions",
 					ErrPermanent, cmd)
 			}
+		case onEventIDKind:
+			// Its ID is checked below, once nothing else is wrong.
 		default:
 			return nil, fmt.Errorf("%w: %T declares a zero Precondition, which none of OnPristineSubject, "+
 				"OnPopulatedSubject, OnEventID, OnStateRead, Require, or Unconditionally returns", ErrPermanent, cmd)
 		}
 	}
 
+	if err := checkEventIDs(declared); err != nil {
+		return nil, err
+	}
+
 	return declared, nil
+}
+
+// checkEventIDs returns the error of ParseRevision for the first ID of
+// OnEventID that is not a revision, or nil if there is none. The ID usually
+// comes from the caller, so, as with a bound of Read, the error names neither
+// the command nor the subject, and the database, which would refuse the ID as
+// a malformed request, is not asked.
+func checkEventIDs(declared []Precondition) error {
+	for _, precondition := range declared {
+		if precondition.kind != onEventIDKind {
+			continue
+		}
+
+		if _, err := ParseRevision(precondition.eventID); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // resolvePreconditions turns the declared preconditions into the ones the
@@ -156,8 +201,9 @@ func resolvePreconditions(
 
 	for _, precondition := range declared {
 		switch precondition.kind {
-		case requiredKind:
-			resolved = append(resolved, precondition.database)
+		case requiredKind, onEventIDKind:
+			database, _ := precondition.Database()
+			resolved = append(resolved, database)
 		case onStateReadKind:
 			if lastEventID == "" {
 				resolved = append(resolved, eventsourcingdb.NewIsSubjectPristinePrecondition(subject))
