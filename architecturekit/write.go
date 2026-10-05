@@ -24,9 +24,9 @@ type EventOn struct {
 // ErrConflict. Write never decides again on a conflict, since there is nothing
 // to decide.
 //
-// Like a command, a write declares at least one precondition, made with
-// Require, or Unconditionally to write without any. OnStateRead has nothing to
-// guard, since Write reads no state. That, an event without a subject or one
+// Like a command, a write declares at least one precondition, such as
+// OnPristineSubject or one made with Require, or Unconditionally to write
+// without any. OnStateRead has nothing to guard, since Write reads no state. That, an event without a subject or one
 // that is nil, and the other mistakes Execute refuses in the preconditions of
 // a command make Write fail with an error of the category ErrPermanent,
 // without writing anything. A nil pointer of a concrete type counts as nil.

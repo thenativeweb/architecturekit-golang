@@ -526,6 +526,23 @@ func TestPreconditionsOf(t *testing.T) {
 			)
 	})
 
+	t.Run("the preconditions of the kit that need no client SDK", func(t *testing.T) {
+		architecturekittest.Given(t, decider()).
+			When(open{
+				Owner: "golo",
+				preconditions: []architecturekit.Precondition{
+					architecturekit.OnPristineSubject("/account/1"),
+					architecturekit.OnPopulatedSubject("/account/2"),
+					architecturekit.OnEventID("/account/3", "9"),
+				},
+			}).
+			ThenPreconditions(
+				architecturekittest.OnPristineSubject("/account/1"),
+				architecturekittest.OnPopulatedSubject("/account/2"),
+				architecturekittest.OnEventID("/account/3", "9"),
+			)
+	})
+
 	t.Run("tells a pristine from a populated subject", func(t *testing.T) {
 		declared := architecturekittest.PreconditionsOf(open{
 			preconditions: []architecturekit.Precondition{

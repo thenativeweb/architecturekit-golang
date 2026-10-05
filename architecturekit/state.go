@@ -31,8 +31,8 @@ type Event interface {
 // events may be written.
 //
 // Preconditions is where optimistic concurrency, idempotency and uniqueness
-// live. Every command declares at least one, made with Require, OnStateRead, or
-// Unconditionally, and the kit adds none of its own.
+// live. Every command declares at least one (see Precondition), and the kit
+// adds none of its own.
 type Command interface {
 	Subject() string
 	Preconditions() []Precondition

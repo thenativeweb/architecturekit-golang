@@ -20,14 +20,18 @@ type Precondition struct {
 	Subject string
 
 	// Pristine is set only for a check that the subject has no events yet, as
-	// built by eventsourcingdb.NewIsSubjectPristinePrecondition.
+	// built by architecturekit.OnPristineSubject, or by Require with
+	// eventsourcingdb.NewIsSubjectPristinePrecondition.
 	Pristine bool
 
 	// Populated is set only for a check that the subject has events, as built
-	// by eventsourcingdb.NewIsSubjectPopulatedPrecondition.
+	// by architecturekit.OnPopulatedSubject, or by Require with
+	// eventsourcingdb.NewIsSubjectPopulatedPrecondition.
 	Populated bool
 
-	// EventID is set only for a revision check.
+	// EventID is set only for a revision check, as built by
+	// architecturekit.OnEventID, or by Require with
+	// eventsourcingdb.NewIsSubjectOnEventIDPrecondition.
 	EventID string
 
 	// Query is set only for an EventQL precondition.
@@ -149,18 +153,20 @@ func describePreconditions(preconditions []Precondition) string {
 	return "[" + strings.Join(described, ", ") + "]"
 }
 
-// OnPristineSubject describes a check that the subject has no events yet,
-// which is what a command that creates something usually declares.
+// OnPristineSubject describes architecturekit.OnPristineSubject, a check that
+// the subject has no events yet, which is what a command that creates
+// something usually declares.
 func OnPristineSubject(subject string) Precondition {
 	return Precondition{Subject: subject, Pristine: true}
 }
 
-// OnPopulatedSubject describes a check that the subject has events.
+// OnPopulatedSubject describes architecturekit.OnPopulatedSubject, a check that
+// the subject has events.
 func OnPopulatedSubject(subject string) Precondition {
 	return Precondition{Subject: subject, Populated: true}
 }
 
-// OnEventID describes a revision check.
+// OnEventID describes architecturekit.OnEventID, a revision check.
 func OnEventID(subject, eventID string) Precondition {
 	return Precondition{Subject: subject, EventID: eventID}
 }

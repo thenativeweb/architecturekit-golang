@@ -287,3 +287,72 @@ func TestPrecondition(t *testing.T) {
 		assert.True(t, architecturekit.Unconditionally().IsUnconditional(), "Unconditionally must only be unconditional")
 	})
 }
+
+func TestSubjectPreconditions(t *testing.T) {
+	t.Run("are the preconditions of the client SDK that Require takes", func(t *testing.T) {
+		for _, test := range []struct {
+			name     string
+			made     architecturekit.Precondition
+			database eventsourcingdb.Precondition
+		}{
+			{"OnPristineSubject", architecturekit.OnPristineSubject("/books/42"),
+				eventsourcingdb.NewIsSubjectPristinePrecondition("/books/42")},
+			{"OnPopulatedSubject", architecturekit.OnPopulatedSubject("/books/42"),
+				eventsourcingdb.NewIsSubjectPopulatedPrecondition("/books/42")},
+			{"OnEventID", architecturekit.OnEventID("/books/42", "7"),
+				eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/books/42", "7")},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				assert.Equal(t, architecturekit.Require(test.database), test.made)
+
+				database, ok := test.made.Database()
+				assert.True(t, ok, "made with Require")
+				assert.Equal(t, test.database, database)
+				assert.False(t, test.made.IsOnStateRead())
+				assert.False(t, test.made.IsUnconditional())
+			})
+		}
+	})
+
+	t.Run("guard the subject they name", func(t *testing.T) {
+		assert.NotEqual(t, architecturekit.OnPristineSubject("/books/23"), architecturekit.OnPristineSubject("/books/42"))
+		assert.NotEqual(t, architecturekit.OnPopulatedSubject("/books/23"), architecturekit.OnPopulatedSubject("/books/42"))
+		assert.NotEqual(t, architecturekit.OnEventID("/books/23", "7"), architecturekit.OnEventID("/books/42", "7"))
+		assert.NotEqual(t, architecturekit.OnEventID("/books/42", "6"), architecturekit.OnEventID("/books/42", "7"))
+	})
+
+	t.Run("are honored by Execute", func(t *testing.T) {
+		store := requireStore(t)
+		ctx := context.Background()
+
+		pristine := subjectFor(t) + "/pristine"
+		populated := subjectFor(t) + "/populated"
+
+		_, err := architecturekit.Execute(ctx, store, counterDecider(),
+			increment{subject: populated, By: 1}.declaring(architecturekit.OnPopulatedSubject(populated)))
+		assert.ErrorIs(t, err, architecturekit.ErrConflict, "a pristine subject is not populated")
+
+		_, err = architecturekit.Execute(ctx, store, counterDecider(),
+			increment{subject: pristine, By: 1}.declaring(architecturekit.OnEventID(pristine, "0")))
+		assert.ErrorIs(t, err, architecturekit.ErrConflict, "a pristine subject is on no event")
+
+		written, err := architecturekit.Execute(ctx, store, counterDecider(),
+			increment{subject: populated, By: 1}.declaring(architecturekit.OnPristineSubject(populated)))
+		require.NoError(t, err)
+
+		_, err = architecturekit.Execute(ctx, store, counterDecider(),
+			increment{subject: populated, By: 1}.declaring(architecturekit.OnPristineSubject(populated)))
+		assert.ErrorIs(t, err, architecturekit.ErrConflict, "a populated subject is not pristine")
+
+		_, err = architecturekit.Execute(ctx, store, counterDecider(),
+			increment{subject: populated, By: 1}.declaring(architecturekit.OnPopulatedSubject(populated)))
+		require.NoError(t, err)
+
+		_, err = architecturekit.Execute(ctx, store, counterDecider(),
+			increment{subject: populated, By: 1}.declaring(architecturekit.OnEventID(populated, written[0].ID)))
+		assert.ErrorIs(t, err, architecturekit.ErrConflict, "the subject has moved on from the event")
+
+		assert.Equal(t, 2, totalIn(t, store, populated))
+		assert.Equal(t, 0, totalIn(t, store, pristine))
+	})
+}
