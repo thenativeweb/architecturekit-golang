@@ -123,10 +123,10 @@ type inMemoryViewOptions[TItem any] struct {
 // projection applies every event type of that subject to the item. Otherwise
 // the two drift apart as soon as an event lands in the subject that the view
 // does not apply to the item, and every command with the revision of the item
-// fails with a conflict, until an event changes the item again. For an event type the item does not change
-// for, such as one the state ignores, call Update with a change that does
-// nothing, which only moves the revision on. For an item that gathers several
-// subjects, use OnStateRead instead.
+// fails with a conflict, until an event changes the item again. For an event
+// type the item does not change for, such as one the state ignores, call
+// Update with a change that does nothing, which only moves the revision on.
+// For an item that gathers several subjects, use OnStateRead instead.
 //
 // Without this option, the view keeps the revisions to itself.
 //

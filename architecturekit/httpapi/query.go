@@ -96,11 +96,12 @@ type querySettings struct {
 // 304 when nothing has changed, and tag the answer with the revision of the
 // view it served.
 //
-// Whether nothing has changed, it tells from If-None-Match, which it reads
-// the way HTTP has it: as a list of tags, or *, compared weakly, so that a tag
-// that a proxy marked as weak while compressing the answer still matches.
-// HTTP has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, which it
-// treats like GET (RFC 10008), also when the query asks with a body. It carries the tag and the revision, and no body.
+// Whether nothing has changed, it tells from If-None-Match, which it reads the
+// way HTTP has it: as a list of tags, or *, compared weakly, so that a tag
+// that a proxy marked as weak while compressing the answer still matches. HTTP
+// has 304 for GET and HEAD (RFC 9110, 13.1.2), and for QUERY, which it treats
+// like GET (RFC 10008), also when the query asks with a body. It carries the
+// tag and the revision, and no body.
 //
 // The tag holds the query, so two callers get the same tag only if they ask
 // the same: a query that holds the user, or anything else that tells callers

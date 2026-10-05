@@ -41,8 +41,8 @@ const exampleTime = "2026-10-05T12:00:00Z"
 // into a value of bodyType, given err, the error of encoding/json, and
 // detailed, the error of decoding the body once more, reporting errors the way
 // encoding/json/v2 does. The error of a type that decodes itself comes back as
-// it is, since the application wrote it, and for any other failure that it
-// has no words for, it says that the value can not be decoded.
+// it is, and for any other failure that it has no words for, it says that the
+// value can not be decoded.
 func describeDecoding(bodyType reflect.Type, body []byte, err, detailed error) error {
 	// A string field with the option string holds JSON text of its own, a
 	// string in quotes, whose mistakes encoding/json reports as a value that
@@ -75,7 +75,7 @@ func describeDecoding(bodyType reflect.Type, body []byte, err, detailed error) e
 		return describeTime(body, failure, err)
 	}
 
-	// The error of a type that decodes itself is the application's, while any
+	// The error of a type that decodes itself is the type's own, while any
 	// other one is the decoder's, whose text would name the types of Go.
 	if _, isOwn := ownFailureOf(detailed); isOwn {
 		return err
@@ -169,9 +169,8 @@ func describeNamesake(bodyType reflect.Type, body []byte, syntax *json.SyntaxErr
 // words of its own, and neither has the key of a map whose keys are booleans,
 // which encoding/json takes for no key at all. For them, it says that the
 // value can not be decoded. The error of a type that decodes itself comes back
-// as it is, since the application wrote it. Such a type may decode JSON text
-// of its own with encoding/json, whose path then points into that text rather
-// than into the body.
+// as it is. Such a type may decode JSON text of its own with encoding/json,
+// whose path then points into that text rather than into the body.
 func describeMismatch(bodyType reflect.Type, body []byte, mismatch *json.UnmarshalTypeError, err, detailed error) error {
 	// encoding/json names the type of every value that it refuses itself, so
 	// a value without one is that of a type that decodes itself, which failed

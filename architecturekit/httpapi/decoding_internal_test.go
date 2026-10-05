@@ -396,7 +396,8 @@ func TestDescribeDecoding(t *testing.T) {
 	})
 
 	t.Run("says that the body can not be decoded for an error of the decoder about a time", func(t *testing.T) {
-		// A time decodes itself, but is no type of the application.
+		// A time has the methods to decode itself, but its failure is the
+		// decoder's, which decodes it on its own.
 		failure := errors.New("a failure of a time")
 
 		err := describeDecoding(bodyType, []byte(`{"dueOn":"x"}`), failure, &jsonv2.SemanticError{GoType: reflect.TypeFor[time.Time](), JSONPointer: "/dueOn", Err: failure})

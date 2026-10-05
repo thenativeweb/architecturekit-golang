@@ -272,10 +272,10 @@ func Load[TState any](
 // A bound whose ID is not the ID of an event, such as an empty one, ends the
 // iteration with the error of ParseRevision, which wraps ErrNotARevision and
 // names the ID, before the database is asked. It names neither the subjects
-// nor the option, since the ID usually comes from a request. Otherwise, the iteration ends with the first error, and stops reading
-// as soon as the caller stops iterating. If the context ends first, it ends
-// with the context's error, so that a read that was cut short never looks
-// complete.
+// nor the option, since the ID usually comes from a request. Otherwise, the
+// iteration ends with the first error, and stops reading as soon as the caller
+// stops iterating. If the context ends first, it ends with the context's
+// error, so that a read that was cut short never looks complete.
 func Read(
 	ctx context.Context,
 	store *Store,

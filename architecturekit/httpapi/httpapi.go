@@ -41,7 +41,8 @@ var (
 	// ErrUnsupportedMediaType means the request did not claim to be JSON.
 	ErrUnsupportedMediaType = errors.New("unsupported media type")
 
-	// ErrTooLarge means the request body exceeded MaxRequestBody.
+	// ErrTooLarge means the request body exceeded MaxRequestBody, or a lower
+	// limit that a middleware set with http.MaxBytesReader.
 	ErrTooLarge = errors.New("request body too large")
 
 	// ErrForbidden means the user is known but not allowed to do this, or that
@@ -852,8 +853,9 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // apply to the body of a command or a query, for a handler of your own that
 // reads the body itself. The Content-Type has to be application/json, or it is
 // ErrUnsupportedMediaType. The body may hold at most MaxRequestBody bytes, or
-// it is ErrTooLarge. JSON that does not fit TBody, including a field that TBody
-// does not have, is ErrMalformed.
+// it is ErrTooLarge, and so is a body over a lower limit that a middleware set
+// with http.MaxBytesReader. JSON that does not fit TBody, including a field
+// that TBody does not have, is ErrMalformed.
 //
 // So is anything but whitespace after the JSON value, such as a second value,
 // and an object in which a name occurs twice. Names match fields regardless of
@@ -889,12 +891,13 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // string takes its number, boolean, or string in a string, and the keys of a
 // map whose keys are times have to be times.
 //
-// The error of a type that decodes itself keeps its own text, since the
-// application wrote it. Any other failure that there are no words for, such
-// as a value of a type that JSON has no kind for, says that the value can not
-// be decoded, or that the body can not be decoded, if it is not clear which
-// value. Either way, the error wraps the error of decoding, so that errors.As
-// finds it, such as a *json.UnmarshalTypeError that names the field.
+// The error of a type that decodes itself keeps its own text, as it is, also
+// for a type of a library, such as netip.Addr. Any other failure that there
+// are no words for, such as a value of a type that JSON has no kind for, says
+// that the value can not be decoded, or that the body can not be decoded, if
+// it is not clear which value. Either way, the error wraps the error of
+// decoding, so that errors.As finds it, such as a *json.UnmarshalTypeError
+// that names the field.
 //
 // If TBody is NoBody, the request is read without a body instead. A request
 // that a browser sends from another origin is ErrForbidden then, before the

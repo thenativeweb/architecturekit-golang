@@ -648,7 +648,7 @@ func TestBodyOf(t *testing.T) {
 	})
 
 	t.Run("keeps the text of the error of a type that decodes itself", func(t *testing.T) {
-		// The application wrote the error, so it is the one to say what is wrong.
+		// The error is the type's own, so it is the one to say what is wrong.
 		_, err := httpapi.BodyOf[catalogEntry](bodyRequest("application/json", strings.NewReader(`{"isbn":"42"}`)))
 
 		require.ErrorIs(t, err, httpapi.ErrMalformed)
@@ -784,8 +784,8 @@ func TestBodyOf(t *testing.T) {
 
 	t.Run("still names a value after a time with the option string", func(t *testing.T) {
 		// encoding/json ignores the option for a time, which encoding/json/v2
-		// refuses, so the second decoding fails at the time, which decodes
-		// itself, but is no type of the application.
+		// refuses, so the second decoding fails at the time, whose failure is
+		// the decoder's, although a time has the methods to decode itself.
 		type delivery struct {
 			//lint:ignore SA5008 the test is about the option on a type that it does not apply to
 			ArrivedAt time.Time `json:"arrivedAt,string"`
