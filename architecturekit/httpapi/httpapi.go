@@ -878,6 +878,7 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 //	"quantity" is out of range
 //	"quantity" must be an integer
 //	"cover" must be base64
+//	"pair" must have 2 elements
 //	"dueOn" must be a time such as "2026-10-05T12:00:00Z"
 //	"quantity" must be a string that holds a number
 //	the keys of "stock" must be numbers
@@ -892,6 +893,16 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // written as one, without a fraction or an exponent. A field with the option
 // string takes its number, boolean, or string in a string, and the keys of a
 // map whose keys are times have to be times.
+//
+// An array has to have as many elements as the Go array that it is decoded
+// into, such as [2]int, which encoding/json would fill up with zeros, or cut
+// off, without a word. A body of null is refused as well, since encoding/json
+// takes it for no value at all, and would hand back the zero value of TBody.
+// The error says which kind the body has to be, as in "the body must be an
+// object". Only a type whose kind is not clear, such as one that decodes
+// itself, gets null as any other value, and decides itself what it means,
+// and an interface takes it for nil. null for a field still leaves the field
+// as it is, as with encoding/json.
 //
 // The error of a type that decodes itself keeps its own text, as it is, also
 // for a type of a library, such as netip.Addr, as long as it can tell its
@@ -926,6 +937,10 @@ func BodyOf[TBody any](r *http.Request) (TBody, error) {
 		return value, err
 	}
 
+	if err := refuseNull(reflect.TypeFor[TBody](), body); err != nil {
+		return value, fmt.Errorf("%w: %w", ErrMalformed, err)
+	}
+
 	value, err = decodeStrictly[TBody](body)
 	if err != nil {
 		return value, fmt.Errorf("%w: %w", ErrMalformed, err)
@@ -936,11 +951,14 @@ func BodyOf[TBody any](r *http.Request) (TBody, error) {
 
 // strictJSON are the rules of encoding/json, which match names regardless of
 // case, except that unknown fields and names that occur twice are rejected
-// (see decodeStrictly).
+// (see decodeStrictly), and so is an array whose length differs from that of
+// the Go array that it is decoded into, which encoding/json would fill up
+// with zeros, or cut off, without a word.
 var strictJSON = jsonv2.JoinOptions(
 	json.DefaultOptionsV1(),
 	jsonv2.RejectUnknownMembers(true),
 	jsontext.AllowDuplicateNames(false),
+	json.UnmarshalArrayFromAnyLength(false),
 )
 
 // decodeStrictly decodes a body that holds exactly one JSON value, with

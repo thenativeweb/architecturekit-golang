@@ -189,6 +189,11 @@ var bodyFailures = []struct {
 		message: "malformed request: invalid JSON",
 	},
 	{
+		label: "that is null", contentType: "application/json", body: func() io.Reader { return strings.NewReader("null") },
+		category: httpapi.ErrMalformed, status: http.StatusBadRequest,
+		message: "malformed request: the body must be an object",
+	},
+	{
 		label: "with an unknown field", contentType: "application/json", body: func() io.Reader { return strings.NewReader(`{"limt":2}`) },
 		category: httpapi.ErrMalformed, status: http.StatusBadRequest,
 		message: `malformed request: unknown field "limt"`,
