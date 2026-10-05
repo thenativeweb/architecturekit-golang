@@ -18,6 +18,7 @@ import (
 	"maps"
 	"mime"
 	"net/http"
+	"reflect"
 	"runtime/debug"
 	"strings"
 
@@ -816,13 +817,30 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // into the query string. The Content-Type has to be application/json, or it is
 // ErrUnsupportedMediaType. The body may hold at most MaxRequestBody bytes, or
 // it is ErrTooLarge. JSON that does not fit TBody, including a field that TBody
-// does not have, is ErrMalformed, which wraps the error of decoding, so that
-// errors.As finds it, such as a *json.UnmarshalTypeError that names the field.
+// does not have, is ErrMalformed.
 //
 // So is anything but whitespace after the JSON value, such as a second value,
 // and an object in which a name occurs twice. Names match fields regardless of
 // case, as with encoding/json, so two names that match the same field count
 // as the same name, even if they differ in case.
+//
+// The error says what is wrong in words of its own, rather than in those of
+// the decoder, which name the types of Go. After the text of ErrMalformed, it
+// says, for example:
+//
+//	"quantity" must be a number
+//	unknown field "quantiy"
+//	duplicate field "customerId"
+//	invalid JSON
+//	data after the JSON value
+//
+// A value of another kind than its field takes names the field by its path,
+// as encoding/json does, such as "delivery.address" or "items.0.bookId", and
+// the kind it has to be, which is a string, a number, a boolean, an array, or
+// an object. Any other failure keeps the text of the decoder for now, such as
+// a body that is empty, or a number that is too large for its field. Either
+// way, the error wraps the error of decoding, so that errors.As finds it, such
+// as a *json.UnmarshalTypeError that names the field.
 //
 // If TBody is NoBody, the request is read without a body instead. A request
 // that a browser sends from another origin is ErrForbidden then, before the
@@ -866,7 +884,8 @@ var strictJSON = jsonv2.JoinOptions(
 
 // decodeStrictly decodes a body that holds exactly one JSON value, with
 // nothing but whitespace after it, and hands back the zero value if it fails,
-// so that nothing half-decoded gets out.
+// so that nothing half-decoded gets out. Its error says what is wrong in words
+// of its own, as far as it has them (see describeDecoding).
 //
 // Unknown fields are rejected rather than dropped, so that a misspelled field
 // cannot silently turn into a zero value. A name that occurs twice, and
@@ -883,18 +902,14 @@ func decodeStrictly[TBody any](body []byte) (TBody, error) {
 		return value, nil
 	}
 
-	// encoding/json reports a name that occurs twice without saying which, so
-	// in that case the body is decoded once more, reporting errors the way
-	// encoding/json/v2 does, which names it and the object it occurs in. Its
-	// other errors are kept, since they name an unknown field more plainly.
+	// encoding/json names an unknown field in its text alone, so the body is
+	// decoded once more, reporting errors the way encoding/json/v2 does, which
+	// points to it.
 	detailed := jsonv2.Unmarshal(body, new(TBody), strictJSON, json.ReportErrorsWithLegacySemantics(false))
-	if errors.Is(detailed, jsontext.ErrDuplicateName) {
-		err = detailed
-	}
 
 	var zero TBody
 
-	return zero, err
+	return zero, describeDecoding(reflect.TypeFor[TBody](), body, err, detailed)
 }
 
 // requireJSON insists on application/json. That is not pedantry: a browser

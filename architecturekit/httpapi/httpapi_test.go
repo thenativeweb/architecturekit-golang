@@ -498,7 +498,7 @@ func TestRoute(t *testing.T) {
 		})
 
 		assert.Equal(t, http.StatusBadRequest, response.Code)
-		assert.Contains(t, response.Body.String(), "txt", "the answer should name the unknown field")
+		assert.JSONEq(t, `{"message": "malformed request: unknown field \"txt\""}`, response.Body.String(), "the answer should name the unknown field")
 	})
 
 	t.Run("ambiguous JSON is rejected", func(t *testing.T) {
