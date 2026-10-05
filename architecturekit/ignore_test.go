@@ -101,6 +101,15 @@ func TestIgnore(t *testing.T) {
 			func() { architecturekit.NewState(counter{}).Ignore[*pointed]() })
 	})
 
+	t.Run("panics on an interface as the event type while the state is being built, also on one of its own", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: Ignore needs a concrete event type, not the interface architecturekit.Event",
+			func() { architecturekit.NewState(counter{}).Ignore[architecturekit.Event]() })
+		assert.PanicsWithValue(t,
+			"architecturekit: Ignore needs a concrete event type, not the interface architecturekit_test.counterEvent",
+			func() { architecturekit.NewState(counter{}).Ignore[counterEvent]() })
+	})
+
 	t.Run("panics on FromLatest for an ignored event type", func(t *testing.T) {
 		assert.PanicsWithValue(t,
 			`architecturekit: event type "io.thenativeweb.test.reset" has no Evolve rule on this state`,

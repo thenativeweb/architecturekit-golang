@@ -141,9 +141,9 @@ func DeriveSchema[T any]() map[string]any {
 //
 // The rule is the one of Evolve, so SchemaOf refuses what Evolve refuses: an
 // event type that has its Schema function only from an embedded field, one
-// whose schema can not be derived, and a pointer as the event type, such as
-// *BookBorrowed instead of BookBorrowed. These are programming errors, so
-// SchemaOf panics, naming the mistake.
+// whose schema can not be derived, a pointer as the event type, such as
+// *BookBorrowed instead of BookBorrowed, and an interface, such as Event. These
+// are programming errors, so SchemaOf panics, naming the mistake.
 func SchemaOf[TEvent Event]() EventSchema {
 	return schemaFor[TEvent](eventTypeOf[TEvent]("SchemaOf"))
 }

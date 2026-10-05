@@ -65,7 +65,7 @@ func NewTypedProjection() *TypedProjection {
 // while the projection is being built rather than silently overwriting a
 // handler. So does a nil handler, rather than the first event that arrives,
 // and a pointer as the event type, such as *BookBorrowed instead of
-// BookBorrowed.
+// BookBorrowed, or an interface, such as Event.
 func (p *TypedProjection) On[TEvent Event](
 	handle func(ctx context.Context, event Envelope[TEvent]) error,
 ) *TypedProjection {
@@ -102,7 +102,8 @@ func (p *TypedProjection) On[TEvent Event](
 // into the wrong struct would otherwise quietly leave its fields empty.
 //
 // A pointer as the event type, such as *BookBorrowed instead of BookBorrowed,
-// is a programming error, so Decode panics, as On does.
+// or an interface, such as Event, is a programming error, so Decode panics, as
+// On does.
 func Decode[TEvent Event](event eventsourcingdb.Event) (Envelope[TEvent], error) {
 	var data TEvent
 

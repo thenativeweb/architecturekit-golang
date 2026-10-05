@@ -268,7 +268,7 @@ var bookState = architecturekit.NewState(Book{}).
 
 The event type is taken from the event's `EventType` function, so it does not have to be repeated.
 
-*Note that calling `Evolve` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer as the event type, such as `*BookBorrowed` rather than `BookBorrowed`.*
+*Note that calling `Evolve` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer as the event type, such as `*BookBorrowed` rather than `BookBorrowed`, or with an interface, such as `architecturekit.Event`.*
 
 Every read starts from a copy of the initial value, so an `Evolve` function may change the state it gets without changing what the next read starts from. A copy shares nothing with a value like `Book{}`, and neither with an initial value whose maps, slices, pointers and channels are `nil`, so leave them `nil`, and let the `Evolve` functions create them when they need them. If the initial value holds a map, a pointer or a channel that is not `nil`, or a slice with room for elements, every copy shares it, and the state needs a `Clone` function that copies it (see [Caching States](#caching-states)). Without one, reading the state fails with an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)), rather than let an `Evolve` function change the initial value of every later read.
 
@@ -284,7 +284,7 @@ var bookState = architecturekit.NewState(Book{}).
   Ignore[BookInspected]()
 ```
 
-*Note that the data of an ignored event is not decoded, but its schema is still part of `Schemas`, since the event is still written. Ignoring an event type that has an `Evolve` rule, or ignoring it twice, panics, and so does calling `FromLatest` for it. So does ignoring a pointer as the event type, as with `Evolve`.*
+*Note that the data of an ignored event is not decoded, but its schema is still part of `Schemas`, since the event is still written. Ignoring an event type that has an `Evolve` rule, or ignoring it twice, panics, and so does calling `FromLatest` for it. So does ignoring a pointer or an interface as the event type, as with `Evolve`.*
 
 *Note that `Execute` refuses to write an event that the state of the decider has no rule for, since the state could not read the subject any more afterwards (see [Executing Commands](#executing-commands)). To find out whether a state has a rule for an event type, call the `HasRule` function on the state with the event type.*
 
@@ -402,7 +402,7 @@ for _, event := range writtenEvents {
 }
 ```
 
-*Note that `Decode` fails with an error of the category `ErrPermanent` for an event of another type, rather than leaving the fields of the wrong struct empty, and for data that does not fit the type. A pointer as the type, such as `*BookAcquired`, makes it panic, as with `Evolve`.*
+*Note that `Decode` fails with an error of the category `ErrPermanent` for an event of another type, rather than leaving the fields of the wrong struct empty, and for data that does not fit the type. A pointer as the type, such as `*BookAcquired`, or an interface, such as `architecturekit.Event`, makes it panic, as with `Evolve`.*
 
 *Note that `Execute` only reads the events of the command's subject itself, not those of nested subjects.*
 
@@ -863,7 +863,7 @@ if err != nil {
 }
 ```
 
-*Note that `SchemaOf` panics where `Evolve` would, for example for an event that has its `Schema` function only from an embedded field, or for a pointer as the event type.*
+*Note that `SchemaOf` panics where `Evolve` would, for example for an event that has its `Schema` function only from an embedded field, or for a pointer or an interface as the event type.*
 
 A registered schema can not change. If it differs from the one from the code, `RegisterSchemas` returns an error of the category `ErrPermanent`, and so it does if the database refuses a schema, for example because stored events of the type do not match it. To change the shape of an event, introduce a new event type instead (see [Versioning Events](#versioning-events)).
 
@@ -958,7 +958,7 @@ bookState.
 
 *Note that the database looks for the type under which an event is stored. If the event type is the result of an upcaster, events stored under the older type are not found, and all events are read.*
 
-*Note that calling `FromLatest` for an event type without an `Evolve` rule, or for a pointer as the event type, or calling it twice, panics.*
+*Note that calling `FromLatest` for an event type without an `Evolve` rule, or for a pointer or an interface as the event type, or calling it twice, panics.*
 
 ### Caching States
 
@@ -1543,7 +1543,7 @@ To have the projection see the same events as the state, hand over the same set 
 catalogProjection.UpcastWith(libraryUpcasters)
 ```
 
-*Note that calling `On` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer as the event type, as with `Evolve`.*
+*Note that calling `On` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer or an interface as the event type, as with `Evolve`.*
 
 #### Handling Every Event
 

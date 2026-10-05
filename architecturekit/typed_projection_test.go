@@ -170,6 +170,21 @@ func TestTypedProjection(t *testing.T) {
 			})
 	})
 
+	t.Run("panics on an interface as the event type while the projection is being built, also on one of its own", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: On needs a concrete event type, not the interface architecturekit.Event",
+			func() {
+				architecturekit.NewTypedProjection().
+					On(func(context.Context, architecturekit.Envelope[architecturekit.Event]) error { return nil })
+			})
+		assert.PanicsWithValue(t,
+			"architecturekit: On needs a concrete event type, not the interface architecturekit_test.counterEvent",
+			func() {
+				architecturekit.NewTypedProjection().
+					On(func(context.Context, architecturekit.Envelope[counterEvent]) error { return nil })
+			})
+	})
+
 	t.Run("panics on duplicate handler", func(t *testing.T) {
 		ignore := func(context.Context, architecturekit.Envelope[credited]) error { return nil }
 

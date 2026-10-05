@@ -109,7 +109,7 @@ func NewState[TState any](initial TState) *State[TState] {
 // while the state is being built rather than silently overwriting a rule at
 // run time. So does a nil function, rather than the first event that is read,
 // and a pointer as the event type, such as *BookBorrowed instead of
-// BookBorrowed.
+// BookBorrowed, or an interface, such as Event.
 func (s *State[TState]) Evolve[TEvent Event](evolve func(TState, TEvent) TState) *State[TState] {
 	if evolve == nil {
 		panic("architecturekit: Evolve needs a function, not nil")
@@ -145,8 +145,8 @@ func (s *State[TState]) Evolve[TEvent Event](evolve func(TState, TEvent) TState)
 // Schemas, since the event is still written to the subject.
 //
 // Ignoring an event type that has an Evolve rule, ignoring it twice, or
-// ignoring a pointer as the event type, is a programming error, so it panics
-// while the state is being built.
+// ignoring a pointer or an interface as the event type, is a programming error,
+// so it panics while the state is being built.
 func (s *State[TState]) Ignore[TEvent Event]() *State[TState] {
 	eventType := eventTypeOf[TEvent]("Ignore")
 
@@ -181,11 +181,17 @@ func schemaFor[TEvent Event](eventType string) EventSchema {
 // for its event type, which is nil for a pointer, and it would derive a schema
 // that allows null. So eventTypeOf panics, naming the type to use instead,
 // before anything asks the nil pointer, also if its EventType function has a
-// pointer receiver.
+// pointer receiver. An interface, such as Event, is a programming error as
+// well, since its zero value is nil too, so eventTypeOf panics, naming the
+// interface.
 func eventTypeOf[TEvent Event](function string) string {
-	if eventType := reflect.TypeFor[TEvent](); eventType.Kind() == reflect.Pointer {
+	switch eventType := reflect.TypeFor[TEvent](); eventType.Kind() {
+	case reflect.Pointer:
 		panic(fmt.Sprintf("architecturekit: %s needs the event type %v, not the pointer %v",
 			function, eventType.Elem(), eventType))
+	case reflect.Interface:
+		panic(fmt.Sprintf("architecturekit: %s needs a concrete event type, not the interface %v",
+			function, eventType))
 	}
 
 	var zero TEvent
@@ -228,8 +234,9 @@ func (s *State[TState]) UpcastWith(upcasters *Upcasters) *State[TState] {
 // and the state is built from the first event.
 //
 // Calling FromLatest for an event type without an Evolve rule, for one the
-// state ignores, or for a pointer as the event type, or calling it twice, is a
-// programming error, so it panics while the state is being built.
+// state ignores, or for a pointer or an interface as the event type, or calling
+// it twice, is a programming error, so it panics while the state is being
+// built.
 func (s *State[TState]) FromLatest[TEvent Event]() *State[TState] {
 	eventType := eventTypeOf[TEvent]("FromLatest")
 

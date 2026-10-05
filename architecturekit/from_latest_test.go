@@ -81,6 +81,15 @@ func TestFromLatest(t *testing.T) {
 			func() { counterState().FromLatest[*pointed]() })
 	})
 
+	t.Run("panics on an interface as the event type while the state is being built, also on one of its own", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: FromLatest needs a concrete event type, not the interface architecturekit.Event",
+			func() { counterState().FromLatest[architecturekit.Event]() })
+		assert.PanicsWithValue(t,
+			"architecturekit: FromLatest needs a concrete event type, not the interface architecturekit_test.counterEvent",
+			func() { counterState().FromLatest[counterEvent]() })
+	})
+
 	t.Run("panics when called twice", func(t *testing.T) {
 		defer func() {
 			recovered := recover()

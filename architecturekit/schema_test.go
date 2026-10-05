@@ -850,6 +850,15 @@ func TestSchemaOf(t *testing.T) {
 			func() { architecturekit.SchemaOf[*pointed]() })
 	})
 
+	t.Run("panics on an interface as the event type, also on one of its own", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: SchemaOf needs a concrete event type, not the interface architecturekit.Event",
+			func() { architecturekit.SchemaOf[architecturekit.Event]() })
+		assert.PanicsWithValue(t,
+			"architecturekit: SchemaOf needs a concrete event type, not the interface architecturekit_test.counterEvent",
+			func() { architecturekit.SchemaOf[counterEvent]() })
+	})
+
 	t.Run("is accepted and checked by the database for an event that only Write writes", func(t *testing.T) {
 		store := requireStore(t)
 		subject := subjectFor(t)

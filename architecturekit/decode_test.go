@@ -71,6 +71,15 @@ func TestDecode(t *testing.T) {
 			func() { _, _ = architecturekit.Decode[*pointed](pointedStored) })
 	})
 
+	t.Run("panics on an interface as the event type, also on one of its own", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: Decode needs a concrete event type, not the interface architecturekit.Event",
+			func() { _, _ = architecturekit.Decode[architecturekit.Event](stored) })
+		assert.PanicsWithValue(t,
+			"architecturekit: Decode needs a concrete event type, not the interface architecturekit_test.counterEvent",
+			func() { _, _ = architecturekit.Decode[counterEvent](stored) })
+	})
+
 	t.Run("decodes the events Execute returns", func(t *testing.T) {
 		written, err := architecturekit.Execute(context.Background(), requireStore(t), counterDecider(),
 			increment{subject: subjectFor(t), By: 3})
