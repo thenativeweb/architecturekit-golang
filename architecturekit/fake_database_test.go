@@ -185,6 +185,43 @@ func writingDatabase(t *testing.T, path string, answer http.HandlerFunc) *events
 	return clientFor(t, server)
 }
 
+// vanishingDatabase answers reading with no events, and stops taking
+// connections once it has answered, so that a write after the read can not
+// even connect, as with a database that has gone down in between. It returns a
+// client for it.
+func vanishingDatabase(t *testing.T) *eventsourcingdb.Client {
+	t.Helper()
+
+	server := httptest.NewUnstartedServer(nil)
+	server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Server", "EventSourcingDB/test")
+		writer.Header().Set("Connection", "close")
+		_ = server.Listener.Close()
+	})
+	server.Start()
+	t.Cleanup(server.Close)
+
+	return clientFor(t, server)
+}
+
+// hangingUpDatabase answers reading with no events, and hangs up on a write as
+// soon as it has its headers, without reading the events, as a database does
+// that goes down while the request arrives. It returns a client for it.
+func hangingUpDatabase(t *testing.T) *eventsourcingdb.Client {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Server", "EventSourcingDB/test")
+
+		if request.URL.Path == "/api/v1/write-events" {
+			panic(http.ErrAbortHandler)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	return clientFor(t, server)
+}
+
 // clientFor returns a client for the given server.
 func clientFor(t *testing.T, server *httptest.Server) *eventsourcingdb.Client {
 	t.Helper()

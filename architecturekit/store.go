@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"net/http/httptrace"
 	"reflect"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -120,6 +122,8 @@ func WithStateCache(maxSubjects int) StoreOption {
 //
 // Once the retries are used up, Execute reports the conflict, an error of the
 // category ErrConflict. Write never decides again, since it decides nothing.
+// Nor does Execute try a write again whose outcome is unknown, since its
+// events may have been stored (see ErrOutcomeUnknown).
 //
 // A negative number of retries is a programming error, so it panics.
 func WithConflictRetries(retries int) StoreOption {
@@ -487,21 +491,37 @@ func (s *Store) candidateFor(subject string, event Event) (eventsourcingdb.Event
 	}, nil
 }
 
-// write appends the candidates to a subject under the given preconditions and
-// returns them as the database recorded them, including their IDs.
+// write appends the candidates under the given preconditions and returns them
+// as the database recorded them, including their IDs. A failure is sorted
+// into a category, or reported as ErrOutcomeUnknown (see writeFailure), and
+// doing says what was written, for the message. Execute and Write both write
+// with it.
 //
 // The client gets the context without its end, so that a write that has begun
 // is finished, whatever happens to the context of the caller: its values, such
-// as a trace, reach the request, but its end does not stop it.
+// as a trace, reach the request, but its end does not stop it. A trace of its
+// own tells whether the request has left completely, which only a write that
+// fails without an answer from the database needs to know. A request whose
+// writing failed has not, since the database reads the whole request before it
+// writes anything.
 func (s *Store) write(
 	ctx context.Context,
-	subject string,
 	candidates []eventsourcingdb.EventCandidate,
 	preconditions []eventsourcingdb.Precondition,
+	doing string,
 ) ([]eventsourcingdb.Event, error) {
-	written, err := s.client.WriteEvents(context.WithoutCancel(ctx), candidates, preconditions)
+	var isSent atomic.Bool
+	traced := httptrace.WithClientTrace(context.WithoutCancel(ctx), &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				isSent.Store(true)
+			}
+		},
+	})
+
+	written, err := s.client.WriteEvents(traced, candidates, preconditions)
 	if err != nil {
-		return nil, databaseFailure(err, fmt.Sprintf("writing %q", subject))
+		return nil, writeFailure(err, isSent.Load(), doing)
 	}
 
 	return written, nil
@@ -767,7 +787,7 @@ func executeOnce[TCommand Command, TState any](
 		return nil, contextEnded(ctx, fmt.Sprintf("writing to %q", subject))
 	}
 
-	return store.write(ctx, subject, candidates, resolvePreconditions(subject, declared, lastEventID))
+	return store.write(ctx, candidates, resolvePreconditions(subject, declared, lastEventID), fmt.Sprintf("writing %q", subject))
 }
 
 // checkNotNil fails permanently if one of the events a decider returned for a

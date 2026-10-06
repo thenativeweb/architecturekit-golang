@@ -443,6 +443,8 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", 
 
 *Note that a negative number of retries makes `WithConflictRetries` panic.*
 
+*Note that the store decides again only on a conflict. A write whose outcome is unknown is never tried again, since its events may have been stored (see [Handling Errors](#handling-errors)).*
+
 *Note that this only applies to commands whose preconditions include `OnStateRead`. A command that checks only a revision the caller hands over is never decided again, since the caller has to learn about the conflict, and deciding again would fail the same way (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). A command that checks both is decided again, since the database does not say which precondition did not hold. If the revision of the caller is outdated, every attempt fails the same way, until the retries are used up. On the same subject, one of the two is enough: if the revision of the caller holds, so does `OnStateRead`.*
 
 #### Checking the Revision of the Caller
@@ -778,7 +780,7 @@ if errors.Is(err, architecturekit.ErrConflict) {
 }
 ```
 
-`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. If the data of one of the events can not be encoded as JSON, nothing is written either, and the error belongs to the category `ErrPermanent`. So does an event without a subject, or one that is `nil`, a `nil` pointer included. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
+`Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. If the data of one of the events can not be encoded as JSON, nothing is written either, and the error belongs to the category `ErrPermanent`. So does an event without a subject, or one that is `nil`, a `nil` pointer included. Other failures belong to the same categories as for `Execute`, or leave the outcome of the write unknown, as with `Execute` (see [Handling Errors](#handling-errors)).
 
 Like a command, a write declares at least one precondition, such as `OnPristineSubject` or one made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state, so `Write` refuses it with an error of the category `ErrPermanent`, without writing anything. An event ID of `OnEventID` that is not a revision makes `Write` fail with an error that wraps `ErrNotARevision`, as with `Execute`, without writing anything either (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)).
 
@@ -788,14 +790,14 @@ Like a command, a write declares at least one precondition, such as `OnPristineS
 
 ### Handling Errors
 
-Apart from the end of the context, `ErrNotARevision`, and `ErrEmptyRange`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
+Apart from the end of the context, `ErrOutcomeUnknown`, `ErrNotARevision`, and `ErrEmptyRange`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
 
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
-- `ErrTransient` means that trying again may help, for example if the database can not be reached.
+- `ErrTransient` means that trying again may help, for example if the database can not be reached. A write that fails with it has certainly stored nothing, so trying it again can not store its events twice.
 - `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if the data of an event can not be encoded as JSON, such as a float `NaN`, if an event does not match the schema of its type, if a subject contains an event type the state has no rule for, if a decider returns one, or if it returns an event that is `nil`.
 
-A failure of the database is sorted by what its answer means, the same way for reading and for writing, apart from `409`:
+A failure of the database is sorted by what its answer means, the same way for reading and for writing, apart from `409`, and apart from a write whose outcome is unknown (see below):
 
 - If the database can not be reached, if the connection breaks, if the database asks to slow down (`429`), or if it is unable to answer for now (`5xx`), for example because it is shutting down, the error belongs to `ErrTransient`.
 - If the answer does not come from an EventSourcingDB, the error belongs to `ErrTransient` as well, since a proxy in front of the database answers on its own while the database restarts. The message says so, so that a wrong address stands out in the log.
@@ -813,6 +815,8 @@ case errors.Is(err, architecturekit.ErrDomain):
   // A business rule rejected the command.
 case errors.Is(err, architecturekit.ErrConflict):
   // A precondition did not hold.
+case errors.Is(err, architecturekit.ErrOutcomeUnknown):
+  // The events may have been stored, so find out before trying again.
 case errors.Is(err, architecturekit.ErrTransient):
   // Trying again may help.
 case errors.Is(err, architecturekit.ErrPermanent):
@@ -828,15 +832,21 @@ An error that your own code returns, for example from a decider or a projection,
 
 If the context ends, reading and writing stop, and the error is the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides.
 
-Another exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
+Another exception is `ErrOutcomeUnknown`, which belongs to no category either. It means that a write failed in a way that leaves open whether the database stored the events. The request had left, but no complete answer arrived, for example because the connection broke, the answer was cut off, or a timeout of the client ran out. Or the answer was one that may come after the events were stored, such as `500`, or one that does not come from an EventSourcingDB, such as a `502` or `504` of a proxy in front of it. The error wraps `ErrOutcomeUnknown` and the error of the client, as in `outcome unknown: writing "/books/42": connection reset by peer`, so check for it with `errors.Is`, and use `errors.As` to get at the answer of the database, as for a category. `StatusFor` maps it to `500 Internal Server Error` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
+
+It is not `ErrTransient`, since trying again may store the events twice: with `Unconditionally`, the same events are written once more, and with `OnStateRead`, `Execute` reads the state anew, which then holds the events, so the precondition holds, and the decider decides once more. So do not try again blindly. Find out first whether the events were stored, for example by reading the subject, or try again only with a precondition that refuses the same events a second time, such as `OnEventID` with the revision the command was decided on, or `OnPristineSubject` for a subject that the command creates. Neither `Execute` nor `Write` tries again by itself, not even on a store that decides again on conflicts.
+
+Only a write that certainly stored nothing keeps its category: one whose request never left completely, as when the database can not be reached, and one that the database refused before writing anything, with a `4xx`, such as `409` for a precondition that did not hold, with `503`, which it answers while it shuts down or does not permit writing, or with `507`, which it answers once the license has run out. That way, an error of the category `ErrTransient` means for a write as well that trying it again unchanged is safe. Reading writes nothing, so it is not affected: there, every failure of the database belongs to a category, as described above.
+
+Yet another exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
 
 The last exception is `ErrEmptyRange`, which belongs to no category either. It means that the bounds of `Read` leave no room for any event, such as `BeforeEvent("0")` (see [Reading Events](#reading-events)). The error wraps `ErrEmptyRange` and names the values, so check for it with `errors.Is` as well. Such bounds usually come from a request, so `StatusFor` maps it to `400 Bad Request` as well.
 
-*Note that only the end of the context matches `context.Canceled` or `context.DeadlineExceeded`. If an error of the client matches one of them all the same, for example because connecting to the database timed out, which the standard library reports as `context.DeadlineExceeded`, the failure of the database keeps that error in its message only, so that it does not look like the end of the context.*
+*Note that only the end of the context matches `context.Canceled` or `context.DeadlineExceeded`. If an error of the client matches one of them all the same, for example because connecting to the database timed out, which the standard library reports as `context.DeadlineExceeded`, the failure of the database keeps that error in its message only, so that it does not look like the end of the context. The same goes for `ErrOutcomeUnknown`, for example after a timeout of the client while a write waited for its answer.*
 
 *Note that `ErrUnverified` is a special case of `ErrPermanent`, which means that an event failed its verification (see [Verifying Events](#verifying-events)). Since that may point to a security incident rather than a mistake, check for it before `ErrPermanent` if you want to treat it differently, for example to raise an alarm.*
 
-*Note that `Execute` does not try again by itself, unless the store decides again on conflicts (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)). To try again, for example after a transient failure, call `Execute` again.*
+*Note that `Execute` does not try again by itself, unless the store decides again on conflicts (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)). To try again after a transient failure, call `Execute` again, which is safe, since a write that failed with an error of the category `ErrTransient` has stored nothing. After `ErrOutcomeUnknown`, find out first whether the events were stored (see above).*
 
 ### Registering Event Schemas
 
@@ -2200,7 +2210,7 @@ api := httpapi.NewAPI(store, userFrom)
 mux := http.NewServeMux()
 ```
 
-If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so does an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
+If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so do an error of the category `ErrPermanent` and one of a write whose outcome is unknown, `ErrOutcomeUnknown`, which are answered with `500 Internal Server Error`. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
 
 *Note that to answer an error that has a status code of its own with `401 Unauthorized` all the same, the function wraps it with `httpapi.ErrUnauthorized` itself, for example with `fmt.Errorf("%w: %w", httpapi.ErrUnauthorized, err)`.*
 
@@ -2306,6 +2316,7 @@ The message is the error message if the error is written for the caller, such as
 | `404 Not Found`, for a query that found no item | `not found` |
 | `409 Conflict` | `conflict: the data has changed since it was read` |
 | `499 Client Closed Request` | `request canceled` |
+| `500 Internal Server Error`, for a write whose outcome is unknown | `outcome unknown: the request may have succeeded` |
 | `500` and above | `internal server error` |
 
 The actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)): at level `Info` for `401`, `404`, and `409`, since the server did not fail, and at level `Error` for `500` and above. For `404`, that holds only for a query that found no item (see [Reporting Missing Items](#reporting-missing-items)). A request that was canceled, usually because the caller went away, is not logged, since nothing failed.
@@ -2440,7 +2451,7 @@ func toAcquireBook(r *http.Request, request acquireBookRequest, user User) (Acqu
 }
 ```
 
-The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent`, which is answered with `500 Internal Server Error`. So if the function looks something up in another service, with the context of the request, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
+The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent` or one of `ErrOutcomeUnknown`, which are answered with `500 Internal Server Error`. So if the function looks something up in another service, with the context of the request, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
 
 Any other error returned from the function is answered with `400 Bad Request`, with the error as the message, after the text of `httpapi.ErrMalformed`, as in `malformed request: borrowedUntil must be a date`. In `Handle`, it wraps `httpapi.ErrMalformed` as well as the original error, so that `errors.Is` and `errors.As` find either.
 
@@ -2672,6 +2683,7 @@ It checks the categories in this order:
 | `httpapi.ErrMalformed` | `400 Bad Request` |
 | `httpapi.ErrNotFound`, `query.ErrNoItems` | `404 Not Found` |
 | `architecturekit.ErrDomain` | `422 Unprocessable Entity` |
+| `architecturekit.ErrOutcomeUnknown` | `500 Internal Server Error` |
 | `architecturekit.ErrConflict` | `409 Conflict` |
 | `architecturekit.ErrTransient` | `503 Service Unavailable` |
 | `context.Canceled` | `499 Client Closed Request` |
@@ -2682,15 +2694,17 @@ It checks the categories in this order:
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged. Its message is `request canceled`, because the error may name internals, such as the subject that was read.*
 
+*Note that `ErrOutcomeUnknown` means that a write may or may not have stored its events (see [Handling Errors](#handling-errors)). So it comes before `ErrConflict`, `ErrTransient`, and the end of the context, and an error that wraps one of them as well is answered with `500 Internal Server Error` all the same: trying again, which `409` and `503` invite, may store the events twice, and `499` is not logged. Its message is `outcome unknown: the request may have succeeded`, so that the caller does not simply try again, while the error, which may name internals, such as the subject, is logged at level `Error`.*
+
 *Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, a value for `CompareRevisions` or `ParseRevision`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
 
 *Note that `ErrEmptyRange` means that the bounds of `Read` leave no room for any event, which usually come from the request as well. So it is answered the same way, with `400 Bad Request` and the error as the message, such as `empty range: no event can lie before "0"`, unless the error belongs to the category `ErrPermanent` as well (see [Reading Events](#reading-events)).*
 
-*Note that an error of the function that returns a command, of the one that returns a query, or of the one that determines the user keeps its status code only if it has one of its own, or belongs to the category `ErrPermanent`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
+*Note that an error of the function that returns a command, of the one that returns a query, or of the one that determines the user keeps its status code only if it has one of its own, belongs to the category `ErrPermanent`, or wraps `ErrOutcomeUnknown`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
 
 *Note that a panic while a route handles a request is answered with `500 Internal Server Error` as well (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
-*Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, `499`, and `500` and above, as `Respond`, `RespondResult`, and `RespondError` do, since it may name internals, and say `not found` for `query.ErrNoItems` (see [Handling Commands over HTTP](#handling-commands-over-http)).*
+*Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, `499`, and `500` and above, as `Respond`, `RespondResult`, and `RespondError` do, since it may name internals, say `not found` for `query.ErrNoItems`, and tell the caller for `ErrOutcomeUnknown` that the request may have succeeded (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
 ### Reading Your Own Writes over HTTP
 

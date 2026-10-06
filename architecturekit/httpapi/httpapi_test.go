@@ -170,6 +170,7 @@ func TestStatusFor(t *testing.T) {
 			{"transient", architecturekit.ErrTransient, http.StatusServiceUnavailable},
 			{"permanent", architecturekit.ErrPermanent, http.StatusInternalServerError},
 			{"unverified", architecturekit.ErrUnverified, http.StatusInternalServerError},
+			{"an outcome that is unknown", fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/notes/1"), http.StatusInternalServerError},
 			{"anything else", errors.New("who knows"), http.StatusInternalServerError},
 			{"a caller who went away", fmt.Errorf("architecturekit: reading: %w", context.Canceled), 499},
 			{"a deadline that ran out", fmt.Errorf("architecturekit: reading: %w", context.DeadlineExceeded), http.StatusServiceUnavailable},
@@ -187,6 +188,23 @@ func TestStatusFor(t *testing.T) {
 		// more than 503, hence it has to win.
 		require.ErrorIs(t, architecturekit.ErrConflict, architecturekit.ErrTransient, "a conflict is expected to be transient")
 		assert.Equal(t, http.StatusConflict, httpapi.StatusFor(architecturekit.ErrConflict))
+	})
+
+	t.Run("maps an unknown outcome to 500, also if it wraps a status that invites trying again", func(t *testing.T) {
+		// Trying again may store the events of the write twice, so neither 409
+		// nor 503 may win, and nor may 499, which is not logged.
+		unknown := fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/notes/1")
+
+		for _, other := range []error{
+			architecturekit.ErrConflict, architecturekit.ErrTransient, context.Canceled, context.DeadlineExceeded,
+			architecturekit.ErrPermanent, architecturekit.ErrNotARevision, architecturekit.ErrEmptyRange,
+		} {
+			t.Run(other.Error(), func(t *testing.T) {
+				assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(errors.Join(unknown, other)))
+				assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(errors.Join(other, unknown)))
+				assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(fmt.Errorf("%w: %w", other, unknown)))
+			})
+		}
 	})
 
 	t.Run("maps a value that is not a revision to 400, unless it is a permanent failure", func(t *testing.T) {
@@ -285,8 +303,10 @@ func TestStatusFor(t *testing.T) {
 			{"a failed precondition", "/api/v1/write-events", write, http.StatusConflict, "state conflict: precondition failed", http.StatusConflict},
 			{"a schema violation", "/api/v1/write-events", write, http.StatusConflict, "schema conflict: event does not match", http.StatusInternalServerError},
 			{"too many requests", "/api/v1/write-events", write, http.StatusTooManyRequests, "slow down", http.StatusServiceUnavailable},
-			{"an internal error", "/api/v1/write-events", write, http.StatusInternalServerError, "failed", http.StatusServiceUnavailable},
+			{"an internal error, which leaves the outcome of a write unknown", "/api/v1/write-events", write, http.StatusInternalServerError, "failed", http.StatusInternalServerError},
+			{"an internal error when reading", "/api/v1/read-events", read, http.StatusInternalServerError, "failed", http.StatusServiceUnavailable},
 			{"an unavailable database", "/api/v1/write-events", write, http.StatusServiceUnavailable, "shutting down", http.StatusServiceUnavailable},
+			{"a database without a valid license", "/api/v1/write-events", write, http.StatusInsufficientStorage, "insufficient storage", http.StatusServiceUnavailable},
 			{"a 409 when reading", "/api/v1/read-events", read, http.StatusConflict, "state conflict: beyond the upper bound", http.StatusInternalServerError},
 		}
 
@@ -312,10 +332,19 @@ func TestStatusFor(t *testing.T) {
 			require.NoError(t, err)
 			client, err := eventsourcingdb.NewClient(serverURL, "secret")
 			require.NoError(t, err)
+			store := architecturekit.NewStore(client, "https://thenativeweb.io")
 
-			err = write(architecturekit.NewStore(client, "https://thenativeweb.io"))
+			// A proxy that answers on its own may do so after the database
+			// has stored the events, so the outcome of a write is unknown.
+			err = write(store)
 
-			assert.Equal(t, http.StatusServiceUnavailable, httpapi.StatusFor(err))
+			assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(err))
+			assert.ErrorIs(t, err, architecturekit.ErrOutcomeUnknown)
+			assert.ErrorIs(t, err, eventsourcingdb.ErrInvalidServerHeader, "errors.Is has to reach the error of the client")
+
+			err = read(store)
+
+			assert.Equal(t, http.StatusServiceUnavailable, httpapi.StatusFor(err), "reading writes nothing")
 			assert.ErrorIs(t, err, eventsourcingdb.ErrInvalidServerHeader, "errors.Is has to reach the error of the client")
 		})
 	})
@@ -951,6 +980,7 @@ var userFromFailures = []struct {
 	{"that is forbidden", fmt.Errorf("%w: the account is locked", httpapi.ErrForbidden), http.StatusForbidden, true},
 	{"that is permanent", fmt.Errorf("%w: the session key is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, true},
 	{"that is unverified", fmt.Errorf("%w: the session is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, true},
+	{"whose outcome is unknown", fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/sessions/23"), http.StatusInternalServerError, true},
 	{"of the domain", architecturekit.NewDomainError("the reader is suspended"), http.StatusUnprocessableEntity, true},
 	{"that is not a revision", fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc"), http.StatusBadRequest, true},
 	{"that is not a revision, but permanent", fmt.Errorf("%w: %w", architecturekit.ErrPermanent, fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc")), http.StatusInternalServerError, true},
@@ -1032,6 +1062,7 @@ var buildFailures = []struct {
 	{"that is transient", fmt.Errorf("%w: session store at redis://10.0.3.9 is down", architecturekit.ErrTransient), http.StatusServiceUnavailable, "internal server error", true},
 	{"that is permanent", fmt.Errorf("%w: the catalog at /etc/catalog.yaml is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, "internal server error", true},
 	{"that is unverified", fmt.Errorf("%w: the reader is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, "internal server error", true},
+	{"whose outcome is unknown", fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/readers/23"), http.StatusInternalServerError, "outcome unknown: the request may have succeeded", true},
 	{"because the caller went away", fmt.Errorf("looking up the reader: %w", context.Canceled), 499, "request canceled", true},
 	{"because the deadline ran out", fmt.Errorf("looking up the reader: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, "internal server error", true},
 }

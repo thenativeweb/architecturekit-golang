@@ -120,6 +120,30 @@ func refusingStore(t *testing.T, path string, status int, reason string) *archit
 	return architecturekit.NewStore(client, "https://thenativeweb.io")
 }
 
+// hangingUpStore is a store on a database without any events that hangs up on
+// every write once it has read it, so that it is unknown whether the events
+// were stored.
+func hangingUpStore(t *testing.T) *architecturekit.Store {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", "EventSourcingDB/test")
+
+		if r.URL.Path == "/api/v1/write-events" {
+			_, _ = io.ReadAll(r.Body)
+			panic(http.ErrAbortHandler)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	client, err := eventsourcingdb.NewClient(serverURL, "secret")
+	require.NoError(t, err)
+
+	return architecturekit.NewStore(client, "https://thenativeweb.io")
+}
+
 // inAHandler returns what a handler of its own answers with: a request for
 // GET /notes, as a mux hands it over, and an API that logs into logs.
 func inAHandler(logs *bytes.Buffer) (*http.Request, *httpapi.API[user]) {
@@ -174,6 +198,20 @@ func TestRouteAnswers(t *testing.T) {
 		// the fields keep their numbers as they are. JSONEq compares through
 		// floats itself, which is why the text is checked as well.
 		assert.Contains(t, response.Body.String(), `"count":9007199254740993`)
+	})
+
+	t.Run("with 500 and a fixed text of its own if the outcome of the write is unknown, which is logged as a failure", func(t *testing.T) {
+		var logs bytes.Buffer
+		mux := routed(httpapi.NewAPI(hangingUpStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs))))
+
+		response := postNote(t, mux, `{"id":"1","text":"hello"}`)
+
+		assert.Equal(t, http.StatusInternalServerError, response.Code)
+		assert.JSONEq(t, `{"message": "outcome unknown: the request may have succeeded"}`, response.Body.String())
+		assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: internal failure"`)
+		assert.Contains(t, logs.String(), `route="POST /note"`)
+		assert.Contains(t, logs.String(), `outcome unknown: writing \"/note/1\": `, "the details have to reach the log")
+		assert.Contains(t, logs.String(), "EOF", "the details have to reach the log")
 	})
 
 	t.Run("without asking Adding after a failure", func(t *testing.T) {
@@ -783,6 +821,24 @@ func TestAnsweringRefusals(t *testing.T) {
 				assert.Empty(t, logs.String(), "a failure the caller can fix must not be logged")
 			})
 		}
+
+		t.Run(name+" answers an unknown outcome with 500 and a fixed text of its own, and logs the failure as an error", func(t *testing.T) {
+			var logs bytes.Buffer
+			request, api := inAHandler(&logs)
+			recorder := httptest.NewRecorder()
+
+			answer(recorder, request, api, fmt.Errorf("%w: writing %q: read: connection reset by peer",
+				architecturekit.ErrOutcomeUnknown, "/tenants/acme-bank/books/42"))
+
+			assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+			assert.JSONEq(t, `{"message": "outcome unknown: the request may have succeeded"}`, recorder.Body.String(),
+				"the caller has to learn that trying again may write twice, but not the internals")
+			assert.Equal(t, 1, strings.Count(logs.String(), "\n"), "want exactly one entry")
+			assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: internal failure"`)
+			assert.Contains(t, logs.String(), "status=500")
+			assert.Contains(t, logs.String(), "/tenants/acme-bank/books/42", "the details have to reach the log")
+			assert.Contains(t, logs.String(), "connection reset by peer", "the details have to reach the log")
+		})
 
 		t.Run(name+" answers 500 with a fixed text, and logs the failure as an error", func(t *testing.T) {
 			var logs bytes.Buffer

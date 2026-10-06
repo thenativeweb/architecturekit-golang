@@ -74,7 +74,8 @@ var errNoStore = errors.New("httpapi: the API has no store, so it can not execut
 // An error that StatusFor maps to a status of its own keeps it, such as
 // ErrForbidden, an error of the category architecturekit.ErrDomain, or one of
 // architecturekit.ErrTransient, if a service that ToCommand asks is down. So
-// does an error of the category architecturekit.ErrPermanent, which is
+// do an error of the category architecturekit.ErrPermanent and one of a write
+// whose outcome is unknown, architecturekit.ErrOutcomeUnknown, which are
 // answered with 500. Any other error means that the request can not be turned
 // into a command, and comes back wrapped with ErrMalformed, which is answered
 // with 400 and the error as the message.
@@ -182,6 +183,15 @@ func (api *API[TUser]) explain(r *http.Request) func(status int, err error) stri
 
 	return func(status int, err error) string {
 		switch {
+		// A write whose outcome is unknown is an internal failure, and logged as
+		// one, but the caller has to learn that the events may have been
+		// written, so that it does not simply try again. Its error may name
+		// internals, such as the subject, so it gets a fixed text.
+		case errors.Is(err, architecturekit.ErrOutcomeUnknown):
+			api.logFailure(r, status, err)
+
+			return "outcome unknown: the request may have succeeded"
+
 		// Internal failures are not explained to the caller, but logged.
 		case status >= http.StatusInternalServerError:
 			api.logFailure(r, status, err)
@@ -280,8 +290,8 @@ func (api *API[TUser]) loggerOrDefault() *slog.Logger {
 // 401.
 //
 // An error of userFrom that StatusFor maps to a status of its own comes back
-// as it is, and so does one of the category architecturekit.ErrPermanent, so
-// that it keeps its status. If the session store is down, for example,
+// as it is, and so do one of the category architecturekit.ErrPermanent and
+// one of architecturekit.ErrOutcomeUnknown, so that it keeps its status. If the session store is down, for example,
 // userFrom says so with architecturekit.ErrTransient, which is answered with
 // 503 and logged, rather than sending the caller off to sign in again. Only an
 // error without such a status comes back as ErrUnauthorized, which wraps it,
@@ -634,11 +644,18 @@ const statusClientClosedRequest = 499
 // is not logged, since nothing failed. If its deadline ran out, the server
 // took too long, which maps to 503 and is logged.
 //
+// An error that wraps architecturekit.ErrOutcomeUnknown, of a write that may
+// or may not have stored its events, belongs to no category either. It maps
+// to 500, since trying again, which 409 and 503 invite, may store the events
+// twice, and 499 is not logged. So it comes before ErrConflict, ErrTransient,
+// and the end of the context, also if it wraps one of them as well.
+//
 // The status says nothing about what to tell the caller. Respond,
 // RespondResult, and RespondError explain only an error that is written for
 // the caller, and an answer in a format of your own should do the same: the
 // error of a 401, a 409, a 499, or a status of 500 and above may name
-// internals.
+// internals. For a write whose outcome is unknown, tell the caller that the
+// request may have succeeded.
 func StatusFor(err error) int {
 	switch {
 	case err == nil:
@@ -659,6 +676,10 @@ func StatusFor(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, architecturekit.ErrDomain):
 		return http.StatusUnprocessableEntity
+	// Trying again may store the events of a write whose outcome is unknown
+	// twice, so it must not get a status that invites it.
+	case errors.Is(err, architecturekit.ErrOutcomeUnknown):
+		return http.StatusInternalServerError
 	// A conflict is transient, but 409 says more than 503, so it comes first.
 	case errors.Is(err, architecturekit.ErrConflict):
 		return http.StatusConflict
@@ -702,7 +723,9 @@ func StatusFor(err error) int {
 //   - 499, for a request that was canceled, says "request canceled", and is
 //     not logged, since nothing failed.
 //   - 500 and above say "internal server error", while the failure is logged
-//     at level Error.
+//     at level Error. Only 500 for a write whose outcome is unknown,
+//     architecturekit.ErrOutcomeUnknown, says "outcome unknown: the request
+//     may have succeeded", so that the caller does not simply try again.
 //
 // Each of them is logged through the logger of the API, with the route of the
 // request (see WithLogger).
@@ -828,10 +851,12 @@ func categorise(err error) error {
 
 // hasCategory reports whether an error says what kind it is: whether
 // StatusFor maps it to a status of its own, or it is of the category
-// architecturekit.ErrPermanent, which maps to 500 like an error without any
-// category, but on purpose.
+// architecturekit.ErrPermanent, or wraps architecturekit.ErrOutcomeUnknown,
+// both of which map to 500 like an error without any category, but on
+// purpose.
 func hasCategory(err error) bool {
-	return StatusFor(err) != http.StatusInternalServerError || errors.Is(err, architecturekit.ErrPermanent)
+	return StatusFor(err) != http.StatusInternalServerError ||
+		errors.Is(err, architecturekit.ErrPermanent) || errors.Is(err, architecturekit.ErrOutcomeUnknown)
 }
 
 // panicError is a panic while a request was handled, which is answered like

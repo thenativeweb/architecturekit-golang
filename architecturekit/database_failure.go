@@ -73,9 +73,67 @@ func readFailure(ctx context.Context, err error, doing string) error {
 	return databaseFailure(err, doing)
 }
 
+// writeFailure is what a write that failed reports. It keeps the category
+// that databaseFailure sorts it into only if it is certain that the database
+// stored nothing, so that trying it again unchanged can not store the events
+// twice: if the request never left completely, as when the database can not
+// be reached, which isSent tells (see Store.write), or if the database
+// refused it with a status it answers a write with only before it stores
+// anything (see isRefusedBeforeWriting).
+//
+// Every other failure leaves open whether the events were stored, so it is
+// reported as ErrOutcomeUnknown, which wraps the failure of the client after
+// it, as a category does (see causeOf): the connection broke after the
+// request had left, the answer was cut off or could not be decoded, a timeout
+// of the client ran out while it waited for the answer, the database answered
+// with a status that may follow storing the events, or the answer does not
+// come from an EventSourcingDB, such as a 502 or 504 of a proxy in front of
+// it, which may answer so after the database has stored them.
+func writeFailure(err error, isSent bool, doing string) error {
+	if !isSent || isRefusedBeforeWriting(statusCodeOf(err)) {
+		return databaseFailure(err, doing)
+	}
+
+	if errors.Is(err, eventsourcingdb.ErrInvalidServerHeader) {
+		return fmt.Errorf("%w: %s: the answer does not come from an EventSourcingDB: %w",
+			ErrOutcomeUnknown, doing, causeOf(err))
+	}
+
+	return fmt.Errorf("%w: %s: %w", ErrOutcomeUnknown, doing, causeOf(err))
+}
+
+// isRefusedBeforeWriting reports whether EventSourcingDB answers a write with
+// the given status only before it stores anything, as its code shows:
+//
+//   - Every 4xx refuses the request itself, such as a precondition that did
+//     not hold (409), a request that is too large (413), or one of too many
+//     (429).
+//   - 503 means that the database is shutting down, or that it does not
+//     permit writing for now. It checks both before a write begins, and a
+//     write that has begun holds off both until it is done.
+//   - 507 means that the license has run out, which the database checks
+//     before it reads the request.
+//
+// Any other status may follow storing the events: the database answers with
+// 500 also if flushing the events to the disk failed after they were written,
+// and then they are there after a restart. It never sends 502 or 504 at all,
+// so where they come from can not be told. A status of 0 means that there was
+// no answer.
+func isRefusedBeforeWriting(status int) bool {
+	switch {
+	case status >= http.StatusBadRequest && status < http.StatusInternalServerError:
+		return true
+	case status == http.StatusServiceUnavailable, status == http.StatusInsufficientStorage:
+		return true
+	default:
+		return false
+	}
+}
+
 // databaseFailure sorts a failure the database reported into a category, by
 // what its answer means. The rules apply to writing, and to reading as well,
-// apart from 409, which readFailure sorts before it gets here:
+// apart from 409, which readFailure sorts before it gets here. A write gets
+// here only if it certainly stored nothing (see writeFailure):
 //
 //   - Without an answer, the database is unreachable or the connection broke,
 //     which is transient. The client reports data it can not encode without an

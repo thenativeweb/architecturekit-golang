@@ -21,8 +21,9 @@ type EventOn struct {
 //
 // The events are written with the source of the store, and a failure is sorted
 // into a category as with Execute, so a precondition that does not hold is
-// ErrConflict. Write never decides again on a conflict, since there is nothing
-// to decide.
+// ErrConflict, and one that leaves open whether the events were stored is
+// ErrOutcomeUnknown. Write never decides again on a conflict, since there is
+// nothing to decide.
 //
 // Like a command, a write declares at least one precondition, such as
 // OnPristineSubject or one made with Require, or Unconditionally to write
@@ -68,19 +69,16 @@ func Write(
 		}
 	}
 
+	doing := fmt.Sprintf("writing %d events, the first to %q", len(events), events[0].Subject)
+
 	// The end of the context no longer stops a write that has begun (see
 	// Store.write), so a context that has ended by now must not lead to a
 	// write.
 	if ctx.Err() != nil {
-		return nil, contextEnded(ctx, fmt.Sprintf("writing %d events, the first to %q", len(events), events[0].Subject))
+		return nil, contextEnded(ctx, doing)
 	}
 
-	written, err := store.client.WriteEvents(context.WithoutCancel(ctx), candidates, resolved)
-	if err != nil {
-		return nil, databaseFailure(err, fmt.Sprintf("writing %d events, the first to %q", len(events), events[0].Subject))
-	}
-
-	return written, nil
+	return store.write(ctx, candidates, resolved, doing)
 }
 
 // writePreconditions checks the preconditions of a write the way
