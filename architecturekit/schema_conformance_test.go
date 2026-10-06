@@ -1,6 +1,7 @@
 package architecturekit_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -148,7 +149,7 @@ func TestDerivedSchemasRefuseWhatEncodingJSONDoesNotWrite(t *testing.T) {
 	eventType := registerDerived[conformNested](t, client, "refuse")
 
 	write := func(data any) error {
-		_, err := client.WriteEvents([]eventsourcingdb.EventCandidate{{
+		_, err := client.WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 			Source: "https://thenativeweb.io", Subject: "/conform/refuse", Type: eventType, Data: data,
 		}}, nil)
 		return err
@@ -193,12 +194,12 @@ func conforms[T any](t *testing.T) {
 	// All of them go in one write, since the database may limit how often it
 	// is written to. Only if that fails are they written one by one, to name
 	// the value that was refused.
-	if _, err := client.WriteEvents(candidates, nil); err == nil {
+	if _, err := client.WriteEvents(context.Background(), candidates, nil); err == nil {
 		return
 	}
 
 	for i, candidate := range candidates {
-		if _, err := client.WriteEvents([]eventsourcingdb.EventCandidate{candidate}, nil); err != nil {
+		if _, err := client.WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{candidate}, nil); err != nil {
 			encoded, _ := json.Marshal(candidate.Data)
 			assert.Failf(t, "the database refused a value", "value %d: %s: %v", i, encoded, err)
 			return
@@ -212,7 +213,7 @@ func registerDerived[T any](t *testing.T, client *eventsourcingdb.Client, name s
 	t.Helper()
 
 	eventType := fmt.Sprintf("io.thenativeweb.test.conform-%s-%d", name, time.Now().UnixNano())
-	require.NoError(t, client.RegisterEventSchema(eventType, architecturekit.DeriveSchema[T]()))
+	require.NoError(t, client.RegisterEventSchema(context.Background(), eventType, architecturekit.DeriveSchema[T]()))
 
 	return eventType
 }

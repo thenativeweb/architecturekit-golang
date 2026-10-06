@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"net/http/httptrace"
 	"reflect"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
@@ -120,6 +122,8 @@ func WithStateCache(maxSubjects int) StoreOption {
 //
 // Once the retries are used up, Execute reports the conflict, an error of the
 // category ErrConflict. Write never decides again, since it decides nothing.
+// Nor does Execute try a write again whose outcome is unknown, since its
+// events may have been stored (see ErrOutcomeUnknown).
 //
 // A negative number of retries is a programming error, so it panics.
 func WithConflictRetries(retries int) StoreOption {
@@ -487,19 +491,83 @@ func (s *Store) candidateFor(subject string, event Event) (eventsourcingdb.Event
 	}, nil
 }
 
-// write appends the candidates to a subject under the given preconditions and
-// returns them as the database recorded them, including their IDs.
+// write appends the candidates under the given preconditions and returns them
+// as the database recorded them, including their IDs. A failure is sorted
+// into a category, or reported as ErrOutcomeUnknown (see writeFailure), and
+// doing says what was written, for the message. Execute and Write both write
+// with it.
+//
+// The client gets the context without its end, so that a write that has begun
+// is finished, whatever happens to the context of the caller: its values, such
+// as a trace, reach the request, but its end does not stop it. A trace of its
+// own tells whether the request has certainly not left completely, which only
+// a write that fails without an answer from the database needs to know (see
+// requestTrace).
 func (s *Store) write(
-	subject string,
+	ctx context.Context,
 	candidates []eventsourcingdb.EventCandidate,
 	preconditions []eventsourcingdb.Precondition,
+	doing string,
 ) ([]eventsourcingdb.Event, error) {
-	written, err := s.client.WriteEvents(candidates, preconditions)
+	var request requestTrace
+	traced := httptrace.WithClientTrace(context.WithoutCancel(ctx), request.hooks())
+
+	written, err := s.client.WriteEvents(traced, candidates, preconditions)
 	if err != nil {
-		return nil, databaseFailure(err, fmt.Sprintf("writing %q", subject))
+		return nil, writeFailure(err, request.isUnsent(), doing)
 	}
 
 	return written, nil
+}
+
+// requestTrace follows the request of a write through the hooks of
+// net/http/httptrace, to tell whether it has certainly not reached the
+// database completely, so that the database has stored nothing. Only evidence
+// counts: no connection was ever obtained, or writing the request failed,
+// since the database reads the whole request before it writes anything. The
+// trace of a request that was written, though, outweighs a failed attempt
+// before it, as with a transport that tries again.
+//
+// A transport that does not hand the context of the request on to net/http,
+// such as one of the application's own on http.DefaultClient, calls no hooks
+// at all. Without evidence, though, the request may have been sent, so the
+// outcome of the write is unknown then. The same goes for an answer that
+// arrives before the hook of the written request is called, which HTTP/2
+// allows.
+type requestTrace struct {
+	isConnecting atomic.Bool
+	isConnected  atomic.Bool
+	isWritten    atomic.Bool
+	isUnwritten  atomic.Bool
+}
+
+// hooks returns the hooks that follow the request. They may be called from
+// other goroutines than the one that sends the request.
+func (r *requestTrace) hooks() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GetConn: func(string) { r.isConnecting.Store(true) },
+		GotConn: func(httptrace.GotConnInfo) { r.isConnected.Store(true) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err != nil {
+				r.isUnwritten.Store(true)
+				return
+			}
+
+			r.isWritten.Store(true)
+		},
+	}
+}
+
+// isUnsent reports whether the request has certainly not reached the database
+// completely.
+func (r *requestTrace) isUnsent() bool {
+	if r.isWritten.Load() {
+		return false
+	}
+
+	isNeverConnected := r.isConnecting.Load() && !r.isConnected.Load()
+
+	return isNeverConnected || r.isUnwritten.Load()
 }
 
 // RegisterSchemas registers the schemas of the given events with the database.
@@ -512,8 +580,8 @@ func (s *Store) write(
 // an event, introduce a new event type and an upcaster instead.
 //
 // If the context ends first, RegisterSchemas fails with the context's error.
-// The client registers a schema without a context, so a registration that has
-// begun is finished, but none begins once the context has ended.
+// A registration that has begun is finished, since the context no longer
+// stops it, but none begins once the context has ended.
 func RegisterSchemas(ctx context.Context, store *Store, schemas ...[]EventSchema) error {
 	given, err := collectSchemas(schemas)
 	if err != nil {
@@ -533,7 +601,7 @@ func RegisterSchemas(ctx context.Context, store *Store, schemas ...[]EventSchema
 				return contextEnded(ctx, fmt.Sprintf("registering schema for %q", schema.EventType))
 			}
 
-			refusal := store.client.RegisterEventSchema(schema.EventType, schema.Schema)
+			refusal := store.client.RegisterEventSchema(context.WithoutCancel(ctx), schema.EventType, schema.Schema)
 			if refusal == nil {
 				continue
 			}
@@ -675,10 +743,11 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // Execute checks all events for nil first, then all of them for a rule, and
 // encodes them last.
 //
-// If the context ends before the events are written, Execute writes nothing
-// and fails with the context's error, also if it ends while the decider
-// decides. Once the write has begun, it is finished, since the client writes
-// without a context.
+// If the context ends before the write begins, Execute writes nothing and
+// fails with the context's error, also if it ends while the decider decides.
+// Once the write has begun, the context no longer stops it: the write is
+// finished, and Execute returns its result, the events written or the failure
+// of the write, rather than the context's error.
 //
 // The zero Decider, one that was not made with NewDecider, is a programming
 // error, so Execute panics, before it looks at the command, and names the
@@ -755,13 +824,14 @@ func executeOnce[TCommand Command, TState any](
 		}
 	}
 
-	// The client writes without a context, so a context that has ended by now,
-	// for example while deciding, must not lead to a write anyway.
+	// The end of the context no longer stops a write that has begun (see
+	// Store.write), so a context that has ended by now, for example while
+	// deciding, must not lead to a write.
 	if ctx.Err() != nil {
 		return nil, contextEnded(ctx, fmt.Sprintf("writing to %q", subject))
 	}
 
-	return store.write(subject, candidates, resolvePreconditions(subject, declared, lastEventID))
+	return store.write(ctx, candidates, resolvePreconditions(subject, declared, lastEventID), fmt.Sprintf("writing %q", subject))
 }
 
 // checkNotNil fails permanently if one of the events a decider returned for a

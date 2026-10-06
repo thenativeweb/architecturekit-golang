@@ -29,7 +29,7 @@ func interferingDecider(t *testing.T, times int) (architecturekit.Decider[increm
 			counted.decisions++
 
 			if counted.decisions <= times {
-				_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+				_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 					Source:  "https://thenativeweb.io",
 					Subject: cmd.subject,
 					Type:    (incremented{}).EventType(),

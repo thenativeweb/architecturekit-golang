@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -164,6 +165,63 @@ func refusingDatabase(t *testing.T, path string, status int, reason string) *eve
 	return clientFor(t, server)
 }
 
+// writingDatabase answers every request to the given path with answer, once it
+// has read the request completely, as EventSourcingDB does with a write or the
+// registration of a schema, and every other request with an empty result, as
+// for a subject without events. It returns a client for it.
+func writingDatabase(t *testing.T, path string, answer http.HandlerFunc) *eventsourcingdb.Client {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Server", "EventSourcingDB/test")
+
+		if request.URL.Path == path {
+			_, _ = io.ReadAll(request.Body)
+			answer(writer, request)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	return clientFor(t, server)
+}
+
+// vanishingDatabase answers reading with no events, and stops taking
+// connections once it has answered, so that a write after the read can not
+// even connect, as with a database that has gone down in between. It returns a
+// client for it.
+func vanishingDatabase(t *testing.T) *eventsourcingdb.Client {
+	t.Helper()
+
+	server := httptest.NewUnstartedServer(nil)
+	server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Server", "EventSourcingDB/test")
+		writer.Header().Set("Connection", "close")
+		_ = server.Listener.Close()
+	})
+	server.Start()
+	t.Cleanup(server.Close)
+
+	return clientFor(t, server)
+}
+
+// hangingUpDatabase answers reading with no events, and hangs up on a write as
+// soon as it has its headers, without reading the events, as a database does
+// that goes down while the request arrives. It returns a client for it.
+func hangingUpDatabase(t *testing.T) *eventsourcingdb.Client {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Server", "EventSourcingDB/test")
+
+		if request.URL.Path == "/api/v1/write-events" {
+			panic(http.ErrAbortHandler)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	return clientFor(t, server)
+}
+
 // clientFor returns a client for the given server.
 func clientFor(t *testing.T, server *httptest.Server) *eventsourcingdb.Client {
 	t.Helper()
@@ -193,9 +251,19 @@ func writeEvent(writer http.ResponseWriter, id int, tampered bool) {
 		hash = fmt.Sprintf("%064x", id)
 	}
 
-	writeLine(writer, fmt.Sprintf(`{"type":"event","payload":{"specversion":"1.0","id":"%d","time":%q,"source":%q,"subject":%q,"type":%q,"datacontenttype":%q,"data":%s,"hash":%q,"predecessorhash":%q}}`,
-		id, fakeEventTime, fakeEventSource, fakeEventSubject, fakeEventType, fakeEventDataType, fakeEventData, hash, fakeHashOf(id-1)))
+	writeLine(writer, fmt.Sprintf(`{"type":"event","payload":%s}`, fakeEvent(id, hash)))
 }
+
+// fakeEvent returns the event with the given ID and hash, encoded the way
+// EventSourcingDB encodes it.
+func fakeEvent(id int, hash string) string {
+	return fmt.Sprintf(`{"specversion":"1.0","id":"%d","time":%q,"source":%q,"subject":%q,"type":%q,"datacontenttype":%q,"data":%s,"hash":%q,"predecessorhash":%q}`,
+		id, fakeEventTime, fakeEventSource, fakeEventSubject, fakeEventType, fakeEventDataType, fakeEventData, hash, fakeHashOf(id-1))
+}
+
+// writtenAnswer is how EventSourcingDB answers a write of a single event to
+// the subject of the fake: with the event as it recorded it.
+var writtenAnswer = "[" + fakeEvent(0, fakeHashOf(0)) + "]"
 
 // fakeHashOf computes the hash of the event with the given ID the way
 // EventSourcingDB does, chained to the hash of the event before it. The first

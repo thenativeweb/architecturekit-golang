@@ -1002,7 +1002,7 @@ func projectIncrementAndReset(t *testing.T, followsResets bool) (counterItem, []
 
 	ctx := context.Background()
 	subject := subjectFor(t)
-	written, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{
+	written, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{
 		{Source: "https://thenativeweb.io", Subject: subject, Type: (incremented{}).EventType(), Data: incremented{By: 2}},
 		{Source: "https://thenativeweb.io", Subject: subject, Type: (reset{}).EventType(), Data: reset{}},
 	}, nil)

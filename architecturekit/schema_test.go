@@ -742,7 +742,7 @@ func TestEvolveWithDerivedSchemas(t *testing.T) {
 		assert.Equal(t, []string{"first", "second"}, texts)
 
 		write := func(data map[string]any) error {
-			_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+			_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 				Source:  "https://thenativeweb.io",
 				Subject: subject,
 				Type:    noted{}.EventType(),
@@ -1112,7 +1112,7 @@ func TestSchemaFunctionsOfEmbeddedFields(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 1, count)
 
-		_, err = rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+		_, err = rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 			Source:  "https://thenativeweb.io",
 			Subject: subject,
 			Type:    feePaidWithSchema{}.EventType(),
@@ -1310,7 +1310,7 @@ func TestInterfacesWithSchemaFunctions(t *testing.T) {
 			shapeDrawn{Shape: circle{Radius: 3}},
 			shapeDrawn{})
 
-		_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+		_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 			Source:  "https://thenativeweb.io",
 			Subject: subject,
 			Type:    shapeDrawn{}.EventType(),
@@ -1482,7 +1482,7 @@ func TestRawMessages(t *testing.T) {
 		assert.JSONEq(t, `42`, string(notes[1]))
 		assert.JSONEq(t, `null`, string(notes[2]))
 
-		_, err = rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+		_, err = rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 			Source:  "https://thenativeweb.io",
 			Subject: subject,
 			Type:    remarked{}.EventType(),

@@ -24,13 +24,14 @@ func TestDatabaseFailures(t *testing.T) {
 		{"a rejected API token is permanent", http.StatusUnauthorized, architecturekit.ErrPermanent},
 		{"a request that is too large is permanent", http.StatusRequestEntityTooLarge, architecturekit.ErrPermanent},
 		{"too many requests are transient", http.StatusTooManyRequests, architecturekit.ErrTransient},
-		{"an internal error is transient", http.StatusInternalServerError, architecturekit.ErrTransient},
 		{"an unavailable database is transient", http.StatusServiceUnavailable, architecturekit.ErrTransient},
 	}
 
 	// Reading and writing follow the same rules for these statuses, so every
 	// status is checked for both, and each time against the other category as
-	// well. Only 409 is sorted differently (see below).
+	// well. Only 409 is sorted differently (see below), and the other statuses
+	// of 500 and above, which leave the outcome of a write unknown (see
+	// TestAFailedWrite).
 	paths := []struct {
 		name string
 		path string
@@ -56,6 +57,21 @@ func TestDatabaseFailures(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("with any other status of 500 and above are sorted as transient when reading", func(t *testing.T) {
+		for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout} {
+			t.Run(http.StatusText(status), func(t *testing.T) {
+				store := architecturekit.NewStore(
+					refusingDatabase(t, "/api/v1/read-events", status, "refused"), "https://thenativeweb.io")
+
+				_, errs := readAll(t, store, architecturekit.ExactSubject("/test"))
+				require.Len(t, errs, 1)
+
+				assert.ErrorIs(t, errs[0], architecturekit.ErrTransient)
+				assert.NotErrorIs(t, errs[0], architecturekit.ErrOutcomeUnknown, "reading writes nothing")
+			})
+		}
+	})
 
 	t.Run("with 409 are sorted as permanent on every read, since reading has no preconditions", func(t *testing.T) {
 		reads := []struct {
@@ -289,7 +305,7 @@ func TestDatabaseFailures(t *testing.T) {
 // otherCategoryThan returns the category an error must not belong to, given
 // the one it belongs to.
 func otherCategoryThan(category error) error {
-	if category == architecturekit.ErrTransient {
+	if errors.Is(category, architecturekit.ErrTransient) {
 		return architecturekit.ErrPermanent
 	}
 

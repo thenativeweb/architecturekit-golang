@@ -10,12 +10,14 @@ import (
 // unchanged could help. Callers ask for the category with errors.Is instead of
 // matching concrete errors, so that new failures do not break existing code.
 // An error of the application's own code, such as one a decider returns,
-// passes through unchanged, unless it is wrapped with a category.
+// passes through unchanged, unless it is wrapped with a category. A write
+// whose outcome is unknown belongs to no category (see ErrOutcomeUnknown).
 //
 // A failure of the database wraps the error of the client after its category,
-// so that errors.As finds an *eventsourcingdb.DBAPIError with the status code
-// and the reason the database gave. It is the category, though, that tells
-// what the failure means.
+// or after ErrOutcomeUnknown, so that errors.As finds an
+// *eventsourcingdb.DBAPIError with the status code and the reason the
+// database gave. It is the category, though, that tells what the failure
+// means.
 //
 // The texts of the categories leave out the name of the package, since an
 // error that is written for a caller, such as one of ErrDomain, may reach them
@@ -25,7 +27,9 @@ var (
 	// change what it asks for; asking again will not help.
 	ErrDomain = errors.New("domain rule violated")
 
-	// ErrTransient means the same attempt may succeed later, unchanged.
+	// ErrTransient means the same attempt may succeed later, unchanged. A
+	// write that failed with it has certainly stored nothing, so trying it
+	// again can not store its events twice.
 	ErrTransient = errors.New("transient failure")
 
 	// ErrPermanent means trying again will not help, and something is wrong
@@ -49,6 +53,24 @@ var ErrConflict = fmt.Errorf("%w: a precondition did not hold", ErrTransient)
 // security incident rather than a mistake, which is why it can be told apart
 // (see NewStore and WithSignatureVerification).
 var ErrUnverified = fmt.Errorf("%w: an event could not be verified", ErrPermanent)
+
+// ErrOutcomeUnknown means that a write failed in a way that leaves open
+// whether the database stored the events: the request had left, but no
+// complete answer arrived, since the connection broke, the answer was cut off
+// or could not be decoded, or a timeout of the client ran out, or the answer
+// was one that may come after the events were stored, such as 500, or one
+// that does not come from an EventSourcingDB, such as a 502 or 504 of a proxy
+// in front of it.
+//
+// It belongs to no category. It is not ErrTransient, since trying again may
+// store the events twice, and not ErrPermanent, since trying again may be
+// right, once it is clear that nothing was stored. So find that out first,
+// for example by reading the subject, or try again only with a precondition
+// that refuses the same events a second time, such as OnEventID with the
+// revision the command was decided on. The kit never tries it again by
+// itself, not even with WithConflictRetries. Only a write that certainly
+// stored nothing fails with a category, so ErrTransient keeps its promise.
+var ErrOutcomeUnknown = errors.New("outcome unknown")
 
 // DomainError means that a business rule applies. It is not a failure in the
 // technical sense, but a valid answer.

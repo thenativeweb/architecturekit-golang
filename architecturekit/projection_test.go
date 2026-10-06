@@ -68,7 +68,7 @@ func seed(t *testing.T, subject string, count int) {
 		}
 	}
 
-	_, err := rawClient(t).WriteEvents(candidates, nil)
+	_, err := rawClient(t).WriteEvents(context.Background(), candidates, nil)
 	require.NoError(t, err, "failed to seed %q", subject)
 }
 
