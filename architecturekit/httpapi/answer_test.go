@@ -840,6 +840,32 @@ func TestAnsweringRefusals(t *testing.T) {
 			assert.Contains(t, logs.String(), "connection reset by peer", "the details have to reach the log")
 		})
 
+		t.Run(name+" answers an unknown outcome that has a status of its own as well as that status", func(t *testing.T) {
+			// StatusFor maps the errors of httpapi and ErrDomain before
+			// ErrOutcomeUnknown, so the status and the message have to agree.
+			unknown := fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/notes/1")
+
+			for _, other := range []error{
+				httpapi.ErrUnauthorized, httpapi.ErrForbidden, httpapi.ErrMalformed, httpapi.ErrNotFound,
+				architecturekit.NewDomainError("the reader is suspended"),
+			} {
+				t.Run(other.Error(), func(t *testing.T) {
+					var logs bytes.Buffer
+					request, api := inAHandler(&logs)
+					recorder := httptest.NewRecorder()
+					failure := errors.Join(other, unknown)
+
+					answer(recorder, request, api, failure)
+
+					assert.Equal(t, httpapi.StatusFor(failure), recorder.Code)
+					assert.NotEqual(t, http.StatusInternalServerError, recorder.Code)
+					assert.NotContains(t, recorder.Body.String(), "the request may have succeeded",
+						"the fixed text of an unknown outcome belongs to 500")
+					assert.NotContains(t, logs.String(), "internal failure", "the server did not fail with that status")
+				})
+			}
+		})
+
 		t.Run(name+" answers 500 with a fixed text, and logs the failure as an error", func(t *testing.T) {
 			var logs bytes.Buffer
 			request, api := inAHandler(&logs)

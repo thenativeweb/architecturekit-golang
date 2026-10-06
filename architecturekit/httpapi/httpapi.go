@@ -186,8 +186,11 @@ func (api *API[TUser]) explain(r *http.Request) func(status int, err error) stri
 		// A write whose outcome is unknown is an internal failure, and logged as
 		// one, but the caller has to learn that the events may have been
 		// written, so that it does not simply try again. Its error may name
-		// internals, such as the subject, so it gets a fixed text.
-		case errors.Is(err, architecturekit.ErrOutcomeUnknown):
+		// internals, such as the subject, so it gets a fixed text. That holds
+		// only if it is answered with 500: an error that has a status of its
+		// own as well, such as ErrForbidden, keeps that status (see StatusFor),
+		// and is explained as that status is.
+		case status == http.StatusInternalServerError && errors.Is(err, architecturekit.ErrOutcomeUnknown):
 			api.logFailure(r, status, err)
 
 			return "outcome unknown: the request may have succeeded"
