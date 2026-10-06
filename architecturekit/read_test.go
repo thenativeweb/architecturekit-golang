@@ -510,19 +510,20 @@ func TestReadWithInvalidEventIDs(t *testing.T) {
 	})
 }
 
-func TestReadOptionContradictions(t *testing.T) {
-	read := func(options ...architecturekit.ReadOption) func() {
-		return func() {
-			architecturekit.Read(context.Background(), nil, architecturekit.ExactSubject("/books/42"), options...)
-		}
-	}
+// contradiction is a set of read options that contradict each other, and the
+// message Read panics with for them.
+type contradiction struct {
+	options []architecturekit.ReadOption
+	message string
+}
+
+// contradictions holds every way read options can contradict each other, by
+// name.
+func contradictions() map[string]contradiction {
 	fromLatest := architecturekit.FromLatestEvent("/books/42", "io.eventsourcingdb.library.book-audited", architecturekit.ReadEverything)
 	const fromLatestText = `FromLatestEvent("/books/42", "io.eventsourcingdb.library.book-audited")`
 
-	for name, test := range map[string]struct {
-		options []architecturekit.ReadOption
-		message string
-	}{
+	return map[string]contradiction{
 		"FromEvent and AfterEvent": {
 			[]architecturekit.ReadOption{architecturekit.FromEvent("3"), architecturekit.AfterEvent("5")},
 			`architecturekit: a read has one lower bound, but got FromEvent("3") and AfterEvent("5")`,
@@ -584,7 +585,18 @@ func TestReadOptionContradictions(t *testing.T) {
 			`architecturekit: the database reads from the latest event of a type only oldest first, but got ` +
 				fromLatestText + ` and NewestFirst()`,
 		},
-	} {
+	}
+}
+
+func TestReadOptionContradictions(t *testing.T) {
+	read := func(options ...architecturekit.ReadOption) func() {
+		return func() {
+			architecturekit.Read(context.Background(), nil, architecturekit.ExactSubject("/books/42"), options...)
+		}
+	}
+	fromLatest := architecturekit.FromLatestEvent("/books/42", "io.eventsourcingdb.library.book-audited", architecturekit.ReadEverything)
+
+	for name, test := range contradictions() {
 		t.Run(name+" panic", func(t *testing.T) {
 			assert.PanicsWithValue(t, test.message, read(test.options...))
 		})

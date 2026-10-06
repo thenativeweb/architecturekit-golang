@@ -303,12 +303,13 @@ func Load[TState any](
 // leave no room for an event, such as BeforeEvent("0"), AfterEvent("0")
 // together with BeforeEvent("1"), or AfterEvent of the largest revision,
 // 2^63-1, end the iteration before the database is asked as well, with an
-// error that wraps ErrEmptyRange and names the values only. A range that is
-// only empty for now, such as the one after the last event written so far,
-// hands out no events, without an error. Otherwise, the iteration ends
-// with the first error, and stops reading as soon as the caller stops
-// iterating. If the context ends first, it ends with the context's error, so
-// that a read that was cut short never looks complete.
+// error that wraps ErrEmptyRange and names the values only. CheckReadOptions
+// makes the same checks without reading, such as before a side effect. A
+// range that is only empty for now, such as the one after the last event
+// written so far, hands out no events, without an error. Otherwise, the
+// iteration ends with the first error, and stops reading as soon as the
+// caller stops iterating. If the context ends first, it ends with the
+// context's error, so that a read that was cut short never looks complete.
 func Read(
 	ctx context.Context,
 	store *Store,
@@ -316,7 +317,8 @@ func Read(
 	options ...ReadOption,
 ) iter.Seq2[eventsourcingdb.Event, error] {
 	requireSubjects(subjects)
-	settings := readSettingsOf(subjects, options)
+	settings := readSettingsOf("Read", options)
+	settings.database.Recursive = subjects.recursive
 
 	return func(yield func(eventsourcingdb.Event, error) bool) {
 		doing := fmt.Sprintf("reading %q", subjects.subject)

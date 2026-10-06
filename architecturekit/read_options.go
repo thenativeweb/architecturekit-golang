@@ -171,12 +171,31 @@ func (s *readSettings) set(setting *string, what, option string) {
 	*setting = option
 }
 
-func readSettingsOf(subjects Subjects, options []ReadOption) readSettings {
-	settings := readSettings{
-		database: eventsourcingdb.ReadEventsOptions{Recursive: subjects.recursive},
-	}
+// CheckReadOptions fails with the error Read ends the iteration with for the
+// given options before it asks the database: the error of ParseRevision for
+// the first bound whose ID is not the ID of an event, which wraps
+// ErrNotARevision, or, if both IDs are fine, an error that wraps
+// ErrEmptyRange if the bounds leave no room for an event. It returns nil
+// otherwise. Use it to check bounds that come from a request before a side
+// effect that must not happen for a read Read refuses, such as recording who
+// reads. Read applies the same checks itself, and the database may still
+// refuse a read they pass, such as one from a latest event that comes after
+// the upper bound (see FromLatestEvent).
+//
+// Like Read, it panics for options that contradict each other and for a nil
+// option, before it checks any ID, so that a mistake in the code is not
+// hidden behind one of the caller. It takes no subjects, since none of the
+// checks depends on them, so only Read panics for the zero value of Subjects.
+func CheckReadOptions(options ...ReadOption) error {
+	return readSettingsOf("CheckReadOptions", options).checkBounds()
+}
 
-	applyOptions("Read", &settings, options)
+// readSettingsOf applies the options of a read for the function of the kit
+// with the given name, and panics for options that contradict each other.
+func readSettingsOf(function string, options []ReadOption) readSettings {
+	var settings readSettings
+
+	applyOptions(function, &settings, options)
 
 	if settings.database.FromLatestEvent != nil && settings.order != "" {
 		panic(fmt.Sprintf("architecturekit: the database reads from the latest event of a type only oldest first, "+

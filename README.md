@@ -415,7 +415,7 @@ Every command declares at least one precondition, so that writing without any ch
 - `Require` turns any other precondition of the client SDK into one of the command, such as an EventQL query.
 - `Unconditionally` writes without any check.
 
-Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`.
+Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`. The `CheckReadOptions` function does the same for the options of a read (see [Reading Events](#reading-events)).
 
 To find out what kind a precondition is, call its `IsOnStateRead` or `IsUnconditional` function. Its `Database` function returns the precondition of the client SDK that the database checks for it: the one `Require` made it from, which is how `OnPristineSubject` and `OnPopulatedSubject` make theirs, or the one of `NewIsSubjectOnEventIDPrecondition` for `OnEventID`. For any other, it returns `false`.
 
@@ -1063,6 +1063,25 @@ The IDs are strings, as everywhere else in the kit. The database hands them out 
 Bounds that leave no room for any event are a mistake, since no event can ever lie between them, such as `BeforeEvent("0")`, `AfterEvent` and `BeforeEvent` with two neighboring IDs, a lower bound above the upper one, or `AfterEvent` of the largest revision, `9223372036854775807`, after which no event can ever come. They end the iteration with an error that wraps `ErrEmptyRange` and names the values, before the database is asked, as in `empty range: no event can lie after "0" and before "1"` or `empty range: no event can lie from "2" up to "1"`. The error names the values only, never the options, since a caller of an API does not know them, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). A range that is only empty for now, on the other hand, such as the one after the last event written so far, is no mistake, since events can still come there, so `Read` hands out no events for it, without an error. So a reader that pages backwards with `BeforeEvent` and `NewestFirst` stops at a page that ends with the event `0`, since no event can lie before it.
 
 *Note that the lower bound of `FromLatestEvent` is only known once the database has found the latest event of the type, so together with it, only an upper bound that leaves no room on its own, `BeforeEvent("0")`, is refused that way. The database refuses an upper bound before the latest event of the type, and `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the reason the database gives.*
+
+To check the options of a read this way without reading, call the `CheckReadOptions` function with the options, which returns the same error, or `nil`, as `CheckPreconditions` does for the preconditions of a command (see [Using Preconditions](#using-preconditions)). That way, bounds that come from a request can be refused before doing something that must not happen for a read that `Read` refuses, for example recording who reads the history of a book:
+
+```go
+options := []architecturekit.ReadOption{
+  architecturekit.AfterEvent(after),
+  architecturekit.BeforeEvent(before),
+}
+
+if err := architecturekit.CheckReadOptions(options...); err != nil {
+  // ...
+}
+
+// Record who reads the history of the book.
+
+events := architecturekit.Read(context.TODO(), store, architecturekit.ExactSubject("/books/42"), options...)
+```
+
+*Note that `CheckReadOptions` panics where `Read` does, for options that contradict each other and for a `nil` option, before it checks any ID. It takes no subjects, since none of the checks depends on them, so only `Read` panics for the zero value of `Subjects`. Options that pass can still make the database refuse the read, such as an upper bound before the latest event of the type of `FromLatestEvent`.*
 
 Every event is verified, like everything else the store reads, before the loop sees it (see [Verifying Events](#verifying-events)). A failure belongs to a category, as with `Load` (see [Handling Errors](#handling-errors)), and ends the iteration. The store stops reading as soon as the loop ends, so breaking out of it after a page is fine.
 
