@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"testing"
 	"time"
@@ -347,7 +348,7 @@ func TestWriteFailure(t *testing.T) {
 			dialTimeout(t),
 		} {
 			t.Run(failure.Error(), func(t *testing.T) {
-				err := writeFailure(failure, false, "writing")
+				err := writeFailure(failure, true, "writing")
 
 				assert.Equal(t, databaseFailure(failure, "writing"), err)
 				assert.NotErrorIs(t, err, ErrOutcomeUnknown)
@@ -372,7 +373,7 @@ func TestWriteFailure(t *testing.T) {
 			answer(http.StatusInsufficientStorage, "insufficient storage", nil),
 		} {
 			t.Run(refusal.Error(), func(t *testing.T) {
-				err := writeFailure(refusal, true, "writing")
+				err := writeFailure(refusal, false, "writing")
 
 				assert.Equal(t, databaseFailure(refusal, "writing"), err)
 				assert.NotErrorIs(t, err, ErrOutcomeUnknown)
@@ -395,7 +396,7 @@ func TestWriteFailure(t *testing.T) {
 			answer(http.StatusLoopDetected, "the status after 507", nil),
 		} {
 			t.Run(failure.Error(), func(t *testing.T) {
-				err := writeFailure(failure, true, "writing")
+				err := writeFailure(failure, false, "writing")
 
 				assert.ErrorIs(t, err, ErrOutcomeUnknown)
 				for _, category := range []error{ErrDomain, ErrTransient, ErrPermanent, ErrNotARevision} {
@@ -419,7 +420,7 @@ func TestWriteFailure(t *testing.T) {
 
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
-				err := writeFailure(test.err, true, `writing "/books/42"`)
+				err := writeFailure(test.err, false, `writing "/books/42"`)
 
 				assert.EqualError(t, err, fmt.Sprintf(test.message, ErrOutcomeUnknown, `writing "/books/42"`, test.err))
 				assert.ErrorIs(t, err, test.err, "errors.Is and errors.As have to reach the failure of the client")
@@ -453,7 +454,7 @@ func TestWriteFailure(t *testing.T) {
 
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
-				err := writeFailure(test.err, true, "writing")
+				err := writeFailure(test.err, false, "writing")
 
 				assert.ErrorIs(t, err, ErrOutcomeUnknown)
 				assert.NotErrorIs(t, err, context.Canceled, "only the end of the context is context.Canceled")
@@ -463,4 +464,46 @@ func TestWriteFailure(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestRequestTrace(t *testing.T) {
+	refused := errors.New("connection refused")
+
+	// The steps are the hooks a transport calls, in their order.
+	type step func(hooks *httptrace.ClientTrace)
+
+	getConn := func(hooks *httptrace.ClientTrace) { hooks.GetConn("localhost:3000") }
+	gotConn := func(hooks *httptrace.ClientTrace) { hooks.GotConn(httptrace.GotConnInfo{}) }
+	wrote := func(hooks *httptrace.ClientTrace) { hooks.WroteRequest(httptrace.WroteRequestInfo{}) }
+	failedToWrite := func(hooks *httptrace.ClientTrace) { hooks.WroteRequest(httptrace.WroteRequestInfo{Err: refused}) }
+
+	tests := []struct {
+		name     string
+		steps    []step
+		isUnsent bool
+	}{
+		{"a request without any hook, as with a transport that hides it, may have been sent", nil, false},
+		{"a request that never got a connection was not sent", []step{getConn}, true},
+		{"a request whose writing failed was not sent", []step{getConn, gotConn, failedToWrite}, true},
+		{"a request that was written may have been sent", []step{getConn, gotConn, wrote}, false},
+		{"a request on a connection, but without a hook for writing it, may have been sent", []step{getConn, gotConn}, false},
+		{"a request whose writing failed, but without a hook for the connection, was not sent", []step{failedToWrite}, true},
+		{"a request that got a connection on a second attempt may have been sent", []step{getConn, getConn, gotConn}, false},
+		{"a request that was written after a failed attempt may have been sent", []step{getConn, gotConn, failedToWrite, getConn, gotConn, wrote}, false},
+		{"a request that was written before a failed attempt may have been sent", []step{getConn, gotConn, wrote, getConn, gotConn, failedToWrite}, false},
+		{"a request that was written after an attempt without a connection may have been sent", []step{getConn, getConn, gotConn, wrote}, false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var request requestTrace
+			hooks := request.hooks()
+
+			for _, step := range test.steps {
+				step(hooks)
+			}
+
+			assert.Equal(t, test.isUnsent, request.isUnsent())
+		})
+	}
 }

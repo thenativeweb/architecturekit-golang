@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strconv"
@@ -232,6 +234,61 @@ func TestAFailedWrite(t *testing.T) {
 		}
 	})
 
+	t.Run("follows a redirect of a proxy as the client does", func(t *testing.T) {
+		// The client follows 301, 302, and 303 with a GET, which the database
+		// refuses before writing, but not 307 and 308, which would need the
+		// body once more, so it hands out the redirect of the proxy then.
+		redirects := []struct {
+			status    int
+			isUnknown bool
+		}{
+			{http.StatusMovedPermanently, false},
+			{http.StatusFound, false},
+			{http.StatusSeeOther, false},
+			{http.StatusTemporaryRedirect, true},
+			{http.StatusPermanentRedirect, true},
+		}
+
+		for _, write := range kitWrites {
+			for _, redirect := range redirects {
+				t.Run(write.name+": "+strconv.Itoa(redirect.status), func(t *testing.T) {
+					server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+						switch request.URL.Path {
+						case "/api/v1/write-events":
+							_, _ = io.ReadAll(request.Body)
+							http.Redirect(writer, request, "/moved/write-events", redirect.status)
+						case "/moved/write-events":
+							writer.Header().Set("Server", "EventSourcingDB/test")
+							if request.Method != http.MethodPost {
+								writer.WriteHeader(http.StatusMethodNotAllowed)
+								return
+							}
+							writer.WriteHeader(http.StatusInternalServerError)
+						default:
+							writer.Header().Set("Server", "EventSourcingDB/test")
+						}
+					}))
+					t.Cleanup(server.Close)
+					store := architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io")
+
+					err := write.write(context.Background(), store, incremented{By: 1})
+
+					if redirect.isUnknown {
+						assertOutcomeUnknown(t, err)
+						assert.ErrorIs(t, err, eventsourcingdb.ErrInvalidServerHeader)
+						return
+					}
+
+					assert.ErrorIs(t, err, architecturekit.ErrPermanent, "the database refused the GET before writing")
+					assert.NotErrorIs(t, err, architecturekit.ErrOutcomeUnknown)
+					answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
+					require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", err)
+					assert.Equal(t, http.StatusMethodNotAllowed, answer.StatusCode)
+				})
+			}
+		}
+	})
+
 	t.Run("with an unknown outcome is never tried again by the kit, not even by a store that decides again on conflicts", func(t *testing.T) {
 		var writes atomic.Int32
 		store := architecturekit.NewStore(
@@ -295,6 +352,94 @@ func subtestsOf(name string) []string {
 	}
 
 	return subtests
+}
+
+// roundTripperFunc is a transport made of a function.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (send roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return send(request)
+}
+
+func TestATransportOfTheApplication(t *testing.T) {
+	// The kit tells from the hooks of a trace in the context of the request
+	// whether a request certainly has not been sent. A transport of the
+	// application's own on http.DefaultClient may hide them, if it does not
+	// hand the context on, and then nothing tells that the request has not
+	// been sent, so the outcome is unknown even if it was not. The test sets
+	// the transport, in a process of its own.
+	var subtests []string
+	for _, transport := range []string{"that hides the requests", "that hands on the context"} {
+		for _, failure := range []string{"when the database can not be reached", "when the connection breaks"} {
+			subtests = append(subtests, subtestsOf("with a transport "+transport+", "+failure)...)
+		}
+	}
+	if !inAProcessOfItsOwn(t, subtests...) {
+		return
+	}
+
+	inner := &http.Transport{}
+	t.Cleanup(inner.CloseIdleConnections)
+	t.Cleanup(func() { http.DefaultClient.Transport = nil })
+
+	transports := []struct {
+		name string
+		send roundTripperFunc
+
+		// isUnsentKnown tells whether the transport lets the kit know that a
+		// request was not sent.
+		isUnsentKnown bool
+	}{
+		{"that hides the requests", func(request *http.Request) (*http.Response, error) {
+			return inner.RoundTrip(request.Clone(context.Background()))
+		}, false},
+		{"that hands on the context", func(request *http.Request) (*http.Response, error) {
+			return inner.RoundTrip(request)
+		}, true},
+	}
+
+	unreachable := func(t *testing.T, write string) *eventsourcingdb.Client {
+		// Execute reads before it writes, so its database has to answer the
+		// read, and go away before the write.
+		if write == "Execute" {
+			return vanishingDatabase(t)
+		}
+
+		return deadClient(t)
+	}
+	breaking := func(t *testing.T, _ string) *eventsourcingdb.Client {
+		return writingDatabase(t, "/api/v1/write-events", func(http.ResponseWriter, *http.Request) {
+			panic(http.ErrAbortHandler)
+		})
+	}
+
+	for _, transport := range transports {
+		http.DefaultClient.Transport = transport.send
+
+		for _, write := range kitWrites {
+			t.Run(write.name+" with a transport "+transport.name+", when the database can not be reached", func(t *testing.T) {
+				store := architecturekit.NewStore(unreachable(t, write.name), "https://thenativeweb.io")
+
+				err := write.write(context.Background(), store, incremented{By: 1})
+
+				if transport.isUnsentKnown {
+					assert.ErrorIs(t, err, architecturekit.ErrTransient, "the kit knows that the request was not sent")
+					assert.NotErrorIs(t, err, architecturekit.ErrOutcomeUnknown)
+				} else {
+					assertOutcomeUnknown(t, err)
+				}
+				assert.ErrorContains(t, err, "connection refused")
+			})
+
+			t.Run(write.name+" with a transport "+transport.name+", when the connection breaks", func(t *testing.T) {
+				store := architecturekit.NewStore(breaking(t, write.name), "https://thenativeweb.io")
+
+				err := write.write(context.Background(), store, incremented{By: 1})
+
+				assertOutcomeUnknown(t, err)
+			})
+		}
+	}
 }
 
 func TestAClientTimeoutWhileWaitingForTheAnswer(t *testing.T) {

@@ -500,31 +500,74 @@ func (s *Store) candidateFor(subject string, event Event) (eventsourcingdb.Event
 // The client gets the context without its end, so that a write that has begun
 // is finished, whatever happens to the context of the caller: its values, such
 // as a trace, reach the request, but its end does not stop it. A trace of its
-// own tells whether the request has left completely, which only a write that
-// fails without an answer from the database needs to know. A request whose
-// writing failed has not, since the database reads the whole request before it
-// writes anything.
+// own tells whether the request has certainly not left completely, which only
+// a write that fails without an answer from the database needs to know (see
+// requestTrace).
 func (s *Store) write(
 	ctx context.Context,
 	candidates []eventsourcingdb.EventCandidate,
 	preconditions []eventsourcingdb.Precondition,
 	doing string,
 ) ([]eventsourcingdb.Event, error) {
-	var isSent atomic.Bool
-	traced := httptrace.WithClientTrace(context.WithoutCancel(ctx), &httptrace.ClientTrace{
-		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			if info.Err == nil {
-				isSent.Store(true)
-			}
-		},
-	})
+	var request requestTrace
+	traced := httptrace.WithClientTrace(context.WithoutCancel(ctx), request.hooks())
 
 	written, err := s.client.WriteEvents(traced, candidates, preconditions)
 	if err != nil {
-		return nil, writeFailure(err, isSent.Load(), doing)
+		return nil, writeFailure(err, request.isUnsent(), doing)
 	}
 
 	return written, nil
+}
+
+// requestTrace follows the request of a write through the hooks of
+// net/http/httptrace, to tell whether it has certainly not reached the
+// database completely, so that the database has stored nothing. Only evidence
+// counts: no connection was ever obtained, or writing the request failed,
+// since the database reads the whole request before it writes anything. The
+// trace of a request that was written, though, outweighs a failed attempt
+// before it, as with a transport that tries again.
+//
+// A transport that does not hand the context of the request on to net/http,
+// such as one of the application's own on http.DefaultClient, calls no hooks
+// at all. Without evidence, though, the request may have been sent, so the
+// outcome of the write is unknown then. The same goes for an answer that
+// arrives before the hook of the written request is called, which HTTP/2
+// allows.
+type requestTrace struct {
+	isConnecting atomic.Bool
+	isConnected  atomic.Bool
+	isWritten    atomic.Bool
+	isUnwritten  atomic.Bool
+}
+
+// hooks returns the hooks that follow the request. They may be called from
+// other goroutines than the one that sends the request.
+func (r *requestTrace) hooks() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		GetConn: func(string) { r.isConnecting.Store(true) },
+		GotConn: func(httptrace.GotConnInfo) { r.isConnected.Store(true) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err != nil {
+				r.isUnwritten.Store(true)
+				return
+			}
+
+			r.isWritten.Store(true)
+		},
+	}
+}
+
+// isUnsent reports whether the request has certainly not reached the database
+// completely.
+func (r *requestTrace) isUnsent() bool {
+	if r.isWritten.Load() {
+		return false
+	}
+
+	isNeverConnected := r.isConnecting.Load() && !r.isConnected.Load()
+
+	return isNeverConnected || r.isUnwritten.Load()
 }
 
 // RegisterSchemas registers the schemas of the given events with the database.

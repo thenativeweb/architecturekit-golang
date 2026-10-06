@@ -76,10 +76,10 @@ func readFailure(ctx context.Context, err error, doing string) error {
 // writeFailure is what a write that failed reports. It keeps the category
 // that databaseFailure sorts it into only if it is certain that the database
 // stored nothing, so that trying it again unchanged can not store the events
-// twice: if the request never left completely, as when the database can not
-// be reached, which isSent tells (see Store.write), or if the database
-// refused it with a status it answers a write with only before it stores
-// anything (see isRefusedBeforeWriting).
+// twice: if the request has certainly not left completely, as when the
+// database can not be reached, which isUnsent tells (see requestTrace), or if
+// the database refused it with a status it answers a write with only before
+// it stores anything (see isRefusedBeforeWriting).
 //
 // Every other failure leaves open whether the events were stored, so it is
 // reported as ErrOutcomeUnknown, which wraps the failure of the client after
@@ -89,8 +89,8 @@ func readFailure(ctx context.Context, err error, doing string) error {
 // with a status that may follow storing the events, or the answer does not
 // come from an EventSourcingDB, such as a 502 or 504 of a proxy in front of
 // it, which may answer so after the database has stored them.
-func writeFailure(err error, isSent bool, doing string) error {
-	if !isSent || isRefusedBeforeWriting(statusCodeOf(err)) {
+func writeFailure(err error, isUnsent bool, doing string) error {
+	if isUnsent || isRefusedBeforeWriting(statusCodeOf(err)) {
 		return databaseFailure(err, doing)
 	}
 
