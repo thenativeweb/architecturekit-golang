@@ -31,7 +31,7 @@ func TestDatabaseFailures(t *testing.T) {
 	// status is checked for both, and each time against the other category as
 	// well. Only 409 is sorted differently (see below), and the other statuses
 	// of 500 and above, which leave the outcome of a write unknown (see
-	// TestAWriteWhoseOutcomeIsUnknown).
+	// TestAFailedWrite).
 	paths := []struct {
 		name string
 		path string

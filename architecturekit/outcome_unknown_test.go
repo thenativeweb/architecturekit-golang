@@ -249,25 +249,59 @@ func TestAFailedWrite(t *testing.T) {
 	})
 }
 
-// clientTimeoutProcess tells a test process that it is the one in which
-// TestAClientTimeoutWhileWaitingForTheAnswer sets the timeout of
-// http.DefaultClient.
-const clientTimeoutProcess = "ARCHITECTUREKIT_TEST_CLIENT_TIMEOUT"
+// ownProcess tells a test process that it is the one in which the test it
+// names runs on its own (see inAProcessOfItsOwn).
+const ownProcess = "ARCHITECTUREKIT_TEST_OWN_PROCESS"
+
+// inAProcessOfItsOwn reports whether the test runs in a process of its own,
+// which runs nothing else. If it does not, it runs the test there, asserts
+// that the test and each of the given subtests ran there and passed, and
+// reports false, so that the test returns.
+//
+// The client sends every request with http.DefaultClient, which the whole
+// process shares, including the requests that other tests leave running. So
+// a test changes it only in a process of its own.
+func inAProcessOfItsOwn(t *testing.T, subtests ...string) bool {
+	t.Helper()
+
+	if os.Getenv(ownProcess) == t.Name() {
+		return true
+	}
+
+	process := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.short", "-test.count=1", "-test.v")
+	process.Env = append(os.Environ(), ownProcess+"="+t.Name())
+
+	output, err := process.CombinedOutput()
+	require.NoError(t, err, "the test failed in its own process:\n%s", output)
+
+	// A process that runs no test passes as well, so the test has to say that
+	// it ran, and so does each of its subtests.
+	assert.NotContains(t, string(output), "no tests to run")
+	assert.Contains(t, string(output), "--- PASS: "+t.Name()+" (")
+	for _, subtest := range subtests {
+		assert.Contains(t, string(output), "--- PASS: "+t.Name()+"/"+strings.ReplaceAll(subtest, " ", "_")+" (",
+			"the subtest %q did not pass in its own process:\n%s", subtest, output)
+	}
+
+	return false
+}
+
+// subtestsOf returns the names of the subtests that run for each of the
+// writes of the kit, which begin with the name of the write.
+func subtestsOf(name string) []string {
+	subtests := make([]string, len(kitWrites))
+	for i, write := range kitWrites {
+		subtests[i] = write.name + " " + name
+	}
+
+	return subtests
+}
 
 func TestAClientTimeoutWhileWaitingForTheAnswer(t *testing.T) {
-	// The client sends every request with http.DefaultClient, so the only
-	// deadline that can run out while a write waits for its answer is the
-	// timeout of that, which is shared by the whole process, including the
-	// requests that other tests leave running. So the test sets it in a
-	// process of its own, which runs nothing else.
-	if os.Getenv(clientTimeoutProcess) == "" {
-		process := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.short", "-test.count=1")
-		process.Env = append(os.Environ(), clientTimeoutProcess+"=1")
-
-		output, err := process.CombinedOutput()
-		require.NoError(t, err, "the test failed in its own process:\n%s", output)
-		assert.Contains(t, string(output), "PASS")
-
+	// The only deadline that can run out while a write waits for its answer is
+	// the timeout of http.DefaultClient, so the test sets it, in a process of
+	// its own.
+	if !inAProcessOfItsOwn(t, subtestsOf("leaves the outcome unknown")...) {
 		return
 	}
 

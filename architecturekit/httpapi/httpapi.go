@@ -291,13 +291,13 @@ func (api *API[TUser]) loggerOrDefault() *slog.Logger {
 //
 // An error of userFrom that StatusFor maps to a status of its own comes back
 // as it is, and so do one of the category architecturekit.ErrPermanent and
-// one of architecturekit.ErrOutcomeUnknown, so that it keeps its status. If the session store is down, for example,
-// userFrom says so with architecturekit.ErrTransient, which is answered with
-// 503 and logged, rather than sending the caller off to sign in again. Only an
-// error without such a status comes back as ErrUnauthorized, which wraps it,
-// so that errors.Is and errors.As still find it. To have an error with a
-// status of its own answered with 401 all the same, userFrom wraps it with
-// ErrUnauthorized itself.
+// one of architecturekit.ErrOutcomeUnknown, so that they keep their status.
+// If the session store is down, for example, userFrom says so with
+// architecturekit.ErrTransient, which is answered with 503 and logged, rather
+// than sending the caller off to sign in again. Only an error without such a
+// status comes back as ErrUnauthorized, which wraps it, so that errors.Is and
+// errors.As still find it. To have an error with a status of its own answered
+// with 401 all the same, userFrom wraps it with ErrUnauthorized itself.
 func UserOf[TUser any](r *http.Request, api *API[TUser]) (TUser, error) {
 	user, err := api.userFrom(r)
 	if err != nil {
