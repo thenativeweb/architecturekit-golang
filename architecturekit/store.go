@@ -700,10 +700,11 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 // Execute checks all events for nil first, then all of them for a rule, and
 // encodes them last.
 //
-// If the context ends before the events are written, Execute writes nothing
-// and fails with the context's error, also if it ends while the decider
-// decides. Once the write has begun, it is finished, since the client writes
-// without a context.
+// If the context ends before the write begins, Execute writes nothing and
+// fails with the context's error, also if it ends while the decider decides.
+// Once the write has begun, the context no longer stops it: the write is
+// finished, and Execute returns its result, the events written or the failure
+// of the write, rather than the context's error.
 //
 // The zero Decider, one that was not made with NewDecider, is a programming
 // error, so Execute panics, before it looks at the command, and names the

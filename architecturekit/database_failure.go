@@ -34,11 +34,11 @@ func statusCodeOf(err error) int {
 	return answer.StatusCode
 }
 
-// contextEnded reports that reading or writing stopped because the context
-// ended, and keeps the context's error, so that a caller can tell it from a
-// failure of the database with errors.Is. It belongs to no category: nothing
-// went wrong that trying again could fix, and nothing the request could have
-// avoided: the caller stopped waiting, or ran out of time.
+// contextEnded reports that reading stopped, or that writing did not begin,
+// because the context ended, and keeps the context's error, so that a caller
+// can tell it from a failure of the database with errors.Is. It belongs to no
+// category: nothing went wrong that trying again could fix, and nothing the
+// request could have avoided: the caller stopped waiting, or ran out of time.
 //
 // Whatever the client reports once the context has ended is a consequence of
 // that, so it is the context's error that counts, not the client's.

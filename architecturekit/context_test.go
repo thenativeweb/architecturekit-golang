@@ -17,9 +17,10 @@ import (
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
 
-// A context ends when the caller goes away or runs out of time, and reading or
-// writing has to stop then. What must not happen is that a read which was cut
-// short looks complete: a command would be decided on part of its history.
+// A context ends when the caller goes away or runs out of time, and reading has
+// to stop then, and so does writing, as long as it has not begun. What must
+// not happen is that a read which was cut short looks complete: a command
+// would be decided on part of its history.
 
 // thirtyIn writes three increments of ten to the subject of the test.
 func thirtyIn(t *testing.T, store *architecturekit.Store) string {

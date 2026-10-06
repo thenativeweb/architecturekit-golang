@@ -25,6 +25,10 @@ type EventOn struct {
 // ErrOutcomeUnknown. Write never decides again on a conflict, since there is
 // nothing to decide.
 //
+// If the context ends before the write begins, Write writes nothing and fails
+// with the context's error. Once the write has begun, the context no longer
+// stops it, as with Execute.
+//
 // Like a command, a write declares at least one precondition, such as
 // OnPristineSubject or one made with Require, or Unconditionally to write
 // without any. OnStateRead has nothing to guard, since Write reads no state.
