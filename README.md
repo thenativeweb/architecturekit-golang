@@ -3077,12 +3077,20 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
   ThenPreconditions(architecturekittest.OnEventID("/books/42", "0"))
 ```
 
-`OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` also describe a precondition made with `Require` from the function of the client SDK that does the same, such as `NewIsSubjectPristinePrecondition`, since the two are alike. A test that expects a pristine subject fails for a command that declares a populated one, and the failure names both. For example, `AcquireBook` requires a pristine subject (see [Preventing Duplicates](#preventing-duplicates)):
+`ThenPreconditions` describes a precondition by what the database checks, so `OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` also describe a precondition made with `Require` from the function of the client SDK that does the same, such as `NewIsSubjectPristinePrecondition`. A test that expects a pristine subject fails for a command that declares a populated one, and the failure names both. For example, `AcquireBook` requires a pristine subject (see [Preventing Duplicates](#preventing-duplicates)):
 
 ```go
 architecturekittest.Given(t, acquireBook).
   When(AcquireBook{BookID: "42"}).
   ThenPreconditions(architecturekittest.OnPristineSubject("/books/42"))
+```
+
+For a pristine or a populated subject, the two are alike. For a revision, they are not: only `OnEventID` checks the event ID before anything is read, and refuses one that is not an event ID with an error that wraps `ErrNotARevision`, while `Require` with `NewIsSubjectOnEventIDPrecondition` leaves it to the database, which refuses it as a malformed request, so that `Execute` fails with an error of the category `ErrPermanent` (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). `ThenPreconditions` matches both, so a test tells them apart by what they do. For example, the following test passes for the `BorrowBook` that checks the revision of the caller with `OnEventID`, and fails for one that uses `Require` instead, since the test fixture then leaves the ID to the database, as `Execute` does, and the decider decides on the command:
+
+```go
+architecturekittest.Given(t, borrowBook, BookAcquired{}).
+  When(BorrowBook{BookID: "42", ReaderID: "23", ExpectedEventID: "abc"}).
+  ThenFailed(architecturekit.ErrNotARevision)
 ```
 
 To get the preconditions of a command directly, call the `PreconditionsOf` function. It returns a slice of `Precondition`, with the fields `Subject`, `Pristine`, `Populated`, `EventID`, `Query`, `OnStateRead`, and `Unconditional`:
