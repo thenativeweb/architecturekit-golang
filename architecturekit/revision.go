@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
@@ -28,8 +29,11 @@ var ErrNotARevision = errors.New("not a revision")
 // polling. InMemoryView does.
 type Revisioned interface {
 	// Revision is the last event the view has seen, or the empty string while
-	// it has seen none.
-	Revision() string
+	// it has seen none. A view that keeps its revision elsewhere, such as in a
+	// database, reads it within the context. An error means that it could not
+	// be read, so a reader fails rather than taking the empty string for a view
+	// that has seen nothing.
+	Revision(ctx context.Context) (string, error)
 
 	// WaitFor returns nil once the view has reached the revision, at once if
 	// it has already. If the context ends first, it returns the error of the
@@ -220,4 +224,62 @@ func RevisionOf(events []eventsourcingdb.Event) string {
 	}
 
 	return highest
+}
+
+// WaitForWritten waits until the view has seen the events that Execute or
+// Write returned, for a step on the server that builds on what was just
+// written, such as one that reads from the view what a command has changed:
+//
+//	written, err := architecturekit.Execute(ctx, store, borrowBook, cmd)
+//	if err != nil {
+//	  return err
+//	}
+//
+//	if err := architecturekit.WaitForWritten(ctx, catalog, written, 5*time.Second); err != nil {
+//	  return err
+//	}
+//
+// It waits with WaitFor for RevisionOf the events, for at most timeout, and
+// returns nil once the view has reached it, and at once if no events were
+// written, since there is nothing to wait for then.
+//
+// Unlike Await of httpapi, which answers a caller with what the view holds,
+// running out of time is an error, since the step needs what was written: if
+// timeout runs out while ctx has not ended, it returns an error of the
+// category ErrTransient, which says so, since the view may still catch up. If
+// ctx ends first, it returns the error of ctx, and any other error of the
+// view as it is.
+//
+// A nil view, including a nil pointer, is a programming error, and so is a
+// timeout that is not positive, since a view that has to catch up with a
+// write that has just happened takes some time, and waiting no time at all
+// would fail almost always. WaitForWritten panics for both, before it looks at
+// the events.
+func WaitForWritten(ctx context.Context, view Revisioned, written []eventsourcingdb.Event, timeout time.Duration) error {
+	if isNil(view) {
+		panic("architecturekit: WaitForWritten needs a view, not nil")
+	}
+	if timeout <= 0 {
+		panic(fmt.Sprintf("architecturekit: WaitForWritten needs a timeout that is positive, not %s", timeout))
+	}
+
+	if len(written) == 0 {
+		return nil
+	}
+
+	waiting, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	err := view.WaitFor(waiting, RevisionOf(written))
+
+	switch {
+	case err == nil:
+		return nil
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case waiting.Err() != nil && errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("%w: the view did not catch up within %s", ErrTransient, timeout)
+	default:
+		return err
+	}
 }

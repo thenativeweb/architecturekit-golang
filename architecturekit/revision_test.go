@@ -148,25 +148,49 @@ func TestParseRevision(t *testing.T) {
 	})
 }
 
+// currentRevision returns the revision of a view that does not fail to read
+// it, such as an InMemoryView.
+func currentRevision(t *testing.T, view architecturekit.Revisioned) string {
+	t.Helper()
+
+	revision, err := view.Revision(t.Context())
+	require.NoError(t, err)
+
+	return revision
+}
+
 func TestInMemoryViewRevision(t *testing.T) {
 	t.Run("a fresh view has seen nothing", func(t *testing.T) {
-		assert.Empty(t, intView().Revision())
+		assert.Empty(t, currentRevision(t, intView()))
+	})
+
+	t.Run("Revision ignores the context, and never fails", func(t *testing.T) {
+		view := intView()
+		view.Seen("5")
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		revision, err := view.Revision(ctx)
+
+		require.NoError(t, err, "a view in memory has nothing to fail at")
+		assert.Equal(t, "5", revision)
 	})
 
 	t.Run("Seen moves the revision forward only", func(t *testing.T) {
 		view := intView()
 
 		view.Seen("5")
-		require.Equal(t, "5", view.Revision())
+		require.Equal(t, "5", currentRevision(t, view))
 
 		// An event that arrives twice, or out of order after a restart, must not
 		// pull the revision back.
 		view.Seen("3")
 		view.Seen("5")
-		assert.Equal(t, "5", view.Revision())
+		assert.Equal(t, "5", currentRevision(t, view))
 
 		view.Seen("12")
-		assert.Equal(t, "12", view.Revision())
+		assert.Equal(t, "12", currentRevision(t, view))
 	})
 
 	t.Run("Seen ignores what is not a revision", func(t *testing.T) {
@@ -174,7 +198,7 @@ func TestInMemoryViewRevision(t *testing.T) {
 		view.Seen("5")
 		view.Seen("nonsense")
 
-		assert.Equal(t, "5", view.Revision())
+		assert.Equal(t, "5", currentRevision(t, view))
 	})
 
 	t.Run("waiting for a revision already reached returns at once", func(t *testing.T) {
@@ -305,7 +329,7 @@ func TestTracking(t *testing.T) {
 
 		assert.Equal(t, 2, applied)
 
-		assert.Equal(t, "1", view.Revision())
+		assert.Equal(t, "1", currentRevision(t, view))
 	})
 
 	t.Run("also records what the projection ignores", func(t *testing.T) {
@@ -321,7 +345,7 @@ func TestTracking(t *testing.T) {
 			architecturekittest.StoredEvent("/somewhere/else", "42", incremented{By: 1}),
 		)
 
-		assert.Equal(t, "42", view.Revision())
+		assert.Equal(t, "42", currentRevision(t, view))
 	})
 
 	t.Run("records every event in every view", func(t *testing.T) {
@@ -339,7 +363,7 @@ func TestTracking(t *testing.T) {
 		for name, view := range map[string]*architecturekit.InMemoryView[int, int]{
 			"books": books, "shelves": shelves, "readers": readers,
 		} {
-			assert.Equal(t, "4", view.Revision(), "the view %s has to record the events", name)
+			assert.Equal(t, "4", currentRevision(t, view), "the view %s has to record the events", name)
 		}
 	})
 
@@ -429,7 +453,7 @@ func TestTracking(t *testing.T) {
 
 		assert.ErrorIs(t, err, failed)
 
-		assert.Empty(t, view.Revision(), "recorded although applying failed")
+		assert.Empty(t, currentRevision(t, view), "recorded although applying failed")
 	})
 
 	t.Run("keeps a projection that is rebuilt as it is", func(t *testing.T) {
@@ -482,7 +506,7 @@ func TestTracking(t *testing.T) {
 			architecturekit.Tracking(target, view)))
 
 		require.NotEmpty(t, target.checkpoint, "a tracked resumable projection has to save its checkpoint")
-		assert.Equal(t, target.checkpoint, view.Revision())
+		assert.Equal(t, target.checkpoint, currentRevision(t, view))
 	})
 }
 

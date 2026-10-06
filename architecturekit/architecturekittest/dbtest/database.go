@@ -51,6 +51,8 @@ func (d *Database) Client() *eventsourcingdb.Client {
 //
 // The schemas come as a single list, so that the options can follow. To hand
 // over the schemas of several states, join them with slices.Concat.
+//
+// A nil option is a programming error, so Store panics, naming itself.
 func (d *Database) Store(
 	t testing.TB,
 	source string,
@@ -58,6 +60,7 @@ func (d *Database) Store(
 	options ...architecturekit.StoreOption,
 ) *architecturekit.Store {
 	t.Helper()
+	requireOptions("Store", options)
 
 	store := architecturekit.NewStore(d.client, source, options...)
 	if err := architecturekit.RegisterSchemas(t.Context(), store, schemas); err != nil {
@@ -65,6 +68,18 @@ func (d *Database) Store(
 	}
 
 	return store
+}
+
+// requireOptions panics if one of the options for a store is nil, naming the
+// function of dbtest that got it, rather than leaving it to NewStore, which
+// names itself. The functions call it before they ask for a database, so that
+// the mistake shows with -short as well, rather than being skipped.
+func requireOptions(function string, options []architecturekit.StoreOption) {
+	for _, option := range options {
+		if option == nil {
+			panic(fmt.Sprintf("architecturekittest/dbtest: %s got a nil option", function))
+		}
+	}
 }
 
 // isShort tells whether the tests run with -short. It is a variable, so that
@@ -142,7 +157,8 @@ func IsolatedDatabase(t testing.TB) *Database {
 }
 
 // Store returns a store on the shared database. It is SharedDatabase followed
-// by its Store function.
+// by its Store function. A nil option panics, as with that function, and does
+// so with -short as well.
 func Store(
 	t testing.TB,
 	source string,
@@ -150,12 +166,14 @@ func Store(
 	options ...architecturekit.StoreOption,
 ) *architecturekit.Store {
 	t.Helper()
+	requireOptions("Store", options)
 
 	return SharedDatabase(t).Store(t, source, schemas, options...)
 }
 
 // IsolatedStore returns a store on a database of the test's own. It is
-// IsolatedDatabase followed by its Store function.
+// IsolatedDatabase followed by its Store function. A nil option panics, as
+// with that function, and does so with -short as well.
 func IsolatedStore(
 	t testing.TB,
 	source string,
@@ -163,6 +181,7 @@ func IsolatedStore(
 	options ...architecturekit.StoreOption,
 ) *architecturekit.Store {
 	t.Helper()
+	requireOptions("IsolatedStore", options)
 
 	return IsolatedDatabase(t).Store(t, source, schemas, options...)
 }

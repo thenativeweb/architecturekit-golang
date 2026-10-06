@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thenativeweb/architecturekit-golang/architecturekit"
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdbtest"
 )
 
@@ -89,6 +90,52 @@ func TestShortMode(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestNilOption(t *testing.T) {
+	var declared architecturekit.StoreOption
+
+	calls := map[string]struct {
+		function string
+		call     func(tb testing.TB, option architecturekit.StoreOption)
+	}{
+		"Store": {"Store", func(tb testing.TB, option architecturekit.StoreOption) {
+			Store(tb, "https://architecturekit.test", nil, option)
+		}},
+		"IsolatedStore": {"IsolatedStore", func(tb testing.TB, option architecturekit.StoreOption) {
+			IsolatedStore(tb, "https://architecturekit.test", nil, option)
+		}},
+		"the Store function of a database": {"Store", func(tb testing.TB, option architecturekit.StoreOption) {
+			(&Database{}).Store(tb, "https://architecturekit.test", nil, option)
+		}},
+	}
+
+	for name, short := range map[string]bool{
+		"panics, naming the function, before it asks for a database": false,
+		"panics with -short as well, rather than skipping the test":  true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			replace(t, &isShort, func() bool { return short })
+			replace(t, &shared, &sharedDatabase{})
+			replace(t, &start, func(context.Context) (stopper, *Database, error) {
+				t.Error("no database may be started for a nil option")
+				return nil, nil, errors.New("started")
+			})
+
+			for name, test := range calls {
+				t.Run(name, func(t *testing.T) {
+					for _, option := range []architecturekit.StoreOption{nil, declared} {
+						spy := &tbSpy{TB: t}
+
+						assert.PanicsWithValue(t, "architecturekittest/dbtest: "+test.function+" got a nil option",
+							func() { test.call(spy, option) })
+						assert.Empty(t, spy.skipped)
+						assert.Empty(t, spy.failures)
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestStartFailure(t *testing.T) {

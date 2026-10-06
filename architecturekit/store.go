@@ -84,6 +84,13 @@ type storeSettings struct {
 // alike, but compute something else, are not told apart: one of them gets the
 // cached state of the other, without an error.
 //
+// The very same *State is not compared at all. The initial values of two
+// different ones are compared as reflect.DeepEqual compares them, except that
+// every value equals itself: two functions in them are equal if both are nil
+// or both are not, and two floats if they are equal or both NaN, as are the
+// parts of two complex numbers. Only a map with a NaN key does not equal
+// itself, since Go never finds such a key again.
+//
 // A negative number of subjects is a programming error, so it panics.
 func WithStateCache(maxSubjects int) StoreOption {
 	if maxSubjects < 0 {
@@ -162,7 +169,14 @@ func WithReconnectDelays(initialDelay, maxDelay time.Duration) StoreOption {
 // kit itself does not; give the projections names with Named, so that the log
 // tells them apart. A panic in observe ends the run, as a panic in the
 // projection does (see StartProjection).
+//
+// A nil function is a programming error, so it panics, rather than silently
+// observing nothing.
 func WithReconnectObserver(observe func(Reconnect)) StoreOption {
+	if observe == nil {
+		panic("architecturekit: WithReconnectObserver needs a function, not nil")
+	}
+
 	return func(settings *storeSettings) {
 		settings.reconnectObserver = observe
 	}
@@ -211,8 +225,8 @@ func WithSignatureVerification(verificationKey ed25519.PublicKey) StoreOption {
 // written are not checked, since they are not read. To turn this off, hand
 // over WithoutHashVerification.
 //
-// A nil client is a programming error, so NewStore panics, rather than the
-// store failing once it first reads or writes.
+// A nil client, or a nil option, is a programming error, so NewStore panics,
+// rather than the store failing once it first reads or writes.
 func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOption) *Store {
 	if client == nil {
 		panic("architecturekit: NewStore needs a client, not nil")
@@ -222,9 +236,7 @@ func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOpt
 		reconnectInitialDelay: defaultReconnectInitialDelay,
 		reconnectMaxDelay:     defaultReconnectMaxDelay,
 	}
-	for _, option := range options {
-		option(&settings)
-	}
+	applyOptions("NewStore", &settings, options)
 
 	if settings.skipsHashes && settings.verificationKey != nil {
 		panic("architecturekit: WithoutHashVerification contradicts WithSignatureVerification, which checks the hash as well")
@@ -236,6 +248,20 @@ func NewStore(client *eventsourcingdb.Client, source string, options ...StoreOpt
 	}
 
 	return store
+}
+
+// applyOptions applies the options to the settings of the function of the kit
+// with the given name, in their order. A nil option, such as one that was
+// declared but never set, is a programming error, so applyOptions panics,
+// naming the function, rather than with a nil dereference.
+func applyOptions[TSettings any, TOption ~func(*TSettings)](function string, settings *TSettings, options []TOption) {
+	for _, option := range options {
+		if option == nil {
+			panic(fmt.Sprintf("architecturekit: %s got a nil option", function))
+		}
+
+		option(settings)
+	}
 }
 
 // Load reads the state of a subject exactly the way Execute does before it
@@ -267,15 +293,23 @@ func Load[TState any](
 // bound the IDs, which the database hands out as one ascending sequence
 // across all subjects, NewestFirst turns the order around, and FromLatestEvent
 // starts from the latest event of a type. Options that contradict each other
-// panic (see ReadOption). For anything else, use ReadEvents of the client SDK.
+// panic (see ReadOption), and so does a nil option. For anything else, use
+// ReadEvents of the client SDK.
 //
 // A bound whose ID is not the ID of an event, such as an empty one, ends the
 // iteration with the error of ParseRevision, which wraps ErrNotARevision and
 // names the ID, before the database is asked. It names neither the subjects
-// nor the option, since the ID usually comes from a request. Otherwise, the
-// iteration ends with the first error, and stops reading as soon as the caller
-// stops iterating. If the context ends first, it ends with the context's
-// error, so that a read that was cut short never looks complete.
+// nor the option, since the ID usually comes from a request. Bounds that
+// leave no room for an event, such as BeforeEvent("0"), AfterEvent("0")
+// together with BeforeEvent("1"), or AfterEvent of the largest revision,
+// 2^63-1, end the iteration before the database is asked as well, with an
+// error that wraps ErrEmptyRange and names the values only. CheckReadOptions
+// makes the same checks without reading, such as before a side effect. A
+// range that is only empty for now, such as the one after the last event
+// written so far, hands out no events, without an error. Otherwise, the
+// iteration ends with the first error, and stops reading as soon as the
+// caller stops iterating. If the context ends first, it ends with the
+// context's error, so that a read that was cut short never looks complete.
 func Read(
 	ctx context.Context,
 	store *Store,
@@ -283,7 +317,8 @@ func Read(
 	options ...ReadOption,
 ) iter.Seq2[eventsourcingdb.Event, error] {
 	requireSubjects(subjects)
-	settings := readSettingsOf(subjects, options)
+	settings := readSettingsOf("Read", options)
+	settings.database.Recursive = subjects.recursive
 
 	return func(yield func(eventsourcingdb.Event, error) bool) {
 		doing := fmt.Sprintf("reading %q", subjects.subject)

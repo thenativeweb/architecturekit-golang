@@ -47,7 +47,7 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io")
 
 The `NewStore` function returns a `*Store`, which reads and writes the events of all commands. For details on the client, see the [client SDK for Go](https://github.com/thenativeweb/eventsourcingdb-client-golang).
 
-*Note that calling `NewStore` with `nil` as the client panics.*
+*Note that calling `NewStore` with `nil` as the client, or as one of the options, panics.*
 
 ### Defining Commands
 
@@ -268,7 +268,7 @@ var bookState = architecturekit.NewState(Book{}).
 
 The event type is taken from the event's `EventType` function, so it does not have to be repeated.
 
-*Note that calling `Evolve` twice for the same event type panics.*
+*Note that calling `Evolve` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer as the event type, such as `*BookBorrowed` rather than `BookBorrowed`, or with an interface, such as `architecturekit.Event`.*
 
 Every read starts from a copy of the initial value, so an `Evolve` function may change the state it gets without changing what the next read starts from. A copy shares nothing with a value like `Book{}`, and neither with an initial value whose maps, slices, pointers and channels are `nil`, so leave them `nil`, and let the `Evolve` functions create them when they need them. If the initial value holds a map, a pointer or a channel that is not `nil`, or a slice with room for elements, every copy shares it, and the state needs a `Clone` function that copies it (see [Caching States](#caching-states)). Without one, reading the state fails with an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)), rather than let an `Evolve` function change the initial value of every later read.
 
@@ -284,7 +284,7 @@ var bookState = architecturekit.NewState(Book{}).
   Ignore[BookInspected]()
 ```
 
-*Note that the data of an ignored event is not decoded, but its schema is still part of `Schemas`, since the event is still written. Ignoring an event type that has an `Evolve` rule, or ignoring it twice, panics, and so does calling `FromLatest` for it.*
+*Note that the data of an ignored event is not decoded, but its schema is still part of `Schemas`, since the event is still written. Ignoring an event type that has an `Evolve` rule, or ignoring it twice, panics, and so does calling `FromLatest` for it. So does ignoring a pointer or an interface as the event type, as with `Evolve`.*
 
 *Note that `Execute` refuses to write an event that the state of the decider has no rule for, since the state could not read the subject any more afterwards (see [Executing Commands](#executing-commands)). To find out whether a state has a rule for an event type, call the `HasRule` function on the state with the event type.*
 
@@ -402,7 +402,7 @@ for _, event := range writtenEvents {
 }
 ```
 
-*Note that `Decode` fails with an error of the category `ErrPermanent` for an event of another type, rather than leaving the fields of the wrong struct empty, and for data that does not fit the type.*
+*Note that `Decode` fails with an error of the category `ErrPermanent` for an event of another type, rather than leaving the fields of the wrong struct empty, and for data that does not fit the type. A pointer as the type, such as `*BookAcquired`, or an interface, such as `architecturekit.Event`, makes it panic, as with `Evolve`.*
 
 *Note that `Execute` only reads the events of the command's subject itself, not those of nested subjects.*
 
@@ -415,9 +415,9 @@ Every command declares at least one precondition, so that writing without any ch
 - `Require` turns any other precondition of the client SDK into one of the command, such as an EventQL query.
 - `Unconditionally` writes without any check.
 
-Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`.
+Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`. The `CheckReadOptions` function does the same for the options of a read (see [Reading Events](#reading-events)).
 
-To find out what kind a precondition is, call its `IsOnStateRead` or `IsUnconditional` function. Its `Database` function returns the precondition of the client SDK that `Require` made it from, or `false` if it was not made with `Require`. `OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` make theirs with `Require`, so they return one as well.
+To find out what kind a precondition is, call its `IsOnStateRead` or `IsUnconditional` function. Its `Database` function returns the precondition of the client SDK that the database checks for it: the one `Require` made it from, which is how `OnPristineSubject` and `OnPopulatedSubject` make theirs, or the one of `NewIsSubjectOnEventIDPrecondition` for `OnEventID`. For any other, it returns `false`.
 
 #### Guarding Against Concurrent Changes
 
@@ -466,7 +466,7 @@ func (c BorrowBook) Preconditions() []architecturekit.Precondition {
 
 *Note that the caller has to provide the event ID. A view can keep it for that purpose, as long as its items follow every event of their subject (see [Defining Views](#defining-views)).*
 
-*Note that the database refuses an empty event ID, or one that is not an event ID at all, as a malformed request, so `Execute` fails with an error of the category `ErrPermanent`. Since the event ID comes from the caller, check it before it becomes part of the command (see [Handling Commands over HTTP](#handling-commands-over-http)).*
+*Note that the event ID usually comes from the caller, so `Execute` checks it before it reads anything. An empty event ID, or one that is not an event ID at all, makes `Execute` fail with an error that wraps `ErrNotARevision` and names the ID, as in `not a revision: "abc"`, as `Read` does for a bound (see [Reading Events](#reading-events)), and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). It does so only once nothing else is wrong with the preconditions, so that a mistake in the code is not hidden behind one of the caller, and `Write`, `CheckPreconditions`, and the test fixture of `architecturekittest` refuse the ID the same way. `Require` with `NewIsSubjectOnEventIDPrecondition` of the client SDK leaves the ID to the database instead, which refuses such an ID as a malformed request, so that `Execute` fails with an error of the category `ErrPermanent`.*
 
 #### Preventing Duplicates
 
@@ -527,6 +527,66 @@ var acquireBook = architecturekit.NewDecider(bookState,
 ```
 
 *Note that a value must never go into an EventQL query unchecked. A quote, as in `it's`, breaks the query, so that the write fails, and a value made up for that purpose changes what the query checks.*
+
+When the ISBN is taken, the database refuses the write with `precondition failed`, the same answer as for a subject that has changed since it was read. It does not say which precondition failed, so the kit can not tell the two apart:
+
+- The command fails with an error of the category `ErrConflict`, which is transient (see [Handling Errors](#handling-errors)).
+- The `httpapi` package answers it with `409 Conflict` and the message `conflict: the data has changed since it was read`, which tells the caller to try again, although that never helps (see [Handling Commands over HTTP](#handling-commands-over-http)).
+- If the command declares `OnStateRead` as well, and the store decides again on conflicts, `Execute` decides again and again in vain, until the retries are used up (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
+
+To answer a taken ISBN with a domain error instead, check it in the decider, against a view that holds the acquired books by their ISBN (see [Defining Views](#defining-views)). The catalog does not hold the ISBN, so here, a small view of its own does, which a projection fills (see [Defining Projections](#defining-projections)):
+
+```go
+type ISBNItem struct {
+  ISBN   string
+  BookID string
+}
+
+func newISBNs() *architecturekit.InMemoryView[string, ISBNItem] {
+  return architecturekit.NewInMemoryView(func(item ISBNItem) string { return item.ISBN })
+}
+
+func newISBNProjection(isbns *architecturekit.InMemoryView[string, ISBNItem]) *architecturekit.TypedProjection {
+  return architecturekit.NewTypedProjection().
+    On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
+      _, err := isbns.Insert(ctx, event.ID, ISBNItem{
+        ISBN:   event.Data.ISBN,
+        BookID: bookIDOf(event.Subject),
+      })
+      return err
+    })
+}
+```
+
+The decider gets the view from a function that creates it, as it gets a clock (see [Using the Current Time](#using-the-current-time)). If the ISBN is taken, it returns a domain error, which the `httpapi` package answers with `422 Unprocessable Entity` and the error as the message, as in `ISBN has already been acquired: 978-0756906788`:
+
+```go
+var ErrISBNAlreadyAcquired = architecturekit.NewDomainError("ISBN has already been acquired")
+
+func acquireBookDecider(isbns architecturekit.KeyedView[string, ISBNItem]) architecturekit.Decider[AcquireBook, Book] {
+  return architecturekit.NewDecider(bookState,
+    func(ctx context.Context, cmd AcquireBook, book Book) ([]architecturekit.Event, error) {
+      if !isbnPattern.MatchString(cmd.ISBN) {
+        return nil, architecturekit.NewDomainError("%q is not an ISBN", cmd.ISBN)
+      }
+
+      _, isTaken, err := isbns.Get(ctx, cmd.ISBN)
+      if err != nil {
+        return nil, err
+      }
+      if isTaken {
+        return nil, fmt.Errorf("%w: %s", ErrISBNAlreadyAcquired, cmd.ISBN)
+      }
+
+      // ...
+    })
+}
+
+isbns := newISBNs()
+acquireBook := acquireBookDecider(isbns)
+```
+
+Keep the EventQL precondition all the same, as the guard. A view lags behind the events, so when two acquisitions of the same ISBN arrive at the same moment, both pass the view, since it has seen neither of them. The database writes only one of them, and the other fails with `ErrConflict`, which is the right answer in that rare case: once the view has seen the first acquisition, trying again gets the domain error.
 
 #### Writing Unconditionally
 
@@ -720,7 +780,7 @@ if errors.Is(err, architecturekit.ErrConflict) {
 
 `Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. If the data of one of the events can not be encoded as JSON, nothing is written either, and the error belongs to the category `ErrPermanent`. So does an event without a subject, or one that is `nil`, a `nil` pointer included. Other failures belong to the same categories as for `Execute` (see [Handling Errors](#handling-errors)).
 
-Like a command, a write declares at least one precondition, such as `OnPristineSubject` or one made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state, so `Write` refuses it with an error of the category `ErrPermanent`, without writing anything.
+Like a command, a write declares at least one precondition, such as `OnPristineSubject` or one made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state, so `Write` refuses it with an error of the category `ErrPermanent`, without writing anything. An event ID of `OnEventID` that is not a revision makes `Write` fail with an error that wraps `ErrNotARevision`, as with `Execute`, without writing anything either (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)).
 
 *Note that `Write` never decides again, since there is nothing to decide. If nothing is to be written, call it with no events, which writes nothing. It still needs preconditions, though, as any other write, and fails with an error of the category `ErrPermanent` without them, so declare them, for example with `Unconditionally()`.*
 
@@ -728,7 +788,7 @@ Like a command, a write declares at least one precondition, such as `OnPristineS
 
 ### Handling Errors
 
-Apart from the end of the context and `ErrNotARevision`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
+Apart from the end of the context, `ErrNotARevision`, and `ErrEmptyRange`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
 
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
@@ -768,7 +828,9 @@ An error that your own code returns, for example from a decider or a projection,
 
 If the context ends, reading and writing stop, and the error is the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides.
 
-The other exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
+Another exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
+
+The last exception is `ErrEmptyRange`, which belongs to no category either. It means that the bounds of `Read` leave no room for any event, such as `BeforeEvent("0")` (see [Reading Events](#reading-events)). The error wraps `ErrEmptyRange` and names the values, so check for it with `errors.Is` as well. Such bounds usually come from a request, so `StatusFor` maps it to `400 Bad Request` as well.
 
 *Note that only the end of the context matches `context.Canceled` or `context.DeadlineExceeded`. If an error of the client matches one of them all the same, for example because connecting to the database timed out, which the standard library reports as `context.DeadlineExceeded`, the failure of the database keeps that error in its message only, so that it does not look like the end of the context.*
 
@@ -788,6 +850,20 @@ if err != nil {
 ```
 
 `RegisterSchemas` accepts the schemas of several states at once. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code. If the context ends first, it returns the error of the context. Since the client registers a schema without a context, a registration that has begun is finished, but none begins once the context has ended.
+
+An event that no state has a rule for, such as `InventoryTaken`, which only `Write` writes (see [Writing to Several Subjects](#writing-to-several-subjects)), is part of no `Schemas`. To register its schema as well, call the `SchemaOf` function with the type of the event. It returns an `EventSchema` by the rule that `Evolve` applies, the event's own schema or the derived one. Since `RegisterSchemas` takes slices of them, hand it over in a slice of its own:
+
+```go
+err := architecturekit.RegisterSchemas(context.TODO(), store,
+  bookState.Schemas(),
+  []architecturekit.EventSchema{architecturekit.SchemaOf[InventoryTaken]()},
+)
+if err != nil {
+  // ...
+}
+```
+
+*Note that `SchemaOf` panics where `Evolve` would, for example for an event that has its `Schema` function only from an embedded field, or for a pointer or an interface as the event type.*
 
 A registered schema can not change. If it differs from the one from the code, `RegisterSchemas` returns an error of the category `ErrPermanent`, and so it does if the database refuses a schema, for example because stored events of the type do not match it. To change the shape of an event, introduce a new event type instead (see [Versioning Events](#versioning-events)).
 
@@ -882,7 +958,7 @@ bookState.
 
 *Note that the database looks for the type under which an event is stored. If the event type is the result of an upcaster, events stored under the older type are not found, and all events are read.*
 
-*Note that calling `FromLatest` for an event type without an `Evolve` rule, or calling it twice, panics.*
+*Note that calling `FromLatest` for an event type without an `Evolve` rule, or for a pointer or an interface as the event type, or calling it twice, panics.*
 
 ### Caching States
 
@@ -899,6 +975,8 @@ The cache only holds what was read, never what a command has written. Every comm
 The cache tells states apart by their type, not by the object. A state that is built anew for every command, for example by a function that returns it, is cached as well. This is why two different states that read the same subject need two different types: if one of them counts the loans of a book and the other one its returns, declare types such as `LoanCount` and `ReturnCount` rather than using `int` for both. If two states of the same type meet on the same subject, but differ in their initial value, in the event types they have `Evolve` rules for, ignore, or have upcasters for, or in `FromLatest`, `Execute` and `Load` return an error of the category `ErrPermanent` (see [Handling Errors](#handling-errors)).
 
 *Note that the cache can not compare the `Evolve` functions themselves. Two states of the same type that are built alike, but compute something else, are not told apart.*
+
+*Note that the very same state is not compared at all. The initial values of two different states of the same type are compared as `reflect.DeepEqual` compares them, except that every value equals itself: two functions in them are equal if both are `nil` or both are not, since functions can not be compared, and two floating-point numbers if they are equal or both `NaN`, as are the parts of two complex numbers. Only a map with a `NaN` key does not equal itself, since Go never finds such a key again.*
 
 A cached state is handed to several commands, possibly at the same time. That is safe for a state that consists of values only, such as the `Book` state above. A state that holds slices, maps, pointers, channels, functions, or interfaces, such as a field of type `error` or `any`, is only cached if it has a `Clone` function, which returns a copy that shares no data with the original. An interface counts as well, since it can hold any of the others. For example, a shelf that collects the IDs of the books that `BookShelved` events put on it needs one:
 
@@ -923,7 +1001,7 @@ Without a `Clone` function, such a state is read as without a cache. The same fu
 
 *Note that a `time.Time` counts as a value, since its location never changes.*
 
-*Note that a number of `0` keeps no states, the same as leaving out the option, so that a configuration can turn the cache off. A negative number makes `WithStateCache` panic, and calling `Clone` twice panics as well.*
+*Note that a number of `0` keeps no states, the same as leaving out the option, so that a configuration can turn the cache off. A negative number makes `WithStateCache` panic, and calling `Clone` twice, or with `nil`, panics as well.*
 
 ### Loading States
 
@@ -978,11 +1056,32 @@ events := architecturekit.Read(context.TODO(), store, architecturekit.ExactSubje
 
 The IDs are strings, as everywhere else in the kit. The database hands them out as one ascending sequence across all subjects, so a bound does not have to be an event of the subjects that are read. An ID that is not the one of an event, such as `abc` or an empty one, ends the iteration with an error that wraps `ErrNotARevision` and names the ID, as in `not a revision: "abc"`, before the database is asked. That way, an ID that comes from a request can be told apart from a failure of the database, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
-*Note that a read has at most one lower bound, one upper bound, and one order, and that `FromLatestEvent` counts as a lower bound. Options that contradict each other, such as `FromEvent` together with `AfterEvent`, or `NewestFirst` given twice, make `Read` panic. So does `FromLatestEvent` together with `NewestFirst`, since the database reads from the latest event of a type only oldest first, and so does the zero value of `Subjects`. A subject for `FromLatestEvent` that does not start with a slash makes `FromLatestEvent` itself panic, and so does a value other than `ReadEverything` and `ReadNothing`.*
+*Note that a read has at most one lower bound, one upper bound, and one order, and that `FromLatestEvent` counts as a lower bound. Options that contradict each other, such as `FromEvent` together with `AfterEvent`, or `NewestFirst` given twice, make `Read` panic. So does `FromLatestEvent` together with `NewestFirst`, since the database reads from the latest event of a type only oldest first, and so does the zero value of `Subjects`, or a `nil` option. A subject for `FromLatestEvent` that does not start with a slash makes `FromLatestEvent` itself panic, and so does a value other than `ReadEverything` and `ReadNothing`.*
 
 *Note that `FromLatestEvent` looks for the event on the given subject alone, not below it, and that this subject does not have to be one of those that are read.*
 
-*Note that the database refuses bounds that leave no room for any event, such as `AfterEvent` and `BeforeEvent` with two neighboring IDs, or an upper bound before the latest event of the type given to `FromLatestEvent`. `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the reason the database gives.*
+Bounds that leave no room for any event are a mistake, since no event can ever lie between them, such as `BeforeEvent("0")`, `AfterEvent` and `BeforeEvent` with two neighboring IDs, a lower bound above the upper one, or `AfterEvent` of the largest revision, `9223372036854775807`, after which no event can ever come. They end the iteration with an error that wraps `ErrEmptyRange` and names the values, before the database is asked, as in `empty range: no event can lie after "0" and before "1"` or `empty range: no event can lie from "2" up to "1"`. The error names the values only, never the options, since a caller of an API does not know them, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). A range that is only empty for now, on the other hand, such as the one after the last event written so far, is no mistake, since events can still come there, so `Read` hands out no events for it, without an error. So a reader that pages backwards with `BeforeEvent` and `NewestFirst` stops at a page that ends with the event `0`, since no event can lie before it.
+
+*Note that the lower bound of `FromLatestEvent` is only known once the database has found the latest event of the type, so together with it, only an upper bound that leaves no room on its own, `BeforeEvent("0")`, is refused that way. The database refuses an upper bound before the latest event of the type, and `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the reason the database gives.*
+
+To check the options of a read this way without reading, call the `CheckReadOptions` function with the options, which returns the same error, or `nil`, as `CheckPreconditions` does for the preconditions of a command (see [Using Preconditions](#using-preconditions)). That way, bounds that come from a request can be refused before doing something that must not happen for a read that `Read` refuses, for example recording who reads the history of a book:
+
+```go
+options := []architecturekit.ReadOption{
+  architecturekit.AfterEvent(after),
+  architecturekit.BeforeEvent(before),
+}
+
+if err := architecturekit.CheckReadOptions(options...); err != nil {
+  // ...
+}
+
+// Record who reads the history of the book.
+
+events := architecturekit.Read(context.TODO(), store, architecturekit.ExactSubject("/books/42"), options...)
+```
+
+*Note that `CheckReadOptions` panics where `Read` does, for options that contradict each other and for a `nil` option, before it checks any ID. It takes no subjects, since none of the checks depends on them, so only `Read` panics for the zero value of `Subjects`. Options that pass can still make the database refuse the read, such as an upper bound before the latest event of the type of `FromLatestEvent`.*
 
 Every event is verified, like everything else the store reads, before the loop sees it (see [Verifying Events](#verifying-events)). A failure belongs to a category, as with `Load` (see [Handling Errors](#handling-errors)), and ends the iteration. The store stops reading as soon as the loop ends, so breaking out of it after a page is fine.
 
@@ -1154,7 +1253,7 @@ catalog := newCatalog()
 
 An item carries no JSON annotations, since what a caller sees is decided by a query and its answer, not by the view (see [Handling Queries over HTTP](#handling-queries-over-http)).
 
-*Note that calling `NewInMemoryView` with `nil` as the function panics.*
+*Note that calling `NewInMemoryView` with `nil` as the function, or as one of the options, panics.*
 
 Every item has a revision of its own, which is the ID of the last event that changed it. The `RevisionIn` option makes the view keep it in a field of the item, so that a caller can hand it over to a command that uses the `OnEventID` function (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). The view sets the field whenever it changes an item, so you never set it yourself. Without the option, the view keeps the revisions to itself.
 
@@ -1166,7 +1265,7 @@ Every function that changes the view takes the ID of the event it applies. An ID
 
 The functions that read and change items take a context and report an error, as a view in a database would need: `All` and `Lookup` hand it out along with the items, and every other one returns it. So a view in a database can offer functions of the same shape, which the handlers of a projection call the same way. The kit has no interface for the functions that change a view, though: a projection takes its view by its type, such as `*InMemoryView`, so moving it to a view in a database changes that type.
 
-If an upcaster splits a stored event into several events, they all carry the ID of the stored event (see [Versioning Events](#versioning-events)). A projection created with `NewProjection` hands each of them to its handler with a context that holds its position among them, and the view reads it from the context it gets. For the same ID, the view counts a later event as newer than an earlier one, so every one of them is applied, in order, also if several of them change the same item. Applying the stored event again still changes nothing, and the revision of the item stays the ID of the stored event. That is why a handler always hands the context it gets on to the view, rather than one of its own, such as `context.Background()`.
+If an upcaster splits a stored event into several events, they all carry the ID of the stored event (see [Versioning Events](#versioning-events)). A projection created with `NewTypedProjection` hands each of them to its handler with a context that holds its position among them, and the view reads it from the context it gets. For the same ID, the view counts a later event as newer than an earlier one, so every one of them is applied, in order, also if several of them change the same item. Applying the stored event again still changes nothing, and the revision of the item stays the ID of the stored event. That is why a handler always hands the context it gets on to the view, rather than one of its own, such as `context.Background()`.
 
 *Note that the view as a whole has a revision as well, which is the last event it has seen at all, rather than the last one that changed a particular item (see [Reading Your Own Writes](#reading-your-own-writes)).*
 
@@ -1347,6 +1446,8 @@ Several items may share a value. The index follows every change to the view, als
 
 *Note that adding an index reads every item, so add indexes before the view is used.*
 
+*Note that calling `Index` with `nil` as the function panics.*
+
 To keep items somewhere else, for example in a database, implement the `View` interface, which consists of the `All` function. It returns an iterator over the items and errors. A database fails not only before it reads the rows, but also while it reads them, for example when the connection breaks halfway. So hand out such an error with an empty item, and stop. Stop as well, and close the rows, as soon as the iterator is told to stop, which happens when the caller has seen enough, for example with `Take` or `First` (see [Defining Queries](#defining-queries)):
 
 ```go
@@ -1397,11 +1498,11 @@ A query that reads a single item can then take an `architecturekit.KeyedView[str
 
 ### Defining Projections
 
-A projection turns events into a view. Call the `NewProjection` function, and call the `On` function for every event type the view depends on. Each handler receives an `Envelope`, which holds the metadata of the event, such as its `ID`, `Time`, and `Subject`, and its data, decoded into the Go type of the event:
+A projection turns events into a view. Call the `NewTypedProjection` function, and call the `On` function for every event type the view depends on. Each handler receives an `Envelope`, which holds the metadata of the event, such as its `ID`, `Time`, and `Subject`, and its data, decoded into the Go type of the event:
 
 ```go
 func newCatalogProjection(catalog *architecturekit.InMemoryView[string, BookItem]) *architecturekit.TypedProjection {
-  return architecturekit.NewProjection().
+  return architecturekit.NewTypedProjection().
     On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
       _, err := catalog.Insert(ctx, event.ID, BookItem{
         ID:     bookIDOf(event.Subject),
@@ -1440,13 +1541,13 @@ func bookIDOf(subject string) string {
 }
 ```
 
-`NewProjection` returns a `*TypedProjection`, which is a `Projection` like any other, so you can run, track, and test it as described below. Events without a handler are skipped, since a projection usually reads more events than it depends on. If the data of an event can not be decoded, the projection returns an error of the category `ErrPermanent`. An error returned by a handler is passed on unchanged.
+`NewTypedProjection` returns a `*TypedProjection`, which is a `Projection` like any other, so you can run, track, and test it as described below. Events without a handler are skipped, since a projection usually reads more events than it depends on. If the data of an event can not be decoded, the projection returns an error of the category `ErrPermanent`. An error returned by a handler is passed on unchanged.
 
 If the view keeps the revisions of its items for a precondition, a skipped event makes the revision of its item fall behind the subject (see [Defining Views](#defining-views)). In that case, give every event type of the subject a handler, also one that does not change the item, such as `BookInspected`, which the state ignores. Its handler calls `Update` with a change that does nothing, which only moves the revision of the item on:
 
 ```go
 func newCatalogProjection(catalog *architecturekit.InMemoryView[string, BookItem]) *architecturekit.TypedProjection {
-  return architecturekit.NewProjection().
+  return architecturekit.NewTypedProjection().
     // ...
     On(func(ctx context.Context, event architecturekit.Envelope[BookInspected]) error {
       _, err := catalog.Update(ctx, bookIDOf(event.Subject), event.ID, func(*BookItem) {})
@@ -1461,7 +1562,7 @@ To have the projection see the same events as the state, hand over the same set 
 catalogProjection.UpcastWith(libraryUpcasters)
 ```
 
-*Note that calling `On` twice for the same event type panics.*
+*Note that calling `On` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer or an interface as the event type, as with `Evolve`.*
 
 #### Handling Every Event
 
@@ -1491,7 +1592,7 @@ To run a projection, call the `StartProjection` function with a context, the sto
 
 *Note that a subject that does not start with a slash makes `SubjectTree` and `ExactSubject` panic, and that the zero value of `Subjects`, which names no subject, makes `StartProjection`, the other functions that run a projection, and `Read` panic, as does a `nil` projection. A `nil` pointer or a `nil` `ProjectionFunc` counts as a `nil` projection.*
 
-The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that with the `WaitCaughtUp` function of the run:
+The function runs the projection in the background and returns a `*ProjectionRun` at once. The run first applies all events that are already stored, then observes new events until the context is canceled. An application usually answers queries only once its views have caught up, since a half-built view answers wrongly rather than slowly, so wait for that with the `WaitCaughtUp` function, which takes a context and the runs:
 
 ```go
 ctx, cancel := context.WithCancel(context.TODO())
@@ -1501,7 +1602,7 @@ run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("
   architecturekit.Named("catalog"),
 )
 
-if err := run.WaitCaughtUp(ctx); err != nil {
+if err := architecturekit.WaitCaughtUp(ctx, run); err != nil {
   return err
 }
 
@@ -1510,15 +1611,17 @@ if err := run.WaitCaughtUp(ctx); err != nil {
 
 The options after the projection are optional. `Named` gives the projection a name, by which the observer of reconnects and the health checks report it (see [Checking Health over HTTP](#checking-health-over-http)). The `Name` function of the run returns it.
 
-*Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic.*
+*Note that an empty name makes `Named` panic, and that giving `Named` twice makes `StartProjection` and the other functions that run a projection panic, and so does a `nil` option.*
 
-`WaitCaughtUp` waits until the run has applied the events that were stored when it started, and returns `nil` then, and only then, so that `nil` always means that the view is complete:
+`WaitCaughtUp` waits until every run has applied the events that were stored when it started, and returns `nil` then, and only then, so that `nil` always means that the views are complete. To wait for several projections, hand over all of their runs, as in `architecturekit.WaitCaughtUp(ctx, catalogRun, readersRun)`. It waits for all of them at once, not one after the other, and returns as soon as one of them ends before it has caught up:
 
-- If the run ends before it catches up, `WaitCaughtUp` returns the error the run ended with.
-- If the run ends without an error before it catches up, because its context ended, `WaitCaughtUp` returns an error that wraps `context.Canceled` and says that the projection stopped before it caught up.
+- If a run ends before it catches up, `WaitCaughtUp` returns the error the run ended with. If the run has a name, the error names it, as in `projection "catalog": …`, and wraps the error of the run, so that `errors.Is` still finds what that wraps.
+- If a run ends without an error before it catches up, because its context ended, `WaitCaughtUp` returns an error that wraps `context.Canceled` and says that the projection stopped before it caught up, naming it if it has a name.
 - If the context handed to `WaitCaughtUp` ends first, it returns the error of that context.
 
-A run that has caught up counts as caught up, even if it has ended since, or the context handed to `WaitCaughtUp` has ended. If several of the other cases have happened by the time `WaitCaughtUp` looks, the error the run ended with comes first, since it tells why, and the error of the context handed to `WaitCaughtUp` comes next. So if the run and `WaitCaughtUp` share a context, as in the example above, and that context times out, `WaitCaughtUp` returns its error, `context.DeadlineExceeded`, which tells more than `context.Canceled`.
+A run that has caught up counts as caught up, even if it has ended since, or the context handed to `WaitCaughtUp` has ended. If several of the other cases have happened by the time `WaitCaughtUp` looks, the error a run ended with comes first, since it tells why, that of the first such run among the ones handed over, and the error of the context handed to `WaitCaughtUp` comes next. So if the run and `WaitCaughtUp` share a context, as in the example above, and that context times out, `WaitCaughtUp` returns its error, `context.DeadlineExceeded`, which tells more than `context.Canceled`.
+
+*Note that `WaitCaughtUp` returns `nil` at once without any run, since none of them is behind, and that a `nil` run makes it panic.*
 
 For finer control, the run offers what `WaitCaughtUp` waits for. `CaughtUp` returns a channel that is closed once the run has applied the events that were stored when it started. It is closed only once, and stays closed while the run reconnects later on. If the run ends before it catches up, the channel is never closed, so wait for `Done` as well. `Done` returns a channel that is closed once the run has ended, which happens when the context ends, or on a failure that trying again will not fix. `Err` returns why the run has ended. It returns `nil` as long as the run has not ended, and if it ended because its context did, since canceling the context is how a projection is stopped. If `Apply` returns an error that trying again will not fix, the run ends, and `Err` returns it.
 
@@ -1552,7 +1655,7 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io",
 )
 ```
 
-*Note that an initial delay of zero or less panics, since the projections would then read again without any pause, and so does a maximum delay below the initial one.*
+*Note that an initial delay of zero or less panics, since the projections would then read again without any pause, and so does a maximum delay below the initial one. Calling `WithReconnectObserver` with `nil` panics as well.*
 
 The observer receives a `Reconnect` with these fields:
 
@@ -1616,7 +1719,7 @@ func (p *BookTableProjection) SaveCheckpoint(ctx context.Context, eventID string
 }
 ```
 
-To make a projection created with `NewProjection` resumable, embed it in a type of your own, and add the two functions there:
+To make a projection created with `NewTypedProjection` resumable, embed it in a type of your own, and add the two functions there:
 
 ```go
 type BookTable struct {
@@ -1676,7 +1779,7 @@ func (tx *bookTableTx) Rollback(ctx context.Context) error {
 }
 ```
 
-Instead of implementing `Apply` on the `Tx` yourself, you can use handlers created with `NewProjection`. Build them in `Begin`, so that they write into the transaction that has just been started, and embed them in the `Tx`, which then only needs `Commit` and `Rollback`:
+Instead of implementing `Apply` on the `Tx` yourself, you can use handlers created with `NewTypedProjection`. Build them in `Begin`, so that they write into the transaction that has just been started, and embed them in the `Tx`, which then only needs `Commit` and `Rollback`:
 
 ```go
 func (p *TransactionalBookTableProjection) Begin(ctx context.Context) (architecturekit.Tx, error) {
@@ -1688,7 +1791,7 @@ func (p *TransactionalBookTableProjection) Begin(ctx context.Context) (architect
 
   return &bookTableTx{
     tx: tx,
-    TypedProjection: architecturekit.NewProjection().
+    TypedProjection: architecturekit.NewTypedProjection().
       On(func(ctx context.Context, event architecturekit.Envelope[BookAcquired]) error {
         _, err := tx.ExecContext(ctx, "INSERT INTO books ...")
         return err
@@ -1765,7 +1868,7 @@ type LoanMailer struct {
 
 func NewLoanMailer(mailer Mailer, checkpoints CheckpointStore) *LoanMailer {
   return &LoanMailer{
-    TypedProjection: architecturekit.NewProjection().
+    TypedProjection: architecturekit.NewTypedProjection().
       On(func(ctx context.Context, event architecturekit.Envelope[BookBorrowed]) error {
         // The ID of the event lets the receiver recognize a mail it got before.
         err := mailer.Send(ctx, event.ID, event.Data.BorrowedBy, "You have borrowed a book.")
@@ -1971,7 +2074,7 @@ A view lags behind the events that have been written, by however long its projec
 
 The ID of the last event a view has seen is its revision. Since the database assigns event IDs in ascending order across all subjects, revisions can be compared.
 
-A view sees only the events of the subjects its projection reads. So wait only for a write to one of those subjects: if the write went to another subject, the view does not reach its revision until a later event lands in one of its own subjects, and waiting for it lasts the full time, with `WaitFor`, with `Await`, and with the `Wait-For-Revision` header alike.
+A view sees only the events of the subjects its projection reads. So wait only for a write to one of those subjects: if the write went to another subject, the view does not reach its revision until a later event lands in one of its own subjects, and waiting for it lasts the full time, with `WaitFor`, with `Await`, and with the `Wait-For-Revision` header alike. `WaitForWritten` even fails then, with an error of the category `ErrTransient`, so hand it only the events written to the subjects the view reads.
 
 #### Tracking Revisions
 
@@ -2017,10 +2120,13 @@ if err != nil {
 
 *Note that running out of time is an error here. The `Await` function of the `httpapi` package, which waits for the revision an HTTP request asks for, takes it for none instead, and returns `nil`, so that the handler answers with what the view holds (see [Waiting for a Revision in a Handler of Your Own](#waiting-for-a-revision-in-a-handler-of-your-own)).*
 
-To get the current revision of a view, call the `Revision` function. It returns an empty string as long as the view has not seen any event:
+To get the current revision of a view, call the `Revision` function with a context. It returns an empty string as long as the view has not seen any event, and an error if it can not read the revision, which may happen to a view of your own that keeps its revision in a database. `InMemoryView` keeps its revision in memory, so it never fails:
 
 ```go
-current := catalog.Revision()
+current, err := catalog.Revision(ctx)
+if err != nil {
+  // ...
+}
 ```
 
 Both functions form the `Revisioned` interface, which `InMemoryView` implements. To wait for revisions of a view of your own, implement it as well.
@@ -2045,6 +2151,30 @@ _, err = architecturekit.ParseRevision("")
 ```
 
 For a value that is not a revision, it returns an error that wraps `ErrNotARevision` and names the value, as `CompareRevisions` does.
+
+#### Waiting for Written Events
+
+Sometimes a step on the server builds on what was just written, for example a handler that executes a command and then answers with what a view holds after it. To wait until a view has seen the events that `Execute` or `Write` returned, call the `WaitForWritten` function with a context, the view, the written events, and how long to wait at most:
+
+```go
+writtenEvents, err := architecturekit.Execute(ctx, store, borrowBook, cmd)
+if err != nil {
+  // ...
+}
+
+err = architecturekit.WaitForWritten(ctx, catalog, writtenEvents, 5*time.Second)
+if err != nil {
+  // ...
+}
+```
+
+It waits with `WaitFor` for the revision that `RevisionOf` returns for the events, and returns `nil` once the view has reached it. If no events were written, it returns `nil` at once, since there is nothing to wait for. If the time runs out first, it returns an error of the category `ErrTransient` that says so, as in `the view did not catch up within 5s`, since the view may still catch up. If the context ends first, it returns the error of the context, and any other error of the view as it is.
+
+*Note that the view sees only the events of the subjects its projection reads, so hand over only the events written to those subjects. For a write to several subjects, such as one with `Write`, the highest ID of all events may lie in a subject the view does not read, and then the view does not reach it until a later event lands in one of its own subjects (see [Waiting for Revisions](#waiting-for-revisions)).*
+
+*Note that running out of time is an error here, since the step needs what was written. The `Await` function of the `httpapi` package, on the other hand, waits for the revision a caller asks for, and takes running out of time for none, so that the handler answers with what the view holds (see [Waiting for a Revision in a Handler of Your Own](#waiting-for-a-revision-in-a-handler-of-your-own)).*
+
+*Note that `WaitForWritten` panics for a `nil` view, a `nil` pointer included, and for a timeout that is not positive, since a view that catches up with a write that has just happened needs some time, and waiting no time at all would fail almost always.*
 
 ### Setting Up an HTTP API
 
@@ -2088,7 +2218,7 @@ Everything that answers through an API logs every error it does not explain to t
 api := httpapi.NewAPI(store, userFrom, httpapi.WithLogger(logger))
 ```
 
-*Note that calling `WithLogger` with `nil` panics.*
+*Note that calling `WithLogger` with `nil` panics, and so does calling `NewAPI` or `NewPublicAPI` with `nil` as one of the options.*
 
 #### Determining the User
 
@@ -2136,7 +2266,7 @@ func toBorrowBook(r *http.Request, request borrowBookRequest, user User) (Borrow
 }
 ```
 
-The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake. So is an expected event ID that is empty or not an event ID at all, which only the database checks (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). `ParseRevision` refuses both, unlike `CompareRevisions`, which takes an empty revision for the one of a view that has seen nothing (see [Comparing Revisions](#comparing-revisions)).
+The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake. An expected event ID that is empty or not an event ID at all is answered with `400 Bad Request` without a check of your own, since `OnEventID` refuses it before anything is read (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). Checking it here lets the message name the field, though. `ParseRevision` refuses both, unlike `CompareRevisions`, which takes an empty revision for the one of a view that has seen nothing (see [Comparing Revisions](#comparing-revisions)).
 
 Then call the `Route` function with the API, the mux, a pattern, the function that returns the command, and the decider:
 
@@ -2188,7 +2318,7 @@ To answer this way in a handler of your own, call the `Respond` function with th
 
 *Note that the function has the type `httpapi.ToCommand`. The request type only describes the body, so it may come from another package, for example one that the application shares with its clients.*
 
-*Note that calling `Route` with `nil` as the API or as the function, or with a `Decider` that was not created with `NewDecider`, panics, rather than failing every request.*
+*Note that calling `Route` with `nil` as the API, as the function, or as one of the options, or with a `Decider` that was not created with `NewDecider`, panics, rather than failing every request.*
 
 #### Handling Commands Without a Body
 
@@ -2255,7 +2385,7 @@ The route then answers with both:
 { "id": "…", "revision": "1" }
 ```
 
-The function is only called if the command has succeeded. A value that encodes to `null` adds no fields. That is `nil`, and also a `nil` pointer of a concrete type, which an interface does not count as `nil`, such as the one that `return findShelf(handled)` hands back if `findShelf` returns a `*Shelf` and an error, and fails.
+The function is only called if the command has succeeded. A value that encodes to `null` adds no fields. That is `nil`, and also a `nil` pointer of a concrete type, which an interface does not count as `nil`, such as the one that `return findShelf(handled)` hands back if `findShelf` returns a `*Shelf` and an error, and fails. The fields are encoded as the result of a query is, so a `nil` slice or map in them is answered as `[]` or `{}` (see [Handling Queries over HTTP](#handling-queries-over-http)).
 
 If the function returns an error, the events are written all the same, so the route still answers with `200 OK` and the revision, which the caller needs to read its own writes, and must not take for a reason to send the command again, whatever is wrong with the fields the function returned along with the error. The answer then holds these fields if they can be used, and none otherwise. The error is logged through the logger of the API, with the route, and so is why the fields were dropped, if they were.
 
@@ -2320,11 +2450,11 @@ Before the function that returns the command receives the body, the request is v
 
 - The `Content-Type` header must be `application/json`, otherwise the request is answered with `415 Unsupported Media Type`, and the error is `httpapi.ErrUnsupportedMediaType`.
 - The body must not be larger than `httpapi.MaxRequestBody`, which is one mebibyte, otherwise the request is answered with `413 Request Entity Too Large`, and the error is `httpapi.ErrTooLarge`. The same goes for a body that a middleware cuts off at a lower limit with `http.MaxBytesReader`.
-- The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`, which wraps the error of decoding, so that `errors.As` finds it. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case.
+- The body must be a single valid JSON value without unknown fields, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`, which wraps the error of decoding, so that `errors.As` finds it. Nothing but whitespace may follow the value, and no name may occur twice in an object. Names match fields regardless of case, as with `encoding/json`, so two names that match the same field count as the same name, even if they differ in case. The body must not be `null`, which `encoding/json` would turn into the zero value of the request type, unless the request type decodes itself, and so decides itself what `null` means, or is an interface, which takes `null` for `nil`, while `null` for a field still leaves the field as it is. And an array must have as many elements as the Go array it is decoded into, such as a `[2]int`, which `encoding/json` would otherwise fill up with zeros, or cut off.
 
 *Note that parsers disagree on what a name that occurs twice means, and on data after the value: one takes the first value, another the last, and one stops after the value, while another reads on. A filter or a proxy in front of the application might then check another value than the one the application uses, which is why both are refused.*
 
-If the body can not be decoded, the message says what is wrong in words of its own, rather than in those of the decoder, which name the types of Go. After `malformed request: `, it says, for example, `empty body`, `invalid JSON`, `unknown field "borowedUntil"`, `duplicate field "expectedEventId"`, or `"borrowedUntil" must be a string`. A nested value is named by its path, such as `"items.0.bookId"`. For a failure that it has no words of its own for, such as a value of a type that JSON has no kind for, it says that the value can not be decoded, as in `"rating" can not be decoded`, or `the body can not be decoded`. A body that can not even be read, for example because a middleware fails to decompress it, gives `the body could not be read`, without the words of the middleware. The error of a type that decodes itself, on the other hand, keeps its own text, as it is, also for a type of a library, such as `netip.Addr`, as long as it can tell its text. If its `Error` function panics, as that of a `*json.UnmarshalTypeError` without a type does, the message says that the value can not be decoded instead. For the full list, see the documentation of `BodyOf`.
+If the body can not be decoded, the message says what is wrong in words of its own, rather than in those of the decoder, which name the types of Go. After `malformed request: `, it says, for example, `empty body`, `invalid JSON`, `unknown field "borowedUntil"`, `duplicate field "expectedEventId"`, `"borrowedUntil" must be a string`, `the body must be an object`, for a body of `null` as well, or `"pair" must have 2 elements`. A nested value is named by its path, such as `"items.0.bookId"`. For a failure that it has no words of its own for, such as a value of a type that JSON has no kind for, it says that the value can not be decoded, as in `"rating" can not be decoded`, or `the body can not be decoded`. A body that can not even be read, for example because a middleware fails to decompress it, gives `the body could not be read`, without the words of the middleware. The error of a type that decodes itself, on the other hand, keeps its own text, as it is, also for a type of a library, such as `netip.Addr`, as long as it can tell its text. If its `Error` function panics, as that of a `*json.UnmarshalTypeError` without a type does, the message says that the value can not be decoded instead. For the full list, see the documentation of `BodyOf`.
 
 If the request type is `httpapi.NoBody`, the request is validated differently (see [Handling Commands Without a Body](#handling-commands-without-a-body)): a request that a browser sends from another origin is answered with `403 Forbidden` first, and the error is `httpapi.ErrForbidden`. The `Content-Type` header is not required, and the body must be empty or `{}`, otherwise the request is answered with `400 Bad Request`, and the error is `httpapi.ErrMalformed`. A body larger than `httpapi.MaxRequestBody` is still answered with `413 Request Entity Too Large`.
 
@@ -2400,7 +2530,7 @@ Then call the `Query` function with the API, the mux, a pattern, the function th
 httpapi.Query(api, mux, "QUERY /api/books", toListBooks, answerBooks(listBooks(catalog)))
 ```
 
-The pattern names the method `QUERY`. A pattern without a method, which accepts every method, or with another method, makes `Query` panic. A handler of your own that answers with `Ask` may use another method, though, for example `GET` for a download or a CSV export (see [Answering Queries in Your Own Format](#answering-queries-in-your-own-format)).
+The pattern names the method `QUERY`. A pattern without a method, which accepts every method, or with another method, makes `Query` panic. `net/http` does not name the method yet, so the constant `httpapi.MethodQuery` does, as `http.MethodGet` names `GET`, for example for a request in a test. A handler of your own that answers with `Ask` may use another method, though, for example `GET` for a download or a CSV export (see [Answering Queries in Your Own Format](#answering-queries-in-your-own-format)).
 
 The caller sends the input as JSON, as for a command:
 
@@ -2420,13 +2550,15 @@ func toGetBook(r *http.Request, _ httpapi.NoBody, user User) (GetBook, error) {
 }
 ```
 
-The route answers with `200 OK` and the result as JSON, with `Cache-Control: no-store`, so that no cache keeps it (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)). A result without items is answered with an empty list, `[]`, even as the `nil` slice that `query.Collect` returns when there are no items. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
+The route answers with `200 OK` and the result as JSON, with `Cache-Control: no-store`, so that no cache keeps it (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)). The result is encoded as `encoding/json` encodes it, except that a `nil` slice is answered as an empty list, `[]`, and a `nil` map as an empty object, `{}`, at every depth, such as the `nil` slice that `query.Collect` returns when there are no items, or a field of a response type that holds a `nil` slice. So a caller gets a list or an object, whether it holds anything or not. A `nil` pointer, on the other hand, is answered as `null`. A result that can not be encoded, for example because it holds `NaN`, is a mistake in the code, and is answered with `500 Internal Server Error` and logged, like any other internal failure. Errors and panics are answered as for commands, and errors returned from the first function are treated as they are from the function that returns a command (see [Authorizing Commands](#authorizing-commands)).
 
 To answer this way in a handler of your own, call the `RespondResult` function with the response writer, the request, the API, the result, and the error. As with `Respond`, an error without a status code of its own is answered with `500 Internal Server Error`, so wrap a mistake in the request that the handler finds itself with `httpapi.ErrMalformed` (see [Handling Commands over HTTP](#handling-commands-over-http)). To answer an error without a result, call the `RespondError` function (see [Answering Queries in Your Own Format](#answering-queries-in-your-own-format)).
 
+*Note that a `nil` slice of bytes is answered as an empty string, `""`, since a slice of bytes is encoded as a string in base64, and that a `nil` `json.RawMessage` is answered as `null`, since it holds JSON text.*
+
 *Note that the functions have the types `httpapi.ToQuery` and `httpapi.Answer`. The answering function receives neither the request nor the user.*
 
-*Note that calling `Query` with `nil` as the API, or for either function, panics, rather than failing every request.*
+*Note that calling `Query` with `nil` as the API, for either function, or as one of the options, panics, rather than failing every request.*
 
 #### Answering Queries in Your Own Format
 
@@ -2545,12 +2677,14 @@ It checks the categories in this order:
 | `context.Canceled` | `499 Client Closed Request` |
 | `context.DeadlineExceeded` | `503 Service Unavailable` |
 | `architecturekit.ErrPermanent` | `500 Internal Server Error` |
-| `architecturekit.ErrNotARevision` | `400 Bad Request` |
+| `architecturekit.ErrNotARevision`, `architecturekit.ErrEmptyRange` | `400 Bad Request` |
 | any other error | `500 Internal Server Error` |
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged. Its message is `request canceled`, because the error may name internals, such as the subject that was read.*
 
-*Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, a value for `CompareRevisions` or `ParseRevision`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
+*Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, a value for `CompareRevisions` or `ParseRevision`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
+
+*Note that `ErrEmptyRange` means that the bounds of `Read` leave no room for any event, which usually come from the request as well. So it is answered the same way, with `400 Bad Request` and the error as the message, such as `empty range: no event can lie before "0"`, unless the error belongs to the category `ErrPermanent` as well (see [Reading Events](#reading-events)).*
 
 *Note that an error of the function that returns a command, of the one that returns a query, or of the one that determines the user keeps its status code only if it has one of its own, or belongs to the category `ErrPermanent`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
 
@@ -2577,7 +2711,7 @@ curl -X QUERY http://localhost:8080/api/books \
   -d '{}'
 ```
 
-The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. Without the header, it does not wait at all. If the header holds something that is not a revision, the request is answered with `400 Bad Request`.
+The route waits until the view has reached this revision, but at most for the given duration, which is five seconds for `httpapi.DefaultWait`. Then it answers with what the view holds, even if the time has run out. Without the header, it does not wait at all. If the header holds something that is not a revision, the request is answered with `400 Bad Request`. If the view can not read its revision once it has waited, the request is answered with the error, as with any other error, for example with `503 Service Unavailable` for an error of the category `ErrTransient` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
 Once the view has seen at least one event, the response contains the revision it shows in the `Revision` header, as well as an `ETag` header and `Cache-Control: private, no-cache`. `no-cache` makes a cache ask again before it hands out the answer, and `private` keeps shared caches, such as proxies, from keeping it at all. If the caller sends the `ETag` in the `If-None-Match` header, asks the same, and the view has not changed since, the request is answered with `304 Not Modified`, which carries the same headers, and no body.
 
@@ -2595,11 +2729,13 @@ This holds as long as the answer depends on nothing but the query and the view, 
 - Another view. The revision is that of the view handed over, so an answer that also reads from another view does not notice when that one changes.
 - The context. A value that a middleware puts into the context, such as the user, never shows up in the `ETag`. Put it into the query instead.
 
+For an answer that depends on more than the query and `Varying` can capture, wait without a tag (see [Waiting for a Revision Without a Tag](#waiting-for-a-revision-without-a-tag)).
+
 A query that holds a function or a channel can not be written into an `ETag`, and its answer goes without one.
 
 *Note that the constants `httpapi.HeaderWaitFor` and `httpapi.HeaderRevision` contain the names of the two headers.*
 
-*Note that `Revisioned` panics for a `nil` view or a negative wait, and so does giving it twice. A `nil` pointer counts as a `nil` view, such as a view that was declared but never created with `NewInMemoryView`.*
+*Note that `Revisioned` panics for a `nil` view or a negative wait, and so does giving it twice, or along with `Awaiting`. A `nil` pointer counts as a `nil` view, such as a view that was declared but never created with `NewInMemoryView`.*
 
 #### Depending on More Than the Read Model
 
@@ -2646,6 +2782,50 @@ Here, `listBooksDueToday` answers like `listOverdueBooks`, but takes the current
 
 *Note that `Varying` panics for `nil`, and so does giving it twice, or without `Revisioned`.*
 
+#### Waiting for a Revision Without a Tag
+
+Some answers depend on more than the query and `Varying` can capture, for example on the instant, on the configuration, or on another view. A tag would then tell a caller that nothing has changed when it has. To let the caller read its own writes all the same, hand over the `Awaiting` option instead of `Revisioned`. It waits exactly as `Revisioned` does, but tags nothing: the answer carries neither a `Revision` header nor an `ETag`, says `Cache-Control: no-store`, as every answer without a revision does, and is never `304 Not Modified`. As with `Revisioned`, the query is built before the route waits, so a body that does not fit is refused at once.
+
+For example, a preview of borrowing a book tells whether the book is available, which the caller wants to see right after returning it, and until when the book would be borrowed, which depends on the current time and on the loan period, which comes from the configuration:
+
+```go
+type PreviewLoan struct {
+  BookID string
+}
+
+type loanPreviewBody struct {
+  IsAvailable   bool   `json:"isAvailable"`
+  BorrowedUntil string `json:"borrowedUntil"`
+}
+
+func previewLoan(catalog architecturekit.KeyedView[string, BookItem], loanPeriod time.Duration) func(context.Context, PreviewLoan) (loanPreviewBody, error) {
+  return func(ctx context.Context, q PreviewLoan) (loanPreviewBody, error) {
+    book, isFound, err := catalog.Get(ctx, q.BookID)
+    if err != nil {
+      return loanPreviewBody{}, err
+    }
+    if !isFound {
+      return loanPreviewBody{}, fmt.Errorf("%w: book %s", httpapi.ErrNotFound, q.BookID)
+    }
+
+    return loanPreviewBody{
+      IsAvailable:   !book.IsBorrowed,
+      BorrowedUntil: time.Now().Add(loanPeriod).Format(time.DateOnly),
+    }, nil
+  }
+}
+
+httpapi.Query(api, mux, "QUERY /api/books/{id}/loan-preview", toPreviewLoan, previewLoan(catalog, loanPeriod),
+  httpapi.Awaiting(catalog, httpapi.DefaultWait),
+)
+```
+
+Here, `toPreviewLoan` has the request type `httpapi.NoBody`, and takes the ID of the book from the path.
+
+So use `Revisioned` while the answer depends on nothing but the query and the view, plus what `Varying` adds, since the `ETag` then saves sending an answer that has not changed. Use `Awaiting` for an answer that depends on more, and neither for a query whose caller never needs to read its own writes.
+
+*Note that `Awaiting` panics for a `nil` view or a negative wait, and so does giving it twice, or along with `Revisioned`. A `nil` pointer counts as a `nil` view, such as a view that was declared but never created with `NewInMemoryView`. Since only a query with `Revisioned` has a tag, `Varying` panics along with `Awaiting` as well.*
+
 #### Waiting for a Revision in a Handler of Your Own
 
 To read its own writes in a handler of your own, for example one that answers in another format than JSON, call the `Await` function with the request, the view, and how long to wait at most. It waits for the revision the request asks for, within the context of the request. Running out of time is not an error, and neither is the end of the context of the request, for example because the caller went away: in both cases, `Await` stops waiting and returns `nil`, so the handler answers with what the view holds. It returns an error if the header holds something that is not a revision, which wraps `httpapi.ErrMalformed` as well as `architecturekit.ErrNotARevision`, or if waiting fails for another reason. Determine the caller first, so that nobody can make the server wait without being allowed to ask:
@@ -2666,7 +2846,7 @@ mux.HandleFunc("GET /api/books.csv", func(w http.ResponseWriter, r *http.Request
 })
 ```
 
-*Note that such a handler answers with neither an `ETag` nor `304 Not Modified`. Those come with the `Revisioned` option of `Query`, which ties the `ETag` to the query, so that callers never share one by accident.*
+*Note that such a handler answers with neither an `ETag` nor `304 Not Modified`. Those come with the `Revisioned` option of `Query`, which ties the `ETag` to the query, so that callers never share one by accident. For a query that answers in the default format, the `Awaiting` option of `Query` waits the same way (see [Waiting for a Revision Without a Tag](#waiting-for-a-revision-without-a-tag)).*
 
 ### Checking Health over HTTP
 
@@ -2755,7 +2935,7 @@ func main() {
   waitCtx, cancelWait := context.WithTimeout(ctx, time.Minute)
   defer cancelWait()
 
-  if err := run.WaitCaughtUp(waitCtx); err != nil {
+  if err := architecturekit.WaitCaughtUp(waitCtx, run); err != nil {
     if ctx.Err() != nil {
       // The process was asked to stop while waiting.
       return
@@ -2813,7 +2993,7 @@ To test deciders without a database, use the `architecturekittest` package:
 import "github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
 ```
 
-Call the `Given` function with a `*testing.T`, the decider, and the events that have happened so far. Then call the `When` function with the command, and check the outcome:
+Call the `Given` function with a `*testing.T`, the decider, and the events that have happened so far. Then call the `When` function with the command, and check the decision:
 
 ```go
 func TestBorrowBook(t *testing.T) {
@@ -2836,9 +3016,9 @@ func TestBorrowBook(t *testing.T) {
 }
 ```
 
-`Given` returns a `*Fixture`, and `When` returns an `*Outcome`. The functions that check the outcome return the outcome again, so they can be chained.
+`Given` returns a `*Fixture`, and `When` returns a `*Decision`, which is the decider's decision on the command: events, nothing, or a refusal. The functions that check the decision return the decision again, so they can be chained.
 
-Like `Execute`, `When` refuses an event that is `nil`, a `nil` pointer included, an event that the state of the decider has no rule for, and an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). As `Execute` does, it checks all events for `nil` first, then all of them for a rule, and encodes them last. It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The outcome is then the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches.
+Like `Execute`, `When` refuses an event that is `nil`, a `nil` pointer included, an event that the state of the decider has no rule for, and an event whose data can not be encoded as JSON, for example because it holds a float `NaN` (see [Executing Commands](#executing-commands)). As `Execute` does, it checks all events for `nil` first, then all of them for a rule, and encodes them last. It also checks the preconditions of the command before the decider decides, so that a command `Execute` refuses, such as one that combines `Unconditionally` with others, is refused here as well (see [Using Preconditions](#using-preconditions)). The decision then holds the same error of the category `ErrPermanent` that `Execute` returns, so `ThenEvents` and the other functions that expect events, or nothing, fail and name the cause, and `ThenFailed(architecturekit.ErrPermanent)` matches. Only an event ID of `OnEventID` that is not a revision is refused with the error that wraps `ErrNotARevision` instead, as `Execute` does, which `ThenFailed(architecturekit.ErrNotARevision)` matches.
 
 *Note that `Given` takes a `testing.TB`, as does every function of the package that can fail a test, so it works with the `*testing.B` of a benchmark as well.*
 
@@ -2864,6 +3044,8 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
   When(BorrowBook{BookID: "42", ReaderID: "23"}).
   ThenEveryEvent(isBookBorrowed)
 ```
+
+*Note that `ThenSomeEvent`, `ThenEveryEvent`, and `ThenNoEvent` fail the test for `nil` as the function, whatever the decision is, and say so. Otherwise, `ThenNoEvent` would pass for a decision without events, although it checks nothing.*
 
 #### Expecting Rejections
 
@@ -2895,12 +3077,20 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
   ThenPreconditions(architecturekittest.OnEventID("/books/42", "0"))
 ```
 
-`OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` also describe a precondition made with `Require` from the function of the client SDK that does the same, such as `NewIsSubjectPristinePrecondition`, since the two are alike. A test that expects a pristine subject fails for a command that declares a populated one, and the failure names both. For example, `AcquireBook` requires a pristine subject (see [Preventing Duplicates](#preventing-duplicates)):
+`ThenPreconditions` describes a precondition by what the database checks, so `OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` also describe a precondition made with `Require` from the function of the client SDK that does the same, such as `NewIsSubjectPristinePrecondition`. A test that expects a pristine subject fails for a command that declares a populated one, and the failure names both. For example, `AcquireBook` requires a pristine subject (see [Preventing Duplicates](#preventing-duplicates)):
 
 ```go
 architecturekittest.Given(t, acquireBook).
   When(AcquireBook{BookID: "42"}).
   ThenPreconditions(architecturekittest.OnPristineSubject("/books/42"))
+```
+
+For a pristine or a populated subject, the two are alike. For a revision, they are not: only `OnEventID` checks the event ID before anything is read, and refuses one that is not an event ID with an error that wraps `ErrNotARevision`, while `Require` with `NewIsSubjectOnEventIDPrecondition` leaves it to the database, which refuses it as a malformed request, so that `Execute` fails with an error of the category `ErrPermanent` (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). `ThenPreconditions` matches both, so a test tells them apart by what they do. For example, the following test passes for the `BorrowBook` that checks the revision of the caller with `OnEventID`, and fails for one that uses `Require` instead, since the test fixture then leaves the ID to the database, as `Execute` does, and the decider decides on the command:
+
+```go
+architecturekittest.Given(t, borrowBook, BookAcquired{}).
+  When(BorrowBook{BookID: "42", ReaderID: "23", ExpectedEventID: "abc"}).
+  ThenFailed(architecturekit.ErrNotARevision)
 ```
 
 To get the preconditions of a command directly, call the `PreconditionsOf` function. It returns a slice of `Precondition`, with the fields `Subject`, `Pristine`, `Populated`, `EventID`, `Query`, `OnStateRead`, and `Unconditional`:
@@ -2922,6 +3112,8 @@ architecturekittest.Given(t, returnBook, BookAcquired{}, BookBorrowed{}).
     }
   })
 ```
+
+*Note that `ThenState` fails the test for `nil` as the function, and says so.*
 
 #### Testing Upcasters
 
@@ -3120,6 +3312,8 @@ config := server.Config{
 ```
 
 *Note that with `-short` every test that asks for a database is skipped, so that the other tests run without Docker.*
+
+*Note that a `nil` option makes `Store`, `IsolatedStore`, and the `Store` function of a `Database` panic before they ask for a database, so with `-short` as well.*
 
 *Note that the database runs the image `thenativeweb/eventsourcingdb:latest`, as the client SDK starts it, rather than a version of your choice. Docker pulls the image only if it is missing, so which release that is depends on what the machine has pulled before. The database runs without a signing key, so its events carry no signature, and a store with `WithSignatureVerification` fails to read them with an error of the category `ErrUnverified`. Signature verification can therefore not be tested with it (see [Verifying Events](#verifying-events)).*
 

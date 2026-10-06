@@ -771,6 +771,113 @@ func TestEvolveWithDerivedSchemas(t *testing.T) {
 	})
 }
 
+func TestSchemaOf(t *testing.T) {
+	t.Run("returns the own schema of an event with a Schema function", func(t *testing.T) {
+		assert.Equal(t, architecturekit.EventSchema{
+			EventType: "io.thenativeweb.test.incremented",
+			Schema:    incremented{}.Schema(),
+		}, architecturekit.SchemaOf[incremented]())
+	})
+
+	t.Run("derives the schema of an event without a Schema function", func(t *testing.T) {
+		assert.Equal(t, architecturekit.EventSchema{
+			EventType: "io.thenativeweb.test.noted",
+			Schema:    architecturekit.DeriveSchema[noted](),
+		}, architecturekit.SchemaOf[noted]())
+	})
+
+	t.Run("returns what Evolve and Ignore put into Schemas", func(t *testing.T) {
+		for name, testCase := range map[string]struct {
+			schema architecturekit.EventSchema
+			state  *architecturekit.State[int]
+		}{
+			"an own schema, by Evolve": {
+				architecturekit.SchemaOf[incremented](),
+				architecturekit.NewState(0).Evolve(func(count int, _ incremented) int { return count + 1 }),
+			},
+			"an own schema, by Ignore": {
+				architecturekit.SchemaOf[incremented](),
+				architecturekit.NewState(0).Ignore[incremented](),
+			},
+			"a derived schema, by Evolve": {
+				architecturekit.SchemaOf[noted](),
+				architecturekit.NewState(0).Evolve(func(count int, _ noted) int { return count + 1 }),
+			},
+			"a derived schema, by Ignore": {
+				architecturekit.SchemaOf[noted](),
+				architecturekit.NewState(0).Ignore[noted](),
+			},
+			"an own schema that hides the one of an embedded field": {
+				architecturekit.SchemaOf[feePaidWithSchema](),
+				architecturekit.NewState(0).Evolve(func(count int, _ feePaidWithSchema) int { return count + 1 }),
+			},
+			"the own schema of a generic event": {
+				architecturekit.SchemaOf[labeled[int]](),
+				architecturekit.NewState(0).Evolve(func(count int, _ labeled[int]) int { return count + 1 }),
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				assert.Equal(t, []architecturekit.EventSchema{testCase.schema}, testCase.state.Schemas())
+			})
+		}
+	})
+
+	t.Run("panics for an event with the Schema function of an embedded field only, as Evolve does", func(t *testing.T) {
+		evolving := panicMessage(t, func() {
+			architecturekit.NewState(0).Evolve(func(count int, _ feePaid) int { return count + 1 })
+		})
+
+		assert.Contains(t, evolving, `architecturekit: event type "io.thenativeweb.test.fee-paid": `+
+			"architecturekit_test.feePaid has a Schema function only from its embedded field money")
+		assert.PanicsWithValue(t, evolving, func() { architecturekit.SchemaOf[feePaid]() })
+	})
+
+	t.Run("panics for an event whose schema can not be derived, as Evolve does", func(t *testing.T) {
+		evolving := panicMessage(t, func() {
+			architecturekit.NewState(0).Evolve(func(count int, _ unregistrable) int { return count + 1 })
+		})
+
+		assert.Contains(t, evolving, `architecturekit: event type "io.thenativeweb.test.unregistrable": `)
+		assert.PanicsWithValue(t, evolving, func() { architecturekit.SchemaOf[unregistrable]() })
+	})
+
+	t.Run("panics on a pointer as the event type, also if its EventType function has a pointer receiver", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: SchemaOf needs the event type architecturekit_test.incremented, not the pointer *architecturekit_test.incremented",
+			func() { architecturekit.SchemaOf[*incremented]() })
+		assert.PanicsWithValue(t,
+			"architecturekit: SchemaOf needs the event type architecturekit_test.pointed, not the pointer *architecturekit_test.pointed",
+			func() { architecturekit.SchemaOf[*pointed]() })
+	})
+
+	t.Run("panics on an interface as the event type, also on one of its own", func(t *testing.T) {
+		assert.PanicsWithValue(t,
+			"architecturekit: SchemaOf needs a concrete event type, not the interface architecturekit.Event",
+			func() { architecturekit.SchemaOf[architecturekit.Event]() })
+		assert.PanicsWithValue(t,
+			"architecturekit: SchemaOf needs a concrete event type, not the interface architecturekit_test.counterEvent",
+			func() { architecturekit.SchemaOf[counterEvent]() })
+	})
+
+	t.Run("is accepted and checked by the database for an event that only Write writes", func(t *testing.T) {
+		store := requireStore(t)
+		subject := subjectFor(t)
+
+		require.NoError(t, architecturekit.RegisterSchemas(t.Context(), store,
+			[]architecturekit.EventSchema{architecturekit.SchemaOf[noted]()}))
+
+		_, err := architecturekit.Write(t.Context(), store, []architecturekit.EventOn{
+			{Subject: subject, Event: noted{Text: "first", Tags: []string{}, At: time.Now()}},
+		}, architecturekit.Unconditionally())
+		require.NoError(t, err)
+
+		_, err = architecturekit.Write(t.Context(), store, []architecturekit.EventOn{
+			{Subject: subject, Event: noted{Text: "second", Tags: []string{}, Country: "Germany", At: time.Now()}},
+		}, architecturekit.Unconditionally())
+		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "the database must refuse the event because of the schema")
+	})
+}
+
 // money is a value type with constraints, which it describes with a Schema
 // function of its own.
 type money struct {

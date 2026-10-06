@@ -1,9 +1,9 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,9 +16,10 @@ import (
 // ErrNotFound means the query asked for something that does not exist.
 var ErrNotFound = errors.New("not found")
 
-// methodQuery is QUERY, the method that a query is asked with (see Query).
-// net/http has no name for it yet.
-const methodQuery = "QUERY"
+// MethodQuery is QUERY, the method of RFC 10008 that a query is asked with
+// (see Query). It is named like http.MethodGet, since net/http does not
+// define it yet.
+const MethodQuery = "QUERY"
 
 // ToQuery turns a request, its body, and the user into a query. It is the
 // read side's counterpart to ToCommand, and gets the same: the body comes
@@ -86,10 +87,15 @@ func Ask[TUser any, TRequest any, TQuery any, TResult any](
 type QueryOption func(*querySettings)
 
 type querySettings struct {
-	view   architecturekit.Revisioned
-	wait   time.Duration
-	varies Volatile
+	view     architecturekit.Revisioned
+	wait     time.Duration
+	isTagged bool
+	varies   Volatile
 }
+
+// givenTogether is what Revisioned and Awaiting panic with, in either order,
+// since both wait.
+const givenTogether = "architecturekit/httpapi: Awaiting is given along with Revisioned, which waits as well"
 
 // Revisioned has a query wait for the revision a caller asks for, for at most
 // the given time (DefaultWait, unless there is a reason for another), answer
@@ -121,10 +127,16 @@ type querySettings struct {
 //   - The context: a value that a middleware put into the context, such as the
 //     user, never shows up in the tag. Put it into the query instead.
 //
+// An answer for which none of that works, such as one that depends on the
+// instant, or on another view, waits with Awaiting instead, which tags
+// nothing.
+//
 // The query is built before anything waits or is answered, since building it
 // determines the caller, decodes the body, and checks what they may ask:
 // nobody can make the server wait, or learn that an answer is unchanged,
-// without being allowed to ask.
+// without being allowed to ask. Once it has waited, it reads the revision of
+// the view, and a view that fails to read it fails the query with its error,
+// which is answered as every other error is (see StatusFor).
 //
 // An answer that carries a revision, a success or one that says that nothing
 // has changed, says Cache-Control: private, no-cache: a cache asks again
@@ -133,9 +145,9 @@ type querySettings struct {
 // a view that has seen nothing, says no-store, as every other answer of the
 // kit does.
 //
-// A nil view, a negative wait, or giving Revisioned twice, is a programming
-// error, so it panics. A nil pointer counts as a nil view, such as a view that
-// was declared but never created.
+// A nil view, a negative wait, giving Revisioned twice, or along with
+// Awaiting, is a programming error, so it panics. A nil pointer counts as a
+// nil view, such as a view that was declared but never created.
 func Revisioned(view architecturekit.Revisioned, wait time.Duration) QueryOption {
 	if isNil(view) {
 		panic("architecturekit/httpapi: Revisioned needs a view, not nil")
@@ -145,8 +157,53 @@ func Revisioned(view architecturekit.Revisioned, wait time.Duration) QueryOption
 	}
 
 	return func(settings *querySettings) {
-		if settings.view != nil {
+		switch {
+		case settings.view != nil && settings.isTagged:
 			panic("architecturekit/httpapi: Revisioned is given twice")
+		case settings.view != nil:
+			panic(givenTogether)
+		}
+
+		settings.view = view
+		settings.wait = wait
+		settings.isTagged = true
+	}
+}
+
+// Awaiting has a query wait for the revision a caller asks for, for at most
+// the given time (DefaultWait, unless there is a reason for another), as
+// Revisioned does, but tags nothing: the answer carries neither a revision
+// nor an ETag, is never 304, and says Cache-Control: no-store, as every answer
+// without a revision does.
+//
+// Use it for an answer that depends on more than the query and the view, such
+// as on the instant, on the configuration, or on another view, for which a
+// tag could tell a caller, wrongly, that nothing has changed (see Revisioned).
+// The caller still reads its own writes.
+//
+// It waits as Revisioned does (see Await): a revision that is not one is
+// answered with 400, and once the time has run out, the query is answered with
+// what the view holds. The query is built before anything waits, so a body
+// that does not fit is refused at once, and nobody can make the server wait
+// without being allowed to ask.
+//
+// A nil view, a negative wait, giving Awaiting twice, or along with
+// Revisioned, is a programming error, so it panics. A nil pointer counts as a
+// nil view, such as a view that was declared but never created.
+func Awaiting(view architecturekit.Revisioned, wait time.Duration) QueryOption {
+	if isNil(view) {
+		panic("architecturekit/httpapi: Awaiting needs a view, not nil")
+	}
+	if wait < 0 {
+		panic(fmt.Sprintf("architecturekit/httpapi: Awaiting needs a wait that is not negative, not %s", wait))
+	}
+
+	return func(settings *querySettings) {
+		switch {
+		case settings.view != nil && !settings.isTagged:
+			panic("architecturekit/httpapi: Awaiting is given twice")
+		case settings.view != nil:
+			panic(givenTogether)
 		}
 
 		settings.view = view
@@ -180,8 +237,9 @@ func isNil(value any) bool {
 // besides the view and the query, such as the current day, which the answer
 // takes from the clock itself (see Volatile).
 //
-// A nil function, giving Varying twice, or Varying without Revisioned, is a
-// programming error, so it panics; the last one when Query wires the query.
+// A nil function, giving Varying twice, or Varying without Revisioned, also
+// with Awaiting, is a programming error, so it panics; the last one when Query
+// wires the query.
 func Varying(varies Volatile) QueryOption {
 	if varies == nil {
 		panic("architecturekit/httpapi: Varying needs a function, not nil")
@@ -197,10 +255,11 @@ func Varying(varies Volatile) QueryOption {
 }
 
 // Query wires a query to the mux and answers in the kit's default format,
-// which is the result itself, with Cache-Control: no-store, so that no cache
-// keeps it. With Revisioned, it reads its own writes and answers 304 when
-// nothing has changed; with Varying in addition, its tag changes with what the
-// answer takes from elsewhere.
+// which is the result itself, encoded as RespondResult encodes it, with
+// Cache-Control: no-store, so that no cache keeps it. With Revisioned, it
+// reads its own writes and answers 304 when nothing has changed; with Varying
+// in addition, its tag changes with what the answer takes from elsewhere.
+// With Awaiting, it reads its own writes, but tags nothing.
 //
 // A query is asked with QUERY, the method that HTTP defines in RFC 10008.
 // Like GET, it is safe, so it changes nothing, but like POST, it carries a
@@ -223,9 +282,9 @@ func Varying(varies Volatile) QueryOption {
 // So is a result that can not be encoded, such as one that holds NaN, which
 // JSON has no number for.
 //
-// A nil API, toQuery, or answer is a programming error, so Query panics, as
-// Route does, rather than failing every request, with 500, or for a nil API,
-// with no answer at all.
+// A nil API, toQuery, answer, or option is a programming error, so Query
+// panics, as Route does, rather than failing every request, with 500, or for a
+// nil API, with no answer at all.
 func Query[TUser any, TRequest any, TQuery any, TResult any](
 	api *API[TUser],
 	mux *http.ServeMux,
@@ -245,7 +304,7 @@ func Query[TUser any, TRequest any, TQuery any, TResult any](
 	}
 
 	switch method := methodOf(pattern); method {
-	case methodQuery:
+	case MethodQuery:
 	case "":
 		panic(fmt.Sprintf("architecturekit/httpapi: Query needs a pattern that names the method QUERY, not %q, "+
 			"which accepts every method", pattern))
@@ -255,15 +314,13 @@ func Query[TUser any, TRequest any, TQuery any, TResult any](
 	}
 
 	var settings querySettings
-	for _, option := range options {
-		option(&settings)
+	applyOptions("Query", &settings, options)
+
+	if settings.varies != nil && !settings.isTagged {
+		panic("architecturekit/httpapi: Varying needs Revisioned, since only a revisioned query has a tag")
 	}
 
 	if settings.view == nil {
-		if settings.varies != nil {
-			panic("architecturekit/httpapi: Varying needs Revisioned, since only a revisioned query has a tag")
-		}
-
 		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer api.answerPanic(w, r)
 
@@ -284,6 +341,12 @@ func Query[TUser any, TRequest any, TQuery any, TResult any](
 // WithLogger), and the error itself otherwise. A result that can not be
 // encoded, such as one that holds NaN, is answered with 500 as well. Like
 // Respond, it says Cache-Control: no-store, so that no cache keeps the answer.
+//
+// The result is encoded as encoding/json encodes it, except that a nil slice
+// is [] and a nil map is {}, at every depth, rather than null, so that a
+// caller gets a list or an object, whether it holds anything or not. A nil
+// pointer is still null, and a nil slice of bytes is "", since a slice of
+// bytes is a string in base64.
 //
 // As with Respond, an error without a status of its own is answered with 500,
 // so wrap a mistake in the request that a handler of your own has found with
@@ -332,20 +395,25 @@ func respondResultAt[TResult any](
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 
-	var body bytes.Buffer
+	var body []byte
 	if err == nil {
 		// The error is wrapped with %v rather than %w, since a result that can not
 		// be encoded is a mistake in the code, which has to be answered with 500,
 		// whatever category the error of a MarshalJSON function has.
-		if failure := json.NewEncoder(&body).Encode(listOf(result)); failure != nil {
+		encoded, failure := jsonv2.Marshal(result, answerJSON)
+		if failure != nil {
 			err = fmt.Errorf("httpapi: encoding the result: %v", failure)
 		}
+
+		// The answer ends with a newline, as what an Encoder of encoding/json
+		// writes does.
+		body = append(encoded, '\n')
 	}
 
 	if err == nil {
 		writeRevision(w, revision, tag)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(body.Bytes())
+		_, _ = w.Write(body)
 		return
 	}
 
@@ -356,14 +424,17 @@ func respondResultAt[TResult any](
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": message})
 }
 
-// listOf turns a nil slice into an empty one, so that a query that finds
-// nothing answers with [] rather than null. query.Collect, which the kit
-// suggests for turning items into a slice, returns nil when there are none.
-func listOf(result any) any {
-	value := reflect.ValueOf(result)
-	if value.Kind() == reflect.Slice && value.IsNil() {
-		return []any{}
-	}
-
-	return result
-}
+// answerJSON are the rules that results and the fields of Adding are encoded
+// by: those of encoding/json, except that a nil slice is written as [], and a
+// nil map as {}, at every depth, rather than as null, so that a caller gets a
+// list or an object, whether it holds anything or not, such as for the nil
+// slice that query.Collect returns when there are no items.
+//
+// A nil pointer and a nil interface are still null, and so is a nil
+// json.RawMessage, which holds JSON text. A nil slice of bytes is "", since a
+// slice of bytes is written as a string in base64.
+var answerJSON = jsonv2.JoinOptions(
+	json.DefaultOptionsV1(),
+	jsonv2.FormatNilSliceAsNull(false),
+	jsonv2.FormatNilMapAsNull(false),
+)

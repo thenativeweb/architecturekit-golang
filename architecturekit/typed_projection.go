@@ -29,7 +29,7 @@ type Envelope[TEvent Event] struct {
 
 // TypedProjection is a projection that hands every event to the handler
 // registered for its type, with the data already decoded. Create it with
-// NewProjection, and register a handler per event type with On.
+// NewTypedProjection, and register a handler per event type with On.
 //
 // It is the read side's counterpart of State: the event type is taken from the
 // Go type of the handler, so it is written exactly once, on the event, and the
@@ -43,12 +43,12 @@ type TypedProjection struct {
 	upcasters *Upcasters
 }
 
-// NewProjection creates a projection without any handlers.
+// NewTypedProjection creates a projection without any handlers.
 //
 // The result is a Projection like any other, so it can be tracked, run, and
 // tested as usual. To make it resumable, embed it in a type that adds the
 // Checkpoint and SaveCheckpoint functions.
-func NewProjection() *TypedProjection {
+func NewTypedProjection() *TypedProjection {
 	return &TypedProjection{
 		handlers: map[string]func(ctx context.Context, event eventsourcingdb.Event) error{},
 	}
@@ -63,12 +63,17 @@ func NewProjection() *TypedProjection {
 //
 // Registering the same event type twice is a programming error, so it panics
 // while the projection is being built rather than silently overwriting a
-// handler.
+// handler. So does a nil handler, rather than the first event that arrives,
+// and a pointer as the event type, such as *BookBorrowed instead of
+// BookBorrowed, or an interface, such as Event.
 func (p *TypedProjection) On[TEvent Event](
 	handle func(ctx context.Context, event Envelope[TEvent]) error,
 ) *TypedProjection {
-	var zero TEvent
-	eventType := zero.EventType()
+	if handle == nil {
+		panic("architecturekit: On needs a function, not nil")
+	}
+
+	eventType := eventTypeOf[TEvent]("On")
 
 	if _, exists := p.handlers[eventType]; exists {
 		panic(fmt.Sprintf("architecturekit: event type %q already has a handler on this projection", eventType))
@@ -95,10 +100,14 @@ func (p *TypedProjection) On[TEvent Event](
 // into it, makes Decode fail with an error of the category ErrPermanent, since
 // decoding it again yields the same result. Checking the type matters: decoding
 // into the wrong struct would otherwise quietly leave its fields empty.
+//
+// A pointer as the event type, such as *BookBorrowed instead of BookBorrowed,
+// or an interface, such as Event, is a programming error, so Decode panics, as
+// On does.
 func Decode[TEvent Event](event eventsourcingdb.Event) (Envelope[TEvent], error) {
 	var data TEvent
 
-	if eventType := data.EventType(); event.Type != eventType {
+	if eventType := eventTypeOf[TEvent]("Decode"); event.Type != eventType {
 		return Envelope[TEvent]{}, fmt.Errorf("%w: event %s is of type %q, not %q",
 			ErrPermanent, event.ID, event.Type, eventType)
 	}

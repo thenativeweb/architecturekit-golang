@@ -203,7 +203,7 @@ func TestVerification(t *testing.T) {
 		assert.Equal(t, 5, current.Total)
 
 		total := 0
-		projection := architecturekit.NewProjection().
+		projection := architecturekit.NewTypedProjection().
 			UpcastWith(upcasters).
 			On(func(_ context.Context, event architecturekit.Envelope[incremented]) error {
 				total += event.Data.By

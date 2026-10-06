@@ -270,7 +270,7 @@ func TestReadBounds(t *testing.T) {
 		assert.Equal(t, ids, idsOf(events))
 	})
 
-	t.Run("bounds that leave no room for an event are refused by the database", func(t *testing.T) {
+	t.Run("bounds that leave no room for an event are refused before the database is asked", func(t *testing.T) {
 		subject, ids := fiveIn(t)
 
 		events, errs := readAll(t, requireStore(t), architecturekit.ExactSubject(subject),
@@ -278,8 +278,9 @@ func TestReadBounds(t *testing.T) {
 
 		assert.Empty(t, events)
 		require.Len(t, errs, 1)
-		assert.ErrorIs(t, errs[0], architecturekit.ErrPermanent)
-		assert.ErrorContains(t, errs[0], "lowerBound ID must be less than or equal to upperBound ID")
+		assert.ErrorIs(t, errs[0], architecturekit.ErrEmptyRange)
+		assert.NotErrorIs(t, errs[0], architecturekit.ErrPermanent)
+		assert.EqualError(t, errs[0], `empty range: no event can lie after "`+ids[1]+`" and before "`+ids[2]+`"`)
 	})
 }
 
@@ -509,19 +510,20 @@ func TestReadWithInvalidEventIDs(t *testing.T) {
 	})
 }
 
-func TestReadOptionContradictions(t *testing.T) {
-	read := func(options ...architecturekit.ReadOption) func() {
-		return func() {
-			architecturekit.Read(context.Background(), nil, architecturekit.ExactSubject("/books/42"), options...)
-		}
-	}
+// contradiction is a set of read options that contradict each other, and the
+// message Read panics with for them.
+type contradiction struct {
+	options []architecturekit.ReadOption
+	message string
+}
+
+// contradictions holds every way read options can contradict each other, by
+// name.
+func contradictions() map[string]contradiction {
 	fromLatest := architecturekit.FromLatestEvent("/books/42", "io.eventsourcingdb.library.book-audited", architecturekit.ReadEverything)
 	const fromLatestText = `FromLatestEvent("/books/42", "io.eventsourcingdb.library.book-audited")`
 
-	for name, test := range map[string]struct {
-		options []architecturekit.ReadOption
-		message string
-	}{
+	return map[string]contradiction{
 		"FromEvent and AfterEvent": {
 			[]architecturekit.ReadOption{architecturekit.FromEvent("3"), architecturekit.AfterEvent("5")},
 			`architecturekit: a read has one lower bound, but got FromEvent("3") and AfterEvent("5")`,
@@ -583,11 +585,32 @@ func TestReadOptionContradictions(t *testing.T) {
 			`architecturekit: the database reads from the latest event of a type only oldest first, but got ` +
 				fromLatestText + ` and NewestFirst()`,
 		},
-	} {
+	}
+}
+
+func TestReadOptionContradictions(t *testing.T) {
+	read := func(options ...architecturekit.ReadOption) func() {
+		return func() {
+			architecturekit.Read(context.Background(), nil, architecturekit.ExactSubject("/books/42"), options...)
+		}
+	}
+	fromLatest := architecturekit.FromLatestEvent("/books/42", "io.eventsourcingdb.library.book-audited", architecturekit.ReadEverything)
+
+	for name, test := range contradictions() {
 		t.Run(name+" panic", func(t *testing.T) {
 			assert.PanicsWithValue(t, test.message, read(test.options...))
 		})
 	}
+
+	t.Run("a nil option panics, also one that was declared but never set", func(t *testing.T) {
+		// Read panics when it is called, as for options that contradict each
+		// other, not once the events are iterated.
+		var declared architecturekit.ReadOption
+
+		for _, option := range []architecturekit.ReadOption{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: Read got a nil option", read(architecturekit.FromEvent("1"), option))
+		}
+	})
 
 	t.Run("options that do not contradict each other do not panic", func(t *testing.T) {
 		assert.NotPanics(t, read(architecturekit.FromEvent("1"), architecturekit.UpToEvent("2"), architecturekit.NewestFirst()))

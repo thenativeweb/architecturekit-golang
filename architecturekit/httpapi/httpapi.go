@@ -1,8 +1,8 @@
 // Package httpapi exposes commands and queries over HTTP, lets a caller read
-// its own writes (see Revisioned and Await), and answers the health checks of
-// an orchestrator (see Readiness and Liveness). It is optional: the kit's core
-// knows nothing about transports, and everything here can be replaced by a
-// handler of your own.
+// its own writes (see Revisioned, Awaiting and Await), and answers the health
+// checks of an orchestrator (see Readiness and Liveness). It is optional: the
+// kit's core knows nothing about transports, and everything here can be
+// replaced by a handler of your own.
 package httpapi
 
 import (
@@ -127,8 +127,8 @@ func WithLogger(logger *slog.Logger) APIOption {
 // is answered with 500, and the failure says that there is no store.
 //
 // A nil userFrom, on the other hand, is a programming error, so NewAPI panics,
-// rather than failing every request with 500. For an application without
-// authentication, use NewPublicAPI.
+// rather than failing every request with 500, and so does a nil option. For an
+// application without authentication, use NewPublicAPI.
 func NewAPI[TUser any](
 	store *architecturekit.Store,
 	userFrom func(*http.Request) (TUser, error),
@@ -138,12 +138,35 @@ func NewAPI[TUser any](
 		panic("architecturekit/httpapi: NewAPI needs a function that determines the user, not nil")
 	}
 
+	return newAPI("NewAPI", store, userFrom, options)
+}
+
+// newAPI creates the API of NewAPI and NewPublicAPI, which it names if one of
+// the options is nil.
+func newAPI[TUser any](
+	function string,
+	store *architecturekit.Store,
+	userFrom func(*http.Request) (TUser, error),
+	options []APIOption,
+) *API[TUser] {
 	var settings apiSettings
-	for _, option := range options {
-		option(&settings)
-	}
+	applyOptions(function, &settings, options)
 
 	return &API[TUser]{store: store, userFrom: userFrom, logger: settings.logger}
+}
+
+// applyOptions applies the options to the settings of the function of httpapi
+// with the given name, in their order. A nil option, such as one that was
+// declared but never set, is a programming error, so applyOptions panics,
+// naming the function, rather than with a nil dereference.
+func applyOptions[TSettings any, TOption ~func(*TSettings)](function string, settings *TSettings, options []TOption) {
+	for _, option := range options {
+		if option == nil {
+			panic(fmt.Sprintf("architecturekit/httpapi: %s got a nil option", function))
+		}
+
+		option(settings)
+	}
 }
 
 // explain returns the function that turns an error into the message the
@@ -313,10 +336,12 @@ type NoBody struct{}
 
 // NewPublicAPI creates an API for an application without authentication.
 // Every request is served, and commands and queries receive NoUser.
+//
+// A nil option is a programming error, so NewPublicAPI panics, as NewAPI does.
 func NewPublicAPI(store *architecturekit.Store, options ...APIOption) *API[NoUser] {
-	return NewAPI(store, func(*http.Request) (NoUser, error) {
+	return newAPI("NewPublicAPI", store, func(*http.Request) (NoUser, error) {
 		return NoUser{}, nil
-	}, options...)
+	}, options)
 }
 
 // Handled is what a command did. It carries the command itself, so that a
@@ -428,7 +453,8 @@ type routeSettings[TCommand any] struct {
 // A value that encodes to null adds no fields. That is nil, and also a nil
 // pointer of a concrete type, which an interface does not count as nil, such
 // as the one that return lookup(handled) hands back if lookup returns a *T and
-// an error, and fails.
+// an error, and fails. The value is encoded as a result is (see
+// RespondResult), so a nil slice or map in it is [] or {}.
 //
 // If the function fails, the command has succeeded all the same, and its
 // events are written. So the answer stays a success, with the revision, which
@@ -490,9 +516,10 @@ func Adding[TCommand any](fields func(Handled[TCommand]) (any, error)) RouteOpti
 // and Route panics, rather than executing the command for any site that links
 // to it, or whenever a query is sent again.
 //
-// A nil API, a nil toCommand, or the zero Decider, one that was not made with
-// NewDecider, is a programming error, so Route panics, rather than failing
-// every request, with 500, or for a nil API, with no answer at all.
+// A nil API, a nil toCommand, the zero Decider, one that was not made with
+// NewDecider, or a nil option, is a programming error, so Route panics, rather
+// than failing every request, with 500, or for a nil API, with no answer at
+// all.
 func Route[
 	TUser any,
 	TRequest any,
@@ -520,15 +547,13 @@ func Route[
 	case "":
 		panic(fmt.Sprintf("architecturekit/httpapi: Route needs a pattern that names a method, such as POST, not %q, "+
 			"which accepts every method, GET included", pattern))
-	case http.MethodGet, http.MethodHead, http.MethodOptions, methodQuery:
+	case http.MethodGet, http.MethodHead, http.MethodOptions, MethodQuery:
 		panic(fmt.Sprintf("architecturekit/httpapi: Route needs a pattern whose method may change something, such as POST, not %q, "+
 			"since %s must not change anything", pattern, method))
 	}
 
 	var settings routeSettings[TCommand]
-	for _, option := range options {
-		option(&settings)
-	}
+	applyOptions("Route", &settings, options)
 
 	mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer api.answerPanic(w, r)
@@ -596,10 +621,13 @@ const statusClientClosedRequest = 499
 //
 // An error that wraps architecturekit.ErrNotARevision maps to 400, since the
 // value that is not a revision was handed over, such as a bound of
-// architecturekit.Read or the revision a view is to wait for, which usually
-// come from the request. An error of the category architecturekit.ErrPermanent
-// maps to 500 even then, since an ID that the server stored or made itself is
-// broken.
+// architecturekit.Read, the event ID of architecturekit.OnEventID, or the
+// revision a view is to wait for, which usually come from the request. An
+// error of the category architecturekit.ErrPermanent maps to 500 even then,
+// since an ID that the server stored or made itself is broken. An error that
+// wraps architecturekit.ErrEmptyRange maps to 400 the same way, since bounds
+// of architecturekit.Read that leave no room for an event usually come from
+// the request as well.
 //
 // An error because the context ended belongs to no category. If the request
 // was canceled, which happens when the caller goes away, it maps to 499, which
@@ -641,11 +669,12 @@ func StatusFor(err error) int {
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable
 	// A permanent failure is the server's mistake, even if it says that an ID
-	// is not a revision, so it comes before ErrNotARevision. Both come last,
-	// so that an error that has a status of its own above keeps it.
+	// is not a revision, or that a range is empty, so it comes before
+	// ErrNotARevision and ErrEmptyRange. They all come last, so that an error
+	// that has a status of its own above keeps it.
 	case errors.Is(err, architecturekit.ErrPermanent):
 		return http.StatusInternalServerError
-	case errors.Is(err, architecturekit.ErrNotARevision):
+	case errors.Is(err, architecturekit.ErrNotARevision), errors.Is(err, architecturekit.ErrEmptyRange):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
@@ -654,7 +683,7 @@ func StatusFor(err error) int {
 
 // Respond writes the kit's default answer to a command. On success, that is
 // the revision the command wrote, the ID of the last event, which a caller
-// hands to a query to read its own writes (see Revisioned):
+// hands to a query to read its own writes (see Revisioned and Awaiting):
 //
 //	{"revision": "42"}
 //
@@ -749,8 +778,9 @@ func respond(
 // fieldsOf turns what the function of Adding returned into the fields of the
 // answer. A value that encodes to null holds no fields, such as nil, and also
 // a nil pointer of a concrete type, which an interface does not count as nil.
-// The fields are decoded with numbers kept as they are, so that a large
-// integer does not lose digits on its way through a float.
+// The value is encoded as a result is (see answerJSON), so a nil slice or map
+// in it is [] or {}, and the fields are decoded with numbers kept as they are,
+// so that a large integer does not lose digits on its way through a float.
 //
 // A value that can not be encoded, also because a MarshalJSON function
 // panics, that does not encode to a JSON object, or that holds a revision,
@@ -761,7 +791,7 @@ func fieldsOf(value any) (fields map[string]any, err error) {
 	// The error is wrapped with %v rather than %w, since fields that can not
 	// be encoded are a mistake in the code, which has to be answered with 500,
 	// whatever category the error of a MarshalJSON function has.
-	encoded, err := json.Marshal(value)
+	encoded, err := jsonv2.Marshal(value, answerJSON)
 	if err != nil {
 		return nil, fmt.Errorf("httpapi: encoding the fields of the answer: %v", err)
 	}
@@ -876,6 +906,7 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 //	"quantity" is out of range
 //	"quantity" must be an integer
 //	"cover" must be base64
+//	"pair" must have 2 elements
 //	"dueOn" must be a time such as "2026-10-05T12:00:00Z"
 //	"quantity" must be a string that holds a number
 //	the keys of "stock" must be numbers
@@ -890,6 +921,16 @@ func (api *API[TUser]) answerPanic(w http.ResponseWriter, r *http.Request) {
 // written as one, without a fraction or an exponent. A field with the option
 // string takes its number, boolean, or string in a string, and the keys of a
 // map whose keys are times have to be times.
+//
+// An array has to have as many elements as the Go array that it is decoded
+// into, such as [2]int, which encoding/json would fill up with zeros, or cut
+// off, without a word. A body of null is refused as well, since encoding/json
+// takes it for no value at all, and would hand back the zero value of TBody.
+// The error says which kind the body has to be, as in "the body must be an
+// object". Only a type whose kind is not clear, such as one that decodes
+// itself, gets null as any other value, and decides itself what it means,
+// and an interface takes it for nil. null for a field still leaves the field
+// as it is, as with encoding/json.
 //
 // The error of a type that decodes itself keeps its own text, as it is, also
 // for a type of a library, such as netip.Addr, as long as it can tell its
@@ -924,6 +965,10 @@ func BodyOf[TBody any](r *http.Request) (TBody, error) {
 		return value, err
 	}
 
+	if err := refuseNull(reflect.TypeFor[TBody](), body); err != nil {
+		return value, fmt.Errorf("%w: %w", ErrMalformed, err)
+	}
+
 	value, err = decodeStrictly[TBody](body)
 	if err != nil {
 		return value, fmt.Errorf("%w: %w", ErrMalformed, err)
@@ -934,11 +979,14 @@ func BodyOf[TBody any](r *http.Request) (TBody, error) {
 
 // strictJSON are the rules of encoding/json, which match names regardless of
 // case, except that unknown fields and names that occur twice are rejected
-// (see decodeStrictly).
+// (see decodeStrictly), and so is an array whose length differs from that of
+// the Go array that it is decoded into, which encoding/json would fill up
+// with zeros, or cut off, without a word.
 var strictJSON = jsonv2.JoinOptions(
 	json.DefaultOptionsV1(),
 	jsonv2.RejectUnknownMembers(true),
 	jsontext.AllowDuplicateNames(false),
+	json.UnmarshalArrayFromAnyLength(false),
 )
 
 // decodeStrictly decodes a body that holds exactly one JSON value, with

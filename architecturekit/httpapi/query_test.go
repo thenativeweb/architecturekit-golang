@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -189,6 +191,17 @@ func TestQuery(t *testing.T) {
 				httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "QUERY /notes", toListNotes, noAnswer, options...)
 			})
 		})
+
+		t.Run("a "+kind+" panics for a nil option, also one that was declared but never set", func(t *testing.T) {
+			var declared httpapi.QueryOption
+
+			for _, option := range []httpapi.QueryOption{nil, declared} {
+				assert.PanicsWithValue(t, "architecturekit/httpapi: Query got a nil option", func() {
+					httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), http.NewServeMux(), "QUERY /notes", toListNotes, answerListNotes,
+						append(slices.Clone(options), option)...)
+				})
+			}
+		})
 	}
 }
 
@@ -275,6 +288,16 @@ func TestPublicAPI(t *testing.T) {
 		response := ask(t, mux, "/public", "")
 
 		assert.Equal(t, http.StatusOK, response.Code)
+	})
+
+	t.Run("panics on a nil option, naming itself, also one that was declared but never set", func(t *testing.T) {
+		var declared httpapi.APIOption
+
+		for _, option := range []httpapi.APIOption{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit/httpapi: NewPublicAPI got a nil option", func() {
+				httpapi.NewPublicAPI(deadStore(t), httpapi.WithLogger(slog.Default()), option)
+			})
+		}
 	})
 }
 
@@ -369,6 +392,7 @@ func TestResultsThatCanNotBeEncoded(t *testing.T) {
 	for name, options := range map[string][]httpapi.QueryOption{
 		"a query":            nil,
 		"a revisioned query": {httpapi.Revisioned(seenView("4"), time.Second)},
+		"an awaiting query":  {httpapi.Awaiting(seenView("4"), time.Second)},
 	} {
 		for result, answer := range results {
 			t.Run(name+" answers a result with "+result+" with 500, and logs why", func(t *testing.T) {
@@ -420,10 +444,26 @@ func seenView(revision string) *architecturekit.InMemoryView[string, noteItem] {
 // nothing (RFC 10008).
 
 func TestQueryMethod(t *testing.T) {
+	t.Run("is named, since net/http does not name it yet", func(t *testing.T) {
+		assert.Equal(t, "QUERY", httpapi.MethodQuery)
+
+		mux := http.NewServeMux()
+		httpapi.Query(httpapi.NewAPI(deadStore(t), userFrom), mux, httpapi.MethodQuery+" /notes", allNotes, countNotesIn(noteView()))
+
+		request := httptest.NewRequest(httpapi.MethodQuery, "/notes", nil)
+		request.Header.Set("X-User", "golo")
+		response := serve(t, mux, request)
+
+		assert.Equal(t, http.StatusOK, response.Code)
+	})
+
 	for kind, options := range map[string]func() []httpapi.QueryOption{
 		"a query": func() []httpapi.QueryOption { return nil },
 		"a revisioned query": func() []httpapi.QueryOption {
 			return []httpapi.QueryOption{httpapi.Revisioned(seenView("4"), time.Second)}
+		},
+		"an awaiting query": func() []httpapi.QueryOption {
+			return []httpapi.QueryOption{httpapi.Awaiting(seenView("4"), time.Second)}
 		},
 	} {
 		wire := func(pattern string) func() {

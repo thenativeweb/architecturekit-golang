@@ -178,7 +178,7 @@ func CloneWith[TItem any](clone func(item TItem) TItem) InMemoryViewOption[TItem
 // the given function.
 //
 // A nil function is a programming error, so it panics while the view is being
-// built, rather than once the first item arrives.
+// built, rather than once the first item arrives. So does a nil option.
 func NewInMemoryView[TKey comparable, TItem any](
 	keyOf func(TItem) TKey,
 	options ...InMemoryViewOption[TItem],
@@ -188,9 +188,7 @@ func NewInMemoryView[TKey comparable, TItem any](
 	}
 
 	configured := inMemoryViewOptions[TItem]{}
-	for _, option := range options {
-		option(&configured)
-	}
+	applyOptions("NewInMemoryView", &configured, options)
 
 	return &InMemoryView[TKey, TItem]{
 		keyOf:      keyOf,
@@ -201,12 +199,13 @@ func NewInMemoryView[TKey comparable, TItem any](
 	}
 }
 
-// Revision is the last event the view has seen.
-func (v *InMemoryView[TKey, TItem]) Revision() string {
+// Revision is the last event the view has seen. The view keeps it in
+// memory, so it ignores the context and never fails.
+func (v *InMemoryView[TKey, TItem]) Revision(context.Context) (string, error) {
 	v.mutex.RLock()
 	defer v.mutex.RUnlock()
 
-	return v.revision
+	return v.revision, nil
 }
 
 // Seen records an event as processed. An event the view has already passed
@@ -650,9 +649,16 @@ func (v *InMemoryView[TKey, TItem]) compact() {
 // before the change.
 //
 // Add indexes before the view is used, since adding one reads every item.
+//
+// A nil function is a programming error, so it panics while the view is being
+// built, rather than once the first item arrives.
 func (v *InMemoryView[TKey, TItem]) Index[TValue comparable](
 	valueOf func(TItem) TValue,
 ) *InMemoryIndex[TKey, TItem, TValue] {
+	if valueOf == nil {
+		panic("architecturekit: Index needs a function, not nil")
+	}
+
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
 

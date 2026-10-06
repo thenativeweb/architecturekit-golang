@@ -1,10 +1,20 @@
 package architecturekit
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
 )
+
+// ErrEmptyRange means that the bounds of a read leave no room for an event,
+// such as one before "0", one after "0" and before "1", or one after the
+// largest revision, 2^63-1. No event can ever lie in such a range, so it is a
+// mistake of whoever chose the bounds, which usually come from a request. A
+// range that is only empty for now, such as the one after the last event
+// written so far, is no such mistake, since events can still come there, so
+// Read hands out no events for it, without an error.
+var ErrEmptyRange = errors.New("empty range")
 
 // ReadOption narrows down which events Read hands out, or turns around the
 // order it hands them out in. Create one with FromEvent, AfterEvent,
@@ -30,7 +40,8 @@ type readSettings struct {
 // FromEvent reads the events from the one with the given ID on, including it.
 //
 // The ID is a string, as everywhere else in the kit. One that is not the ID of
-// an event, such as an empty one, makes Read fail with ErrNotARevision.
+// an event, such as an empty one, makes Read fail with ErrNotARevision, and
+// bounds that leave no room for an event make it fail with ErrEmptyRange.
 func FromEvent(id string) ReadOption {
 	return lowerBound("FromEvent", id, eventsourcingdb.BoundTypeInclusive)
 }
@@ -39,7 +50,8 @@ func FromEvent(id string) ReadOption {
 // Hand over the ID of the last event of a page to read the next one.
 //
 // The ID is a string, as everywhere else in the kit. One that is not the ID of
-// an event, such as an empty one, makes Read fail with ErrNotARevision.
+// an event, such as an empty one, makes Read fail with ErrNotARevision, and
+// bounds that leave no room for an event make it fail with ErrEmptyRange.
 func AfterEvent(id string) ReadOption {
 	return lowerBound("AfterEvent", id, eventsourcingdb.BoundTypeExclusive)
 }
@@ -47,7 +59,8 @@ func AfterEvent(id string) ReadOption {
 // UpToEvent reads the events up to the one with the given ID, including it.
 //
 // The ID is a string, as everywhere else in the kit. One that is not the ID of
-// an event, such as an empty one, makes Read fail with ErrNotARevision.
+// an event, such as an empty one, makes Read fail with ErrNotARevision, and
+// bounds that leave no room for an event make it fail with ErrEmptyRange.
 func UpToEvent(id string) ReadOption {
 	return upperBound("UpToEvent", id, eventsourcingdb.BoundTypeInclusive)
 }
@@ -56,7 +69,8 @@ func UpToEvent(id string) ReadOption {
 // out.
 //
 // The ID is a string, as everywhere else in the kit. One that is not the ID of
-// an event, such as an empty one, makes Read fail with ErrNotARevision.
+// an event, such as an empty one, makes Read fail with ErrNotARevision, and
+// bounds that leave no room for an event make it fail with ErrEmptyRange.
 func BeforeEvent(id string) ReadOption {
 	return upperBound("BeforeEvent", id, eventsourcingdb.BoundTypeExclusive)
 }
@@ -81,7 +95,9 @@ func upperBound(name, id string, boundType eventsourcingdb.BoundType) ReadOption
 
 // NewestFirst hands out the newest event first, rather than the oldest one.
 // The bounds stay what they are, so together with BeforeEvent, it reads the
-// events before the given one, newest first, which pages backwards.
+// events before the given one, newest first, which pages backwards. A page
+// that ends with the event 0 is the last one, since BeforeEvent("0") leaves
+// no room for an event, which makes Read fail with ErrEmptyRange.
 func NewestFirst() ReadOption {
 	return func(settings *readSettings) {
 		settings.set(&settings.order, "order", "NewestFirst()")
@@ -155,14 +171,31 @@ func (s *readSettings) set(setting *string, what, option string) {
 	*setting = option
 }
 
-func readSettingsOf(subjects Subjects, options []ReadOption) readSettings {
-	settings := readSettings{
-		database: eventsourcingdb.ReadEventsOptions{Recursive: subjects.recursive},
-	}
+// CheckReadOptions fails with the error Read ends the iteration with for the
+// given options before it asks the database: the error of ParseRevision for
+// the first bound whose ID is not the ID of an event, which wraps
+// ErrNotARevision, or, if both IDs are fine, an error that wraps
+// ErrEmptyRange if the bounds leave no room for an event. It returns nil
+// otherwise. Use it to check bounds that come from a request before a side
+// effect that must not happen for a read Read refuses, such as recording who
+// reads. Read applies the same checks itself, and the database may still
+// refuse a read they pass, such as one from a latest event that comes after
+// the upper bound (see FromLatestEvent).
+//
+// Like Read, it panics for options that contradict each other and for a nil
+// option, before it checks any ID, so that a mistake in the code is not
+// hidden behind one of the caller. It takes no subjects, since none of the
+// checks depends on them, so only Read panics for the zero value of Subjects.
+func CheckReadOptions(options ...ReadOption) error {
+	return readSettingsOf("CheckReadOptions", options).checkBounds()
+}
 
-	for _, option := range options {
-		option(&settings)
-	}
+// readSettingsOf applies the options of a read for the function of the kit
+// with the given name, and panics for options that contradict each other.
+func readSettingsOf(function string, options []ReadOption) readSettings {
+	var settings readSettings
+
+	applyOptions(function, &settings, options)
 
 	if settings.database.FromLatestEvent != nil && settings.order != "" {
 		panic(fmt.Sprintf("architecturekit: the database reads from the latest event of a type only oldest first, "+
@@ -174,18 +207,79 @@ func readSettingsOf(subjects Subjects, options []ReadOption) readSettings {
 
 // checkBounds returns the error of ParseRevision for the first bound whose ID
 // is not the ID of an event, which, unlike a revision, an empty ID is not, the
-// lower bound first, or nil if both bounds are fine. FromLatestEvent has no
-// ID, and leaves the lower bound of the database empty.
+// lower bound first. If both IDs are fine, it fails with ErrEmptyRange if the
+// bounds leave no room for an event, which includes the range after the
+// largest revision without an upper bound, and returns nil otherwise.
+// FromLatestEvent has no ID, and leaves the lower bound of the database empty,
+// so that the lower bound is not known, and only an upper bound that leaves no
+// room for an event on its own, before "0", is refused then.
 func (s readSettings) checkBounds() error {
-	for _, bound := range []*eventsourcingdb.Bound{s.database.LowerBound, s.database.UpperBound} {
-		if bound == nil {
-			continue
+	lower, upper := s.database.LowerBound, s.database.UpperBound
+
+	// The range holds the IDs from first on, and up to, but not including,
+	// end. FromEvent(n) starts it at n and AfterEvent(n) at n+1, and
+	// UpToEvent(n) ends it after n and BeforeEvent(n) at n. Counting the end
+	// that way needs no number below 0 for BeforeEvent("0"), and ParseRevision
+	// ends at 2^63-1, so n+1 always fits. Without an upper bound, the range
+	// ends after the largest revision, so that no event can lie after it.
+	var first uint64
+	end := uint64(1) << 63
+
+	if lower != nil {
+		id, err := ParseRevision(lower.ID)
+		if err != nil {
+			return err
 		}
 
-		if _, err := ParseRevision(bound.ID); err != nil {
-			return err
+		first = id
+		if lower.Type == eventsourcingdb.BoundTypeExclusive {
+			first++
 		}
 	}
 
+	if upper != nil {
+		id, err := ParseRevision(upper.ID)
+		if err != nil {
+			return err
+		}
+
+		end = id
+		if upper.Type == eventsourcingdb.BoundTypeInclusive {
+			end++
+		}
+	}
+
+	if first >= end {
+		return fmt.Errorf("%w: no event can lie %s", ErrEmptyRange, describeRange(lower, upper))
+	}
+
 	return nil
+}
+
+// describeRange names the bounds of a range by their values only, since they
+// usually come from a request, whose caller knows neither the options of Read
+// nor the subjects: from "2" up to "1", from "1" and before "1", or after "0"
+// and before "1", before "0" without a lower bound, and after the largest
+// revision without an upper bound, the only range that is empty then.
+func describeRange(lower, upper *eventsourcingdb.Bound) string {
+	if upper == nil {
+		return fmt.Sprintf("after %q", lower.ID)
+	}
+
+	ending := fmt.Sprintf("before %q", upper.ID)
+	if upper.Type == eventsourcingdb.BoundTypeInclusive {
+		ending = fmt.Sprintf("up to %q", upper.ID)
+	}
+
+	switch {
+	case lower == nil:
+		return ending
+	case lower.Type == eventsourcingdb.BoundTypeExclusive:
+		return fmt.Sprintf("after %q and %s", lower.ID, ending)
+	case upper.Type == eventsourcingdb.BoundTypeInclusive:
+		// From one up to another reads naturally without "and".
+		return fmt.Sprintf("from %q %s", lower.ID, ending)
+	default:
+		return fmt.Sprintf("from %q and %s", lower.ID, ending)
+	}
 }

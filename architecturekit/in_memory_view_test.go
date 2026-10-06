@@ -80,6 +80,17 @@ func TestInMemoryView(t *testing.T) {
 		}
 	})
 
+	t.Run("panics on a nil option, also one that was declared but never set", func(t *testing.T) {
+		var declared architecturekit.InMemoryViewOption[book]
+
+		for _, option := range []architecturekit.InMemoryViewOption[book]{nil, declared} {
+			assert.PanicsWithValue(t, "architecturekit: NewInMemoryView got a nil option", func() {
+				architecturekit.NewInMemoryView(func(item book) string { return item.ID },
+					architecturekit.RevisionIn(func(item *book) *string { return &item.Revision }), option)
+			})
+		}
+	})
+
 	t.Run("inserts and gets items", func(t *testing.T) {
 		view := bookView()
 
@@ -535,7 +546,7 @@ func (f *viewFixture) state(t *testing.T) viewState {
 		shelves[shelf] = lookedUp(t, f.byShelf, shelf)
 	}
 
-	return viewState{Items: items, Revision: f.view.Revision(), Shelves: shelves}
+	return viewState{Items: items, Revision: currentRevision(t, f.view), Shelves: shelves}
 }
 
 // viewTarget is the item a change is about, by its key and its shelf. The
@@ -577,6 +588,17 @@ var viewChanges = map[string]func(ctx context.Context, f *viewFixture, target vi
 }
 
 func TestInMemoryIndex(t *testing.T) {
+	t.Run("panics on a nil function while the view is being built, also one that was declared but never set", func(t *testing.T) {
+		var declared func(book) string
+
+		for _, valueOf := range []func(book) string{nil, declared} {
+			// The view is empty, so nothing would call the function yet.
+			assert.PanicsWithValue(t, "architecturekit: Index needs a function, not nil", func() {
+				bookView().Index(valueOf)
+			})
+		}
+	})
+
 	t.Run("looks up items by value", func(t *testing.T) {
 		view := bookView()
 		mustInsert(t, view, "1", book{ID: "a", Shelf: "left"})
@@ -953,7 +975,7 @@ func counterItemProjection(
 	view *architecturekit.InMemoryView[string, counterItem],
 	followsResets bool,
 ) *architecturekit.TypedProjection {
-	projection := architecturekit.NewProjection().
+	projection := architecturekit.NewTypedProjection().
 		On(func(ctx context.Context, event architecturekit.Envelope[incremented]) error {
 			_, err := view.Upsert(ctx, event.Subject, event.ID, func(item *counterItem) {
 				item.Subject = event.Subject
@@ -1192,7 +1214,7 @@ func newBookCatalog(
 	view := bookView()
 	catalog := &bookCatalog{view: view, byID: view.Index(func(item book) string { return item.ID })}
 
-	projection := architecturekit.NewProjection().
+	projection := architecturekit.NewTypedProjection().
 		On(func(ctx context.Context, event architecturekit.Envelope[bookAcquired]) error {
 			outcome, err := acquire(ctx, catalog, strings.TrimPrefix(event.Subject, "/books/"), event.ID, event.Data.Title)
 			catalog.acquired = append(catalog.acquired, outcome)

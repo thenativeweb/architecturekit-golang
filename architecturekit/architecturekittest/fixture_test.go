@@ -393,6 +393,19 @@ func TestThenState(t *testing.T) {
 
 		assert.True(t, checked, "ThenState did not run its check")
 	})
+
+	t.Run("fails on a nil function, also one that was declared but never set", func(t *testing.T) {
+		var declared func(account)
+
+		for _, check := range []func(account){nil, declared} {
+			recorder := &spy{}
+			architecturekittest.Given(recorder, decider(), opened{Owner: "golo"}).
+				When(open{Owner: "jane"}).
+				ThenState(check)
+
+			assert.Equal(t, []string{"ThenState needs a function, not nil"}, recorder.failures)
+		}
+	})
 }
 
 func TestGivenStored(t *testing.T) {
@@ -481,10 +494,10 @@ func TestEventMatchers(t *testing.T) {
 	t.Run("fail on an error", func(t *testing.T) {
 		always := func(architecturekit.Event) bool { return true }
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[open, account]){
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[open, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[open, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNoEvent(always) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[open, account]){
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[open, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[open, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[open, account]) { d.ThenNoEvent(always) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}
@@ -492,6 +505,42 @@ func TestEventMatchers(t *testing.T) {
 				recorder.expectFailure(t, "no owner given")
 				assert.NotEmpty(t, recorder.failures, "%s did not report the error", label)
 			})
+		}
+	})
+
+	t.Run("fail on a nil function, whatever the decision is, also one that was declared but never set", func(t *testing.T) {
+		// Without events, ThenNoEvent would otherwise pass, asserting nothing.
+		var declared func(architecturekit.Event) bool
+
+		commands := map[string]open{
+			"with events":    {Owner: "golo"},
+			"without events": {Owner: "nobody"},
+			"with an error":  {},
+		}
+
+		for label, check := range map[string]func(
+			d *architecturekittest.Decision[open, account], match func(architecturekit.Event) bool,
+		){
+			"ThenSomeEvent": func(d *architecturekittest.Decision[open, account], match func(architecturekit.Event) bool) {
+				d.ThenSomeEvent(match)
+			},
+			"ThenEveryEvent": func(d *architecturekittest.Decision[open, account], match func(architecturekit.Event) bool) {
+				d.ThenEveryEvent(match)
+			},
+			"ThenNoEvent": func(d *architecturekittest.Decision[open, account], match func(architecturekit.Event) bool) {
+				d.ThenNoEvent(match)
+			},
+		} {
+			for decision, cmd := range commands {
+				t.Run(label+" "+decision, func(t *testing.T) {
+					for _, match := range []func(architecturekit.Event) bool{nil, declared} {
+						recorder := &spy{}
+						check(architecturekittest.Given(recorder, decider()).When(cmd), match)
+
+						assert.Equal(t, []string{label + " needs a function, not nil"}, recorder.failures)
+					}
+				})
+			}
 		}
 	})
 }
@@ -695,11 +744,11 @@ func TestEventWithoutRule(t *testing.T) {
 	t.Run("fails every assertion that expects events or nothing", func(t *testing.T) {
 		always := func(architecturekit.Event) bool { return true }
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[emit, account]){
-			"ThenNothing":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNothing() },
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[emit, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[emit, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNoEvent(always) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[emit, account]){
+			"ThenNothing":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNothing() },
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[emit, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[emit, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNoEvent(always) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}
@@ -759,12 +808,12 @@ func TestEventThatCanNotBeEncoded(t *testing.T) {
 		always := func(architecturekit.Event) bool { return true }
 		never := func(architecturekit.Event) bool { return false }
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[emit, account]){
-			"ThenEvents":     func(o *architecturekittest.Outcome[emit, account]) { o.ThenEvents(withNaN.events...) },
-			"ThenNothing":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNothing() },
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[emit, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[emit, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNoEvent(never) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[emit, account]){
+			"ThenEvents":     func(d *architecturekittest.Decision[emit, account]) { d.ThenEvents(withNaN.events...) },
+			"ThenNothing":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNothing() },
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[emit, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[emit, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNoEvent(never) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}
@@ -832,12 +881,12 @@ func TestNilEvent(t *testing.T) {
 		always := func(architecturekit.Event) bool { return true }
 		never := func(architecturekit.Event) bool { return false }
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[emit, account]){
-			"ThenEvents":     func(o *architecturekittest.Outcome[emit, account]) { o.ThenEvents(opened{Owner: "golo"}) },
-			"ThenNothing":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNothing() },
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[emit, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[emit, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[emit, account]) { o.ThenNoEvent(never) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[emit, account]){
+			"ThenEvents":     func(d *architecturekittest.Decision[emit, account]) { d.ThenEvents(opened{Owner: "golo"}) },
+			"ThenNothing":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNothing() },
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[emit, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[emit, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[emit, account]) { d.ThenNoEvent(never) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}
@@ -932,11 +981,11 @@ func TestWhenChecksPreconditions(t *testing.T) {
 			architecturekit.OnStateRead(),
 		}}
 
-		for label, check := range map[string]func(o *architecturekittest.Outcome[open, account]){
-			"ThenNothing":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNothing() },
-			"ThenSomeEvent":  func(o *architecturekittest.Outcome[open, account]) { o.ThenSomeEvent(always) },
-			"ThenEveryEvent": func(o *architecturekittest.Outcome[open, account]) { o.ThenEveryEvent(always) },
-			"ThenNoEvent":    func(o *architecturekittest.Outcome[open, account]) { o.ThenNoEvent(always) },
+		for label, check := range map[string]func(d *architecturekittest.Decision[open, account]){
+			"ThenNothing":    func(d *architecturekittest.Decision[open, account]) { d.ThenNothing() },
+			"ThenSomeEvent":  func(d *architecturekittest.Decision[open, account]) { d.ThenSomeEvent(always) },
+			"ThenEveryEvent": func(d *architecturekittest.Decision[open, account]) { d.ThenEveryEvent(always) },
+			"ThenNoEvent":    func(d *architecturekittest.Decision[open, account]) { d.ThenNoEvent(always) },
 		} {
 			t.Run(label, func(t *testing.T) {
 				recorder := &spy{}
@@ -964,10 +1013,41 @@ func TestWhenChecksPreconditions(t *testing.T) {
 		assert.False(t, decided, "the decider decided on a command that Execute refuses before reading")
 	})
 
+	t.Run("refuses an ID of OnEventID that is not a revision with the error of Execute", func(t *testing.T) {
+		decided := false
+
+		spying := decider()
+		decide := spying.Decide
+		spying = architecturekit.NewDecider(spying.State(),
+			func(ctx context.Context, cmd open, current account) ([]architecturekit.Event, error) {
+				decided = true
+				return decide(ctx, cmd, current)
+			})
+
+		cmd := open{Owner: "golo", preconditions: []architecturekit.Precondition{
+			architecturekit.OnEventID("/account/1", "abc"),
+		}}
+
+		architecturekittest.Given(t, spying).
+			When(cmd).
+			ThenFailed(architecturekit.ErrNotARevision)
+
+		assert.False(t, decided, "the decider decided on a command that Execute refuses before reading")
+		assert.Equal(t, `not a revision: "abc"`, refusalOf(t, decider(), cmd))
+		assert.Equal(t, architecturekit.CheckPreconditions(cmd).Error(), refusalOf(t, decider(), cmd))
+
+		recorder := &spy{}
+		architecturekittest.Given(recorder, decider()).
+			When(cmd).
+			ThenFailed(architecturekit.ErrPermanent)
+		recorder.expectFailure(t, `not a revision: "abc"`)
+	})
+
 	t.Run("lets the decider decide on every valid declaration", func(t *testing.T) {
 		for label, preconditions := range map[string][]architecturekit.Precondition{
 			"OnStateRead":     {architecturekit.OnStateRead()},
 			"Unconditionally": {architecturekit.Unconditionally()},
+			"OnEventID":       {architecturekit.OnEventID("/account/1", "0")},
 			"Require":         {architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1"))},
 			"Require and OnStateRead": {
 				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1")),

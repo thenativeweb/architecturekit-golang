@@ -421,11 +421,139 @@ func TestBodyOf(t *testing.T) {
 			{label: "a string that is no time", err: bodyErrorOf[time.Time](`"tomorrow"`),
 				text: `the body must be a time such as "2026-10-05T12:00:00Z"`},
 			{label: "a key that is no number", err: bodyErrorOf[map[int]int](`{"x":1}`), text: "the keys of the body must be numbers"},
+			// encoding/json takes null for no value at all, which leaves the value
+			// as it is, so a body of null would come out as the zero value.
+			{label: "null for an object", err: bodyErrorOf[previewRequest](`null`), text: "the body must be an object"},
+			{label: "null with whitespace around it", err: bodyErrorOf[previewRequest](" \t\r\nnull \t\r\n"), text: "the body must be an object"},
+			{label: "null for a pointer to an object", err: bodyErrorOf[*previewRequest](`null`), text: "the body must be an object"},
+			{label: "null for a map", err: bodyErrorOf[map[string]int](`null`), text: "the body must be an object"},
+			{label: "null for a list", err: bodyErrorOf[[]previewItem](`null`), text: "the body must be an array"},
+			{label: "null for a string", err: bodyErrorOf[string](`null`), text: "the body must be a string"},
+			{label: "null for a number", err: bodyErrorOf[int](`null`), text: "the body must be a number"},
+			{label: "null for a slice of bytes", err: bodyErrorOf[[]byte](`null`), text: "the body must be a string"},
+			{label: "null for a time", err: bodyErrorOf[time.Time](`null`), text: "the body must be a string"},
+			{label: "null for a json.Number", err: bodyErrorOf[json.Number](`null`), text: "the body must be a number"},
+			// A type that decodes itself decides itself what null means.
+			{label: "null for a type that decodes itself", err: bodyErrorOf[isbn](`null`), text: errNotAnISBN.Error()},
 		} {
 			t.Run(test.label, func(t *testing.T) {
 				assertMalformed(t, test.err, test.text)
 			})
 		}
+	})
+
+	t.Run("refuses a body of null, and hands back the zero value", func(t *testing.T) {
+		preview, err := httpapi.BodyOf[*previewRequest](bodyRequest("application/json", strings.NewReader(`null`)))
+
+		assertMalformed(t, err, "the body must be an object")
+		assert.Equal(t, http.StatusBadRequest, httpapi.StatusFor(err))
+		assert.Nil(t, preview)
+	})
+
+	t.Run("still takes null as the body for an interface, which takes it for nil", func(t *testing.T) {
+		value, err := httpapi.BodyOf[any](bodyRequest("application/json", strings.NewReader(`null`)))
+
+		require.NoError(t, err)
+		assert.Nil(t, value)
+	})
+
+	t.Run("still takes null for a field, as encoding/json does", func(t *testing.T) {
+		request := bodyRequest("application/json",
+			strings.NewReader(`{"customerId":null,"quantity":null,"delivery":null,"items":null,"isGift":null}`))
+
+		preview, err := httpapi.BodyOf[previewRequest](request)
+
+		require.NoError(t, err)
+		assert.Zero(t, preview)
+	})
+
+	t.Run("tells null from a body that only starts or ends like it", func(t *testing.T) {
+		for _, test := range []struct {
+			body string
+			text string
+		}{
+			{body: `null null`, text: "data after the JSON value"},
+			{body: `null {}`, text: "data after the JSON value"},
+			{body: `nul`, text: "invalid JSON"},
+			{body: `nulll`, text: "data after the JSON value"},
+			{body: `xnull`, text: "invalid JSON"},
+			{body: `"null"`, text: "the body must be an object"},
+			{body: `[null]`, text: "the body must be an object"},
+		} {
+			t.Run(test.body, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[previewRequest](test.body), test.text)
+			})
+		}
+	})
+
+	t.Run("refuses an array whose length differs from that of a Go array, and says how long it has to be", func(t *testing.T) {
+		// encoding/json would fill a shorter array up with zeros, and cut off a
+		// longer one, without a word.
+		type position struct {
+			Pair    [2]int    `json:"pair"`
+			Single  [1]string `json:"single"`
+			Nothing [0]int    `json:"nothing"`
+			Grid    [2][2]int `json:"grid"`
+			Pointer *[2]int   `json:"pointer"`
+			Bytes   [2]byte   `json:"bytes"`
+			Items   []struct {
+				Pair [2]int `json:"pair"`
+			} `json:"items"`
+			ByName map[string][2]int `json:"byName"`
+		}
+
+		for _, test := range []struct {
+			body string
+			text string
+		}{
+			{body: `{"pair":[1]}`, text: `"pair" must have 2 elements`},
+			{body: `{"pair":[]}`, text: `"pair" must have 2 elements`},
+			{body: `{"pair":[1,2,3]}`, text: `"pair" must have 2 elements`},
+			{body: `{"single":[]}`, text: `"single" must have 1 element`},
+			{body: `{"single":["a","b"]}`, text: `"single" must have 1 element`},
+			{body: `{"nothing":[1]}`, text: `"nothing" must have no elements`},
+			{body: `{"grid":[[1,2]]}`, text: `"grid" must have 2 elements`},
+			{body: `{"grid":[[1,2],[3]]}`, text: `"grid.1" must have 2 elements`},
+			{body: `{"pointer":[1,2,3]}`, text: `"pointer" must have 2 elements`},
+			{body: `{"bytes":[1]}`, text: `"bytes" must have 2 elements`},
+			{body: `{"items":[{"pair":[1,2]},{"pair":[1]}]}`, text: `"items.1.pair" must have 2 elements`},
+			{body: `{"byName":{"a":[1,2],"b":[1,2,3]}}`, text: `"byName.b" must have 2 elements`},
+			// An item of the wrong kind is named, unless the length is wrong as
+			// well, which encoding/json reports first.
+			{body: `{"pair":[1,"two"]}`, text: `"pair.1" must be a number`},
+			{body: `{"pair":["one"]}`, text: `"pair" must have 2 elements`},
+			{body: `{"pair":{}}`, text: `"pair" must be an array`},
+		} {
+			t.Run(test.body, func(t *testing.T) {
+				assertMalformed(t, bodyErrorOf[position](test.body), test.text)
+			})
+		}
+
+		t.Run("as the body", func(t *testing.T) {
+			assertMalformed(t, bodyErrorOf[[2]int](`[1]`), "the body must have 2 elements")
+		})
+
+		t.Run("and keeps the error of the decoder inspectable", func(t *testing.T) {
+			mismatch, isMismatch := errors.AsType[*json.UnmarshalTypeError](bodyErrorOf[position](`{"pair":[1]}`))
+			require.True(t, isMismatch, "errors.As has to find the error of decoding")
+			assert.Equal(t, "pair", mismatch.Field)
+		})
+
+		t.Run("but takes an array of the same length, and null", func(t *testing.T) {
+			request := bodyRequest("application/json", strings.NewReader(
+				`{"pair":[1,2],"single":["a"],"nothing":[],"grid":[[1,2],[3,4]],"pointer":null,"bytes":[1,2],"items":[{"pair":[5,6]}],"byName":{"a":[7,8]}}`))
+
+			value, err := httpapi.BodyOf[position](request)
+
+			require.NoError(t, err)
+			assert.Equal(t, [2]int{1, 2}, value.Pair)
+			assert.Equal(t, [1]string{"a"}, value.Single)
+			assert.Equal(t, [2][2]int{{1, 2}, {3, 4}}, value.Grid)
+			assert.Nil(t, value.Pointer)
+			assert.Equal(t, [2]byte{1, 2}, value.Bytes)
+			assert.Equal(t, [2]int{5, 6}, value.Items[0].Pair)
+			assert.Equal(t, map[string][2]int{"a": {7, 8}}, value.ByName)
+		})
 	})
 
 	t.Run("says which number does not fit its type", func(t *testing.T) {

@@ -37,7 +37,7 @@ type waitedView struct {
 	isWaitedFor *atomic.Bool
 }
 
-func (waitedView) Revision() string { return "4" }
+func (waitedView) Revision(context.Context) (string, error) { return "4", nil }
 
 func (view waitedView) WaitFor(context.Context, string) error {
 	view.isWaitedFor.Store(true)
@@ -45,12 +45,15 @@ func (view waitedView) WaitFor(context.Context, string) error {
 	return nil
 }
 
-// queryKinds are the ways that Query wires a query: as it is, and revisioned,
-// with a view that records whether anything waited for it.
+// queryKinds are the ways that Query wires a query: as it is, revisioned, and
+// awaiting, with a view that records whether anything waited for it.
 var queryKinds = map[string]func(isWaitedFor *atomic.Bool) []httpapi.QueryOption{
 	"a query": func(*atomic.Bool) []httpapi.QueryOption { return nil },
 	"a revisioned query": func(isWaitedFor *atomic.Bool) []httpapi.QueryOption {
 		return []httpapi.QueryOption{httpapi.Revisioned(waitedView{isWaitedFor: isWaitedFor}, time.Second)}
+	},
+	"an awaiting query": func(isWaitedFor *atomic.Bool) []httpapi.QueryOption {
+		return []httpapi.QueryOption{httpapi.Awaiting(waitedView{isWaitedFor: isWaitedFor}, time.Second)}
 	},
 }
 
@@ -184,6 +187,11 @@ var bodyFailures = []struct {
 		label: "that is no JSON", contentType: "application/json", body: func() io.Reader { return strings.NewReader("not json") },
 		category: httpapi.ErrMalformed, status: http.StatusBadRequest,
 		message: "malformed request: invalid JSON",
+	},
+	{
+		label: "that is null", contentType: "application/json", body: func() io.Reader { return strings.NewReader("null") },
+		category: httpapi.ErrMalformed, status: http.StatusBadRequest,
+		message: "malformed request: the body must be an object",
 	},
 	{
 		label: "with an unknown field", contentType: "application/json", body: func() io.Reader { return strings.NewReader(`{"limt":2}`) },

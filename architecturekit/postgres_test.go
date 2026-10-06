@@ -54,7 +54,7 @@ func (p *incrementTable) Begin(ctx context.Context) (architecturekit.Tx, error) 
 	return &incrementTableTx{
 		owner: p,
 		tx:    tx,
-		TypedProjection: architecturekit.NewProjection().
+		TypedProjection: architecturekit.NewTypedProjection().
 			On(func(ctx context.Context, event architecturekit.Envelope[incremented]) error {
 				_, err := tx.ExecContext(ctx, `INSERT INTO increments (event_id, by) VALUES ($1, $2)`,
 					event.ID, event.Data.By)

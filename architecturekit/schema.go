@@ -132,6 +132,22 @@ func DeriveSchema[T any]() map[string]any {
 	return schema
 }
 
+// SchemaOf returns the schema of the event type TEvent for registration with
+// the database (see RegisterSchemas), by the rule that Evolve and Ignore
+// apply: the own schema of the event, if it has a Schema function, and the
+// derived one otherwise (see DeriveSchema). Use it for an event that no state
+// has a rule for, such as one that only Write writes, so that the database
+// checks its events as well.
+//
+// The rule is the one of Evolve, so SchemaOf refuses what Evolve refuses: an
+// event type that has its Schema function only from an embedded field, one
+// whose schema can not be derived, a pointer as the event type, such as
+// *BookBorrowed instead of BookBorrowed, and an interface, such as Event. These
+// are programming errors, so SchemaOf panics, naming the mistake.
+func SchemaOf[TEvent Event]() EventSchema {
+	return schemaFor[TEvent](eventTypeOf[TEvent]("SchemaOf"))
+}
+
 // eventSchemaOf returns the schema of an event type: its own, if it has a
 // Schema function, and the derived one otherwise. It refuses an event type
 // that has its Schema function only from an embedded field.

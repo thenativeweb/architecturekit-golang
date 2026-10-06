@@ -86,11 +86,11 @@ func Named(name string) ProjectionOption {
 	}
 }
 
-func projectionSettingsOf(options []ProjectionOption) projectionSettings {
+// projectionSettingsOf applies the options of the function of the kit with
+// the given name, and panics, naming the function, for a nil option.
+func projectionSettingsOf(function string, options []ProjectionOption) projectionSettings {
 	var settings projectionSettings
-	for _, option := range options {
-		option(&settings)
-	}
+	applyOptions(function, &settings, options)
 
 	return settings
 }
