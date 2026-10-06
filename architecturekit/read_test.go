@@ -59,7 +59,7 @@ func writeIDs(t *testing.T, subject string, events ...architecturekit.Event) []s
 		}
 	}
 
-	written, err := rawClient(t).WriteEvents(candidates, nil)
+	written, err := rawClient(t).WriteEvents(context.Background(), candidates, nil)
 	require.NoError(t, err, "failed to write to %q", subject)
 
 	return idsOf(written)

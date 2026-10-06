@@ -57,7 +57,7 @@ func TestIgnore(t *testing.T) {
 
 	t.Run("loads a subject with an ignored event", func(t *testing.T) {
 		subject := subjectFor(t)
-		_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{
+		_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{
 			{Source: "https://thenativeweb.io", Subject: subject, Type: (incremented{}).EventType(), Data: incremented{By: 5}},
 			{Source: "https://thenativeweb.io", Subject: subject, Type: (reset{}).EventType(), Data: reset{}},
 			{Source: "https://thenativeweb.io", Subject: subject, Type: (incremented{}).EventType(), Data: incremented{By: 1}},

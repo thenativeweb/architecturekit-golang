@@ -173,7 +173,7 @@ func TestSharedDatabase(t *testing.T) {
 
 		client, err := eventsourcingdb.NewClient(database.URL, database.APIToken)
 		require.NoError(t, err)
-		assert.NoError(t, client.Ping())
+		assert.NoError(t, client.Ping(context.Background()))
 	})
 
 	t.Run("hands its options to the store", func(t *testing.T) {
@@ -218,7 +218,7 @@ func TestIsolatedDatabase(t *testing.T) {
 		})
 
 		require.NotNil(t, isolated, "the test did not get a database")
-		assert.Error(t, isolated.Client().Ping(), "the database has to be stopped once the test is over")
+		assert.Error(t, isolated.Client().Ping(context.Background()), "the database has to be stopped once the test is over")
 	})
 
 	t.Run("is what IsolatedStore uses with the options it is given", func(t *testing.T) {

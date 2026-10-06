@@ -849,7 +849,7 @@ if err != nil {
 }
 ```
 
-`RegisterSchemas` accepts the schemas of several states at once. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code. If the context ends first, it returns the error of the context. Since the client registers a schema without a context, a registration that has begun is finished, but none begins once the context has ended.
+`RegisterSchemas` accepts the schemas of several states at once. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code. If the context ends first, it returns the error of the context. A registration that has begun is finished, since the context no longer stops it, but none begins once the context has ended.
 
 An event that no state has a rule for, such as `InventoryTaken`, which only `Write` writes (see [Writing to Several Subjects](#writing-to-several-subjects)), is part of no `Schemas`. To register its schema as well, call the `SchemaOf` function with the type of the event. It returns an `EventSchema` by the rule that `Evolve` applies, the event's own schema or the derived one. Since `RegisterSchemas` takes slices of them, hand it over in a slice of its own:
 

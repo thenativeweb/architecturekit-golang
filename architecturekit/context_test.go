@@ -2,9 +2,12 @@ package architecturekit_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -269,5 +272,112 @@ func TestADeadline(t *testing.T) {
 
 		assert.ErrorIs(t, err, context.DeadlineExceeded)
 		assert.Less(t, time.Since(started), 2*time.Second, "the deadline did not end the request")
+	})
+}
+
+// answerAfterEnding answers a write or the registration of a schema with the
+// given body, but only after it has ended the context of the caller, and has
+// given a client that stops at the end of the context the time to go away.
+func answerAfterEnding(cancel context.CancelFunc, body string) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		cancel()
+
+		select {
+		case <-request.Context().Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+
+		_, _ = fmt.Fprint(writer, body)
+	}
+}
+
+func TestAWriteThatHasBegun(t *testing.T) {
+	// The database may store the events as soon as the request has left, so the
+	// end of the context does not stop a write that has begun, and its result
+	// counts. The same goes for the registration of a schema.
+	t.Run("is finished by Execute, although the context ends", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		store := architecturekit.NewStore(
+			writingDatabase(t, "/api/v1/write-events", answerAfterEnding(cancel, writtenAnswer)), "https://thenativeweb.io")
+
+		written, err := architecturekit.Execute(ctx, store, counterDecider(), increment{subject: "/test", By: 1})
+
+		require.NoError(t, err, "the write had begun, so its result counts")
+		assert.Len(t, written, 1)
+		assert.ErrorIs(t, ctx.Err(), context.Canceled, "the context has to end while writing")
+	})
+
+	t.Run("is finished by Write, although the context ends", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		store := architecturekit.NewStore(
+			writingDatabase(t, "/api/v1/write-events", answerAfterEnding(cancel, writtenAnswer)), "https://thenativeweb.io")
+
+		written, err := architecturekit.Write(ctx, store,
+			[]architecturekit.EventOn{{Subject: "/test", Event: incremented{By: 1}}}, architecturekit.Unconditionally())
+
+		require.NoError(t, err, "the write had begun, so its result counts")
+		assert.Len(t, written, 1)
+		assert.ErrorIs(t, ctx.Err(), context.Canceled, "the context has to end while writing")
+	})
+
+	t.Run("is finished by RegisterSchemas, although the context ends", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		store := architecturekit.NewStore(
+			writingDatabase(t, "/api/v1/register-event-schema", answerAfterEnding(cancel, "")), "https://thenativeweb.io")
+
+		err := architecturekit.RegisterSchemas(ctx, store, []architecturekit.EventSchema{architecturekit.SchemaOf[incremented]()})
+
+		require.NoError(t, err, "the registration had begun, so its result counts")
+		assert.ErrorIs(t, ctx.Err(), context.Canceled, "the context has to end while registering")
+	})
+
+	t.Run("carries the values of the context, such as a trace", func(t *testing.T) {
+		// A trace that follows the requests of a call sees the write and the
+		// registration as well, not only the reads before them.
+		calls := []struct {
+			name     string
+			path     string
+			answer   string
+			requests int32
+			call     func(ctx context.Context, store *architecturekit.Store) error
+		}{
+			{"Execute, which reads the state first", "/api/v1/write-events", writtenAnswer, 2,
+				func(ctx context.Context, store *architecturekit.Store) error {
+					_, err := architecturekit.Execute(ctx, store, counterDecider(), increment{subject: "/test", By: 1})
+					return err
+				}},
+			{"Write", "/api/v1/write-events", writtenAnswer, 1,
+				func(ctx context.Context, store *architecturekit.Store) error {
+					_, err := architecturekit.Write(ctx, store,
+						[]architecturekit.EventOn{{Subject: "/test", Event: incremented{By: 1}}}, architecturekit.Unconditionally())
+					return err
+				}},
+			{"RegisterSchemas, which reads the registered schemas first", "/api/v1/register-event-schema", "", 2,
+				func(ctx context.Context, store *architecturekit.Store) error {
+					return architecturekit.RegisterSchemas(ctx, store,
+						[]architecturekit.EventSchema{architecturekit.SchemaOf[incremented]()})
+				}},
+		}
+
+		for _, call := range calls {
+			t.Run(call.name, func(t *testing.T) {
+				store := architecturekit.NewStore(
+					writingDatabase(t, call.path, func(writer http.ResponseWriter, _ *http.Request) {
+						_, _ = fmt.Fprint(writer, call.answer)
+					}), "https://thenativeweb.io")
+
+				var requests atomic.Int32
+				ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+					WroteRequest: func(httptrace.WroteRequestInfo) { requests.Add(1) },
+				})
+
+				require.NoError(t, call.call(ctx, store))
+				assert.Equal(t, call.requests, requests.Load(), "the trace of the context has to see every request")
+			})
+		}
 	})
 }

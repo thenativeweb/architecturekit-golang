@@ -68,13 +68,14 @@ func Write(
 		}
 	}
 
-	// The client writes without a context, so a context that has ended by
-	// now must not lead to a write anyway.
+	// The end of the context no longer stops a write that has begun (see
+	// Store.write), so a context that has ended by now must not lead to a
+	// write.
 	if ctx.Err() != nil {
 		return nil, contextEnded(ctx, fmt.Sprintf("writing %d events, the first to %q", len(events), events[0].Subject))
 	}
 
-	written, err := store.client.WriteEvents(candidates, resolved)
+	written, err := store.client.WriteEvents(context.WithoutCancel(ctx), candidates, resolved)
 	if err != nil {
 		return nil, databaseFailure(err, fmt.Sprintf("writing %d events, the first to %q", len(events), events[0].Subject))
 	}

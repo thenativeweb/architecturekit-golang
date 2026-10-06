@@ -301,7 +301,7 @@ func TestEncodingEvents(t *testing.T) {
 		subject := subjectFor(t)
 		events := encodableEvents()
 
-		_, err := client.WriteEvents(candidatesOf(subject, events), nil)
+		_, err := client.WriteEvents(context.Background(), candidatesOf(subject, events), nil)
 		require.NoError(t, err)
 
 		_, err = architecturekit.Execute(context.Background(), store,
@@ -337,7 +337,7 @@ func TestEncodingEvents(t *testing.T) {
 		byClient, byExecute, byWrite := subjectFor(t)+"/client", subjectFor(t)+"/execute", subjectFor(t)+"/write"
 		events := encodableEvents()
 
-		_, err := rawClient(t).WriteEvents(candidatesOf(byClient, events), nil)
+		_, err := rawClient(t).WriteEvents(context.Background(), candidatesOf(byClient, events), nil)
 		require.NoError(t, err)
 
 		_, err = architecturekit.Execute(context.Background(), store,

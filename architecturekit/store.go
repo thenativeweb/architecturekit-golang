@@ -489,12 +489,17 @@ func (s *Store) candidateFor(subject string, event Event) (eventsourcingdb.Event
 
 // write appends the candidates to a subject under the given preconditions and
 // returns them as the database recorded them, including their IDs.
+//
+// The client gets the context without its end, so that a write that has begun
+// is finished, whatever happens to the context of the caller: its values, such
+// as a trace, reach the request, but its end does not stop it.
 func (s *Store) write(
+	ctx context.Context,
 	subject string,
 	candidates []eventsourcingdb.EventCandidate,
 	preconditions []eventsourcingdb.Precondition,
 ) ([]eventsourcingdb.Event, error) {
-	written, err := s.client.WriteEvents(candidates, preconditions)
+	written, err := s.client.WriteEvents(context.WithoutCancel(ctx), candidates, preconditions)
 	if err != nil {
 		return nil, databaseFailure(err, fmt.Sprintf("writing %q", subject))
 	}
@@ -512,8 +517,8 @@ func (s *Store) write(
 // an event, introduce a new event type and an upcaster instead.
 //
 // If the context ends first, RegisterSchemas fails with the context's error.
-// The client registers a schema without a context, so a registration that has
-// begun is finished, but none begins once the context has ended.
+// A registration that has begun is finished, since the context no longer
+// stops it, but none begins once the context has ended.
 func RegisterSchemas(ctx context.Context, store *Store, schemas ...[]EventSchema) error {
 	given, err := collectSchemas(schemas)
 	if err != nil {
@@ -533,7 +538,7 @@ func RegisterSchemas(ctx context.Context, store *Store, schemas ...[]EventSchema
 				return contextEnded(ctx, fmt.Sprintf("registering schema for %q", schema.EventType))
 			}
 
-			refusal := store.client.RegisterEventSchema(schema.EventType, schema.Schema)
+			refusal := store.client.RegisterEventSchema(context.WithoutCancel(ctx), schema.EventType, schema.Schema)
 			if refusal == nil {
 				continue
 			}
@@ -755,13 +760,14 @@ func executeOnce[TCommand Command, TState any](
 		}
 	}
 
-	// The client writes without a context, so a context that has ended by now,
-	// for example while deciding, must not lead to a write anyway.
+	// The end of the context no longer stops a write that has begun (see
+	// Store.write), so a context that has ended by now, for example while
+	// deciding, must not lead to a write.
 	if ctx.Err() != nil {
 		return nil, contextEnded(ctx, fmt.Sprintf("writing to %q", subject))
 	}
 
-	return store.write(subject, candidates, resolvePreconditions(subject, declared, lastEventID))
+	return store.write(ctx, subject, candidates, resolvePreconditions(subject, declared, lastEventID))
 }
 
 // checkNotNil fails permanently if one of the events a decider returned for a

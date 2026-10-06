@@ -145,9 +145,10 @@ func schemaRefusal(eventType string, refusal error) error {
 // A failure of the client that errors.Is takes for context.Canceled or
 // context.DeadlineExceeded is kept as text only, with the same message. Both
 // mean that the context ended (see contextEnded), which a read checks before
-// it gets here, and which a write can not run into, since the client writes
-// without a context. So such a failure comes from the network, as when
-// connecting to the database times out, which the standard library reports as
+// it gets here, and which neither a write nor the registration of a schema
+// can run into, since the client gets their context without its end (see
+// Store.write). So such a failure comes from the network, as when connecting
+// to the database times out, which the standard library reports as
 // context.DeadlineExceeded. Wrapped, it would make a failure of the database
 // look like the end of the context, and httpapi.StatusFor, which asks for the
 // end of the context before it asks for ErrPermanent, would answer a

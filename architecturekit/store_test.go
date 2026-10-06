@@ -163,7 +163,7 @@ func TestExecute(t *testing.T) {
 		store := requireStore(t)
 		subject := subjectFor(t)
 
-		_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+		_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 			Source:  "https://thenativeweb.io",
 			Subject: subject,
 			Type:    "io.thenativeweb.test.unexpected",
@@ -359,7 +359,7 @@ func TestExecute(t *testing.T) {
 
 		// The annotated type has no schema, so the database lets a mismatching
 		// field type through, and the rule trips over it when reading.
-		_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+		_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 			Source:  "https://thenativeweb.io",
 			Subject: subject,
 			Type:    (annotated{}).EventType(),
@@ -396,7 +396,7 @@ func TestExecute(t *testing.T) {
 		subject := subjectFor(t)
 
 		// An event of the old type is in the stream, and its upcaster refuses.
-		_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+		_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 			Source:  "https://thenativeweb.io",
 			Subject: subject,
 			Type:    "io.thenativeweb.test.outdated",
@@ -579,7 +579,7 @@ func TestRegisterSchemas(t *testing.T) {
 		// event type that further event types follow, EventSourcingDB 1.2.0 stops
 		// answering writes. RegisterSchemas must not run into that.
 		for _, name := range []string{"a", "b", "c", "d"} {
-			_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+			_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 				Source:  "https://thenativeweb.io",
 				Subject: subject,
 				Type:    "io.thenativeweb.test.writable." + name,
@@ -598,7 +598,7 @@ func TestRegisterSchemas(t *testing.T) {
 
 		written := make(chan error, 1)
 		go func() {
-			_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+			_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 				Source:  "https://thenativeweb.io",
 				Subject: subject,
 				Type:    "io.thenativeweb.test.writable.e",
@@ -721,7 +721,7 @@ func TestRegisterSchemas(t *testing.T) {
 		store := requireStore(t)
 		eventType := "io.thenativeweb.test.unmatched"
 
-		_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+		_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 			Source:  "https://thenativeweb.io",
 			Subject: subjectFor(t),
 			Type:    eventType,

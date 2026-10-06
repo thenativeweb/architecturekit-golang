@@ -162,6 +162,6 @@ func writeRaw(t *testing.T, subject string, events ...architecturekit.Event) {
 		}
 	}
 
-	_, err := rawClient(t).WriteEvents(candidates, nil)
+	_, err := rawClient(t).WriteEvents(context.Background(), candidates, nil)
 	require.NoError(t, err)
 }

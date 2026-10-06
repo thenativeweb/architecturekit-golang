@@ -179,7 +179,7 @@ func TestVerification(t *testing.T) {
 		store := verifyingStore(t, architecturekit.WithSignatureVerification(databaseVerificationKey(t)))
 		subject := subjectFor(t)
 
-		_, err := rawClient(t).WriteEvents([]eventsourcingdb.EventCandidate{{
+		_, err := rawClient(t).WriteEvents(context.Background(), []eventsourcingdb.EventCandidate{{
 			Source:  "https://thenativeweb.io",
 			Subject: subject,
 			Type:    "io.thenativeweb.test.outdated",
