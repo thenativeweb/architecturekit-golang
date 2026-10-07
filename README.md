@@ -495,7 +495,7 @@ func (c ReturnBook) Preconditions() []architecturekit.Precondition {
 }
 ```
 
-*Note that `OnPopulatedSubject` needs EventSourcingDB 1.2 or later, which added the `isSubjectPopulated` precondition. An older database refuses the write with `400 Bad Request`, so that `Execute` fails with an error of the category `ErrPermanent`.*
+*Note that `OnPopulatedSubject` needs EventSourcingDB 1.2 or later, which added the `isSubjectPopulated` precondition. An older database refuses the write with `400 Bad Request`, so that `Execute` and `Write` fail with an error of the category `ErrPermanent`.*
 
 #### Enforcing Rules Across Subjects
 
