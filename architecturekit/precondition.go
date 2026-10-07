@@ -55,6 +55,10 @@ func OnPristineSubject(subject string) Precondition {
 // OnPopulatedSubject lets the events be written only if the subject has events
 // already, for a command that acts on something that has to exist. It is the
 // same as Require with eventsourcingdb.NewIsSubjectPopulatedPrecondition.
+//
+// It needs EventSourcingDB 1.2 or later, which added the isSubjectPopulated
+// precondition. An older database refuses the write with 400, so that Execute
+// and Write fail with an error of the category ErrPermanent.
 func OnPopulatedSubject(subject string) Precondition {
 	return Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition(subject))
 }
