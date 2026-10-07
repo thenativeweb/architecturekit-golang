@@ -24,7 +24,7 @@ func assertAnsweredAsInternalFailure(t *testing.T, response *httptest.ResponseRe
 
 	assert.Equal(t, http.StatusInternalServerError, response.Code, "503 would invite trying again")
 	assert.JSONEq(t, `{"message": "internal server error"}`, response.Body.String(),
-		"nothing of the request has run, so it must not be told that it may have succeeded")
+		"the command or the query has not run, so it must not be told that it may have succeeded")
 	assert.Equal(t, 1, strings.Count(logs, "\n"), "want exactly one entry")
 	assert.Contains(t, logs, `level=ERROR msg="httpapi: internal failure"`)
 	assert.Contains(t, logs, detail, "the details have to reach the log")

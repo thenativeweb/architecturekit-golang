@@ -981,7 +981,7 @@ func TestUserOf(t *testing.T) {
 
 // assertKept asserts that an error of userFrom, ToCommand, or ToQuery came
 // back as it is. Only one of ErrOutcomeUnknown or ErrNotCaughtUp comes back
-// marked, since nothing of the request has run, with the same text, and
+// marked, since the command or the query has not run, with the same text, and
 // unwrapping to the error.
 func assertKept(t *testing.T, want, got error) {
 	t.Helper()

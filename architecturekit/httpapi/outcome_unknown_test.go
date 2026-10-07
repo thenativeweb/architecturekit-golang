@@ -73,7 +73,10 @@ func TestOutcomeUnknownAfterTheCommand(t *testing.T) {
 		})
 	}
 
-	t.Run("Handle, Ask, and UserOf return it unmarked once the request has begun, so that a handler of your own answers it as an unknown outcome", func(t *testing.T) {
+	// UserOf only determines the user, so every error it returns comes before
+	// the command or the query, and it has no case here (see
+	// TestBeforeTheRequestHasRun).
+	t.Run("Handle and Ask return it unmarked from the command or the query, so that a handler of your own answers it as an unknown outcome", func(t *testing.T) {
 		for name, returnError := range map[string]func(t *testing.T) error{
 			"Handle": func(t *testing.T) error {
 				api := httpapi.NewAPI(hangingUpStore(t), userFrom)
@@ -90,18 +93,6 @@ func TestOutcomeUnknownAfterTheCommand(t *testing.T) {
 					func(context.Context, listNotes) ([]noteResponse, error) { return nil, failure })
 
 				return err
-			},
-			// A handler of your own that has determined the user writes on its
-			// own, so the write has begun.
-			"UserOf": func(t *testing.T) error {
-				api := httpapi.NewAPI(hangingUpStore(t), userFrom)
-				request := httptest.NewRequest(http.MethodPost, "/sessions", nil)
-				request.Header.Set("X-User", "golo")
-
-				_, err := httpapi.UserOf(request, api)
-				require.NoError(t, err)
-
-				return outcomeUnknown(t)
 			},
 		} {
 			for answerer, answer := range answerers {

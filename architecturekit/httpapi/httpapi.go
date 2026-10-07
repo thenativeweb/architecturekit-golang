@@ -195,8 +195,8 @@ func (api *API[TUser]) explain(r *http.Request) func(status int, err error) stri
 		// own as well, such as ErrForbidden, keeps that status (see StatusFor),
 		// and is explained as that status is. It holds only once the command
 		// has begun, too: if the error came from determining the user, or from
-		// turning the request into a command or a query, nothing of the
-		// request has run, so it is answered as any other internal failure
+		// turning the request into a command or a query, the command or the
+		// query has not run, so it is answered as any other internal failure
 		// below.
 		case status == http.StatusInternalServerError && errors.Is(err, architecturekit.ErrOutcomeUnknown) &&
 			!isBeforeRunning(err):
@@ -318,7 +318,7 @@ func (api *API[TUser]) loggerOrDefault() *slog.Logger {
 // architecturekit.ErrNotCaughtUp, so that they keep their status. The last two
 // come back marked, with the same text, so that they are answered as
 // "internal server error" rather than as a request that may have succeeded,
-// or that has, since nothing of the request has run yet. errors.Is and
+// or that has, since neither a command nor a query has run yet. errors.Is and
 // errors.As still find them.
 // If the session store is down, for example, userFrom says so with
 // architecturekit.ErrTransient, which is answered with 503 and logged, rather
@@ -689,10 +689,12 @@ const statusClientClosedRequest = 499
 // error of a 401, a 409, a 499, or a status of 500 and above may name
 // internals. For a write whose outcome is unknown, tell the caller that the
 // request may have succeeded, and for a view that did not catch up, that it
-// has succeeded. Either holds only once the command has begun: an error of
-// determining the user, or of turning the request into a command or a query,
-// comes before anything of the request has run, so the caller is told no
-// more than for any other internal failure.
+// has succeeded. Respond, RespondResult, and RespondError say "internal server
+// error" instead for such an error that came from determining the user, or
+// from turning the request into a command or a query, since the command or
+// the query has not run then. Only they can tell it apart, by the mark that
+// Handle, Ask, and UserOf give it, so an answer in a format of your own
+// answers both kinds the same way, or answers failures with RespondError.
 func StatusFor(err error) int {
 	switch {
 	case err == nil:
@@ -770,7 +772,7 @@ func StatusFor(err error) int {
 //     its result is not visible yet", so that the caller does not simply try
 //     again. Either says "internal server error" all the same if Handle,
 //     Ask, or UserOf returned it from before the command or the query ran,
-//     since nothing of the request has run then.
+//     since the command or the query has not run then.
 //
 // Each of them is logged through the logger of the API, with the route of the
 // request (see WithLogger).
@@ -912,10 +914,10 @@ func hasCategory(err error) bool {
 // notRun is an error of architecturekit.ErrOutcomeUnknown or
 // architecturekit.ErrNotCaughtUp that came before the command ran or the query
 // was answered: from determining the user, or from turning the request into a
-// command or a query, such as one that writes or waits for a write of its own.
-// Nothing of the request has run then, so explain tells the caller neither
-// that it may have succeeded, as it does for ErrOutcomeUnknown after a
-// command, nor that it has, as it does for ErrNotCaughtUp.
+// command or a query. The command or the query has not run then, so explain
+// tells the caller neither that the request may have succeeded, as it does for
+// ErrOutcomeUnknown after a command, nor that it has, as it does for
+// ErrNotCaughtUp.
 //
 // It has the text of the error, and unwraps to it, so that StatusFor, errors.Is
 // and errors.As treat it as the error itself.
