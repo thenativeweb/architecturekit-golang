@@ -247,13 +247,15 @@ var ErrNotCaughtUp = errors.New("not caught up")
 // Write returned, for a step on the server that builds on what was just
 // written, such as one that reads from the view what a command has changed:
 //
-//	written, err := architecturekit.Execute(ctx, store, borrowBook, cmd)
+//	writtenEvents, err := architecturekit.Execute(ctx, store, borrowBook, cmd)
 //	if err != nil {
-//	  return err
+//	  // ...
 //	}
 //
-//	if err := architecturekit.WaitForWritten(ctx, catalog, written, 5*time.Second); err != nil {
-//	  return err
+//	err = architecturekit.WaitForWritten(ctx, catalog, writtenEvents, 5*time.Second)
+//	if errors.Is(err, architecturekit.ErrNotCaughtUp) {
+//	  // The command has succeeded, so answer with success all the same, and with
+//	  // the revision, for which the caller can wait with Wait-For-Revision.
 //	}
 //
 // It waits with WaitFor for RevisionOf the events, for at most timeout, and
