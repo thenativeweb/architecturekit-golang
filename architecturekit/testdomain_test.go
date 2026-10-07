@@ -2,6 +2,8 @@ package architecturekit_test
 
 import (
 	"context"
+	"crypto/rand"
+	"sync"
 	"testing"
 
 	"github.com/thenativeweb/architecturekit-golang/architecturekit"
@@ -125,11 +127,26 @@ func counterDecider() architecturekit.Decider[increment, counter] {
 		})
 }
 
+// subjectTokens holds a token for every run of a test, by its *testing.T, so
+// that subjectFor tells the runs of a test apart (see subjectFor).
+var subjectTokens sync.Map
+
 // subjectFor gives every test its own subject, so that tests do not interfere
-// with each other.
+// with each other. The database is shared by all tests of the process, also by
+// the runs of a test that runs several times, as with -count, which have the
+// same name. So the subject holds a token of the run as well, which is the same
+// for every call within the run, and made only of characters a subject may
+// contain.
 func subjectFor(t *testing.T) string {
 	t.Helper()
-	return "/test/" + t.Name()
+
+	token, isKnown := subjectTokens.Load(t)
+	if !isKnown {
+		token, _ = subjectTokens.LoadOrStore(t, rand.Text())
+		t.Cleanup(func() { subjectTokens.Delete(t) })
+	}
+
+	return "/test/" + token.(string) + "/" + t.Name()
 }
 
 // --- types that target specific failure paths ---

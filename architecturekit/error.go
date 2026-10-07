@@ -11,7 +11,9 @@ import (
 // matching concrete errors, so that new failures do not break existing code.
 // An error of the application's own code, such as one a decider returns,
 // passes through unchanged, unless it is wrapped with a category. A write
-// whose outcome is unknown belongs to no category (see ErrOutcomeUnknown).
+// whose outcome is unknown belongs to no category (see ErrOutcomeUnknown), and
+// neither does a view that did not catch up with a write that has succeeded
+// (see ErrNotCaughtUp).
 //
 // A failure of the database wraps the error of the client after its category,
 // or after ErrOutcomeUnknown, so that errors.As finds an

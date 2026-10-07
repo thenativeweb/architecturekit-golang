@@ -167,8 +167,11 @@ func answerRevisioned[TUser any, TRequest any, TQuery any, TResult any](
 			return
 		}
 
-		// The revision is read once, after waiting, so that the answer and its
-		// tag describe the same state even if the projection moves on.
+		// The revision is read once, after waiting, and before the answer, so if
+		// the projection moves on in between, the answer may be newer than its
+		// tag. The tag can only understate it then, which is harmless: a caller
+		// that sends it again gets a full answer once more, never 304 for a state
+		// it has not seen.
 		revision, err := settings.view.Revision(r.Context())
 		if err != nil {
 			respondResult(w, struct{}{}, err, explain)
@@ -191,7 +194,7 @@ func writeRevision(w http.ResponseWriter, revision, tag string) {
 		return
 	}
 
-	// Without no-cache a browser is free to decide for itself how long the
+	// Without no-cache a cache is free to decide for itself how long the
 	// answer stays good, and it will not ask again until it has. The tag still
 	// saves the body when nothing has changed; this only insists that it asks.
 	// It replaces no-store, which every answer without a revision carries (see

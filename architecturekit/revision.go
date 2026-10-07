@@ -44,6 +44,12 @@ type Revisioned interface {
 
 // RevisionSink is what a view implements to record how far its projection has
 // come. InMemoryView does.
+//
+// It is meant for a view that keeps no transaction, since Tracking records
+// the revision once the projection has applied the event, apart from its
+// data. Where data and revision have to become durable together, as in a view
+// in a database, the revision belongs inside the transaction, so the
+// projection has to write it itself (see Tracking).
 type RevisionSink interface {
 	// Seen records an event as processed. Events may arrive more than once and
 	// out of order after a restart, so an older ID never moves the revision
@@ -226,17 +232,30 @@ func RevisionOf(events []eventsourcingdb.Event) string {
 	return highest
 }
 
+// ErrNotCaughtUp means that a view did not catch up with written events (see
+// WaitForWritten), because the time ran out, the context ended, or the view
+// could not be asked. The events were written, so the write has succeeded,
+// and only the view lags behind.
+//
+// It belongs to no category. It is not ErrTransient, since trying the write
+// again would store its events twice, and not ErrPermanent, since the view may
+// still catch up. So it is usually answered as the success that the write is,
+// with the revision of the events, for which the caller can wait itself.
+var ErrNotCaughtUp = errors.New("not caught up")
+
 // WaitForWritten waits until the view has seen the events that Execute or
 // Write returned, for a step on the server that builds on what was just
 // written, such as one that reads from the view what a command has changed:
 //
-//	written, err := architecturekit.Execute(ctx, store, borrowBook, cmd)
+//	writtenEvents, err := architecturekit.Execute(ctx, store, borrowBook, cmd)
 //	if err != nil {
-//	  return err
+//	  // ...
 //	}
 //
-//	if err := architecturekit.WaitForWritten(ctx, catalog, written, 5*time.Second); err != nil {
-//	  return err
+//	err = architecturekit.WaitForWritten(ctx, catalog, writtenEvents, 5*time.Second)
+//	if errors.Is(err, architecturekit.ErrNotCaughtUp) {
+//	  // The command has succeeded, so answer with success all the same, and with
+//	  // the revision, for which the caller can wait with Wait-For-Revision.
 //	}
 //
 // It waits with WaitFor for RevisionOf the events, for at most timeout, and
@@ -244,11 +263,26 @@ func RevisionOf(events []eventsourcingdb.Event) string {
 // written, since there is nothing to wait for then.
 //
 // Unlike Await of httpapi, which answers a caller with what the view holds,
-// running out of time is an error, since the step needs what was written: if
-// timeout runs out while ctx has not ended, it returns an error of the
-// category ErrTransient, which says so, since the view may still catch up. If
-// ctx ends first, it returns the error of ctx, and any other error of the
-// view as it is.
+// running out of time is an error, since the step needs what was written.
+// Every error it returns wraps ErrNotCaughtUp, since the events were written
+// in any case, and says why the view has not caught up, keeping the cause for
+// errors.Is and errors.As:
+//
+//   - if timeout runs out while ctx has not ended, the error says so, as in
+//     "not caught up: the events were written, but the view did not catch up
+//     within 5s";
+//   - if ctx ends first, it wraps the error of ctx, as in "not caught up: the
+//     events were written, but waiting for the view ended: context canceled";
+//   - if the view fails otherwise, it wraps the error of the view, as in "not
+//     caught up: the events were written, but the view could not be asked:
+//     ...".
+//
+// The write has succeeded, and trying it again would store the events twice,
+// so check for ErrNotCaughtUp before a category, which the cause may belong
+// to, such as ErrTransient of a view in a database, as StatusFor of httpapi
+// does. A handler that waits after a command usually answers ErrNotCaughtUp
+// with success, and with the revision of the events, for which the caller can
+// wait itself.
 //
 // A nil view, including a nil pointer, is a programming error, and so is a
 // timeout that is not positive, since a view that has to catch up with a
@@ -276,10 +310,10 @@ func WaitForWritten(ctx context.Context, view Revisioned, written []eventsourcin
 	case err == nil:
 		return nil
 	case ctx.Err() != nil:
-		return ctx.Err()
+		return fmt.Errorf("%w: the events were written, but waiting for the view ended: %w", ErrNotCaughtUp, ctx.Err())
 	case waiting.Err() != nil && errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("%w: the view did not catch up within %s", ErrTransient, timeout)
+		return fmt.Errorf("%w: the events were written, but the view did not catch up within %s", ErrNotCaughtUp, timeout)
 	default:
-		return err
+		return fmt.Errorf("%w: the events were written, but the view could not be asked: %w", ErrNotCaughtUp, err)
 	}
 }

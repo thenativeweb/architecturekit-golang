@@ -32,9 +32,10 @@ const MethodQuery = "QUERY"
 //
 // Its errors are treated as those of ToCommand: one that StatusFor maps to a
 // status of its own keeps it, and so do one of the category
-// architecturekit.ErrPermanent and one of architecturekit.ErrOutcomeUnknown,
-// while any other error comes back wrapped with ErrMalformed, and is answered
-// with 400.
+// architecturekit.ErrPermanent, one of architecturekit.ErrOutcomeUnknown, and
+// one of architecturekit.ErrNotCaughtUp, which is answered as "internal server
+// error", since the query has not been answered, while any other error comes
+// back wrapped with ErrMalformed, and is answered with 400.
 type ToQuery[TUser any, TRequest any, TQuery any] func(r *http.Request, request TRequest, user TUser) (TQuery, error)
 
 // Answer answers a query. It sees neither the request nor HTTP, which is the
@@ -337,12 +338,14 @@ func Query[TUser any, TRequest any, TQuery any, TResult any](
 
 // RespondResult writes a query result, or answers the error the way Respond
 // does for commands, with the same messages: a fixed one for 401, 409, a
-// query that found no item, a write whose outcome is unknown, and 500 and
-// above, while the error is logged through the logger of the API, with the
-// route of the request (see WithLogger), and the error itself otherwise. A
-// result that can not be encoded, such as one that holds NaN, is answered with
-// 500 as well. Like Respond, it says Cache-Control: no-store, so that no cache
-// keeps the answer.
+// query that found no item, a write whose outcome is unknown, a view that did
+// not catch up with a write, and 500 and above, while the error is logged
+// through the logger of the API, with the route of the request (see
+// WithLogger), and the error itself otherwise. A result that can not be
+// encoded, such as one that holds NaN, is answered with 500 as well, and so is
+// a panic while it is encoded, such as one in a MarshalJSON function, which is
+// logged with its value and its stack, as a route logs it. Like Respond, it
+// says Cache-Control: no-store, so that no cache keeps the answer.
 //
 // The result is encoded as encoding/json encodes it, except that a nil slice
 // is [] and a nil map is {}, at every depth, rather than null, so that a
@@ -385,7 +388,9 @@ func respondResult[TResult any](
 // not be encoded is still answered with 500, and without the revision of an
 // answer that never came. That holds for an error while it is encoded, such as
 // for NaN, which JSON has no number for, and for a panic, such as one in a
-// MarshalJSON function.
+// MarshalJSON function, which is recovered here (see encodeResult), so that a
+// handler of your own answers it as well, rather than net/http closing the
+// connection.
 func respondResultAt[TResult any](
 	w http.ResponseWriter,
 	revision string,
@@ -399,17 +404,7 @@ func respondResultAt[TResult any](
 
 	var body []byte
 	if err == nil {
-		// The error is wrapped with %v rather than %w, since a result that can not
-		// be encoded is a mistake in the code, which has to be answered with 500,
-		// whatever category the error of a MarshalJSON function has.
-		encoded, failure := jsonv2.Marshal(result, answerJSON)
-		if failure != nil {
-			err = fmt.Errorf("httpapi: encoding the result: %v", failure)
-		}
-
-		// The answer ends with a newline, as what an Encoder of encoding/json
-		// writes does.
-		body = append(encoded, '\n')
+		body, err = encodeResult(result)
 	}
 
 	if err == nil {
@@ -424,6 +419,26 @@ func respondResultAt[TResult any](
 
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"message": message})
+}
+
+// encodeResult encodes a result as an answer holds it (see answerJSON), with a
+// newline at the end, as what an Encoder of encoding/json writes has.
+//
+// A result that can not be encoded is an error, which is wrapped with %v
+// rather than %w, since it is a mistake in the code, which has to be answered
+// with 500, whatever category the error of a MarshalJSON function has. A
+// panic while it is encoded, such as one in a MarshalJSON function, is an
+// error as well, which carries its value and its stack (see recoverInto), as
+// a panic in a route does.
+func encodeResult[TResult any](result TResult) (body []byte, err error) {
+	defer recoverInto(&err)
+
+	encoded, err := jsonv2.Marshal(result, answerJSON)
+	if err != nil {
+		return nil, fmt.Errorf("httpapi: encoding the result: %v", err)
+	}
+
+	return append(encoded, '\n'), nil
 }
 
 // answerJSON are the rules that results and the fields of Adding are encoded

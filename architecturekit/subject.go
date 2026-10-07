@@ -17,7 +17,9 @@ import (
 //
 // EventSourcingDB allows only ASCII letters and digits, underscores, and
 // hyphens in a segment of a subject, so this is what the literal segments of
-// a pattern and the values of its placeholders may contain.
+// a pattern and the values of its placeholders may contain. The names of its
+// placeholders follow the same rule, so that a typo, such as a brace too many,
+// is not taken for a name.
 type SubjectScheme struct {
 	pattern      string
 	segments     []string
@@ -25,9 +27,9 @@ type SubjectScheme struct {
 }
 
 // NewSubjectScheme parses a pattern. A malformed pattern, including one with a
-// literal segment that contains a character EventSourcingDB does not allow in
-// a subject, is a programming error and panics while the scheme is being
-// built.
+// literal segment or a placeholder name that contains a character
+// EventSourcingDB does not allow in a subject, is a programming error and
+// panics while the scheme is being built.
 func NewSubjectScheme(pattern string) *SubjectScheme {
 	if !strings.HasPrefix(pattern, "/") {
 		panic(fmt.Sprintf("architecturekit: subject pattern %q must start with a slash", pattern))
@@ -54,13 +56,19 @@ func NewSubjectScheme(pattern string) *SubjectScheme {
 			continue
 		}
 
-		if !strings.HasSuffix(segment, "}") {
+		// A placeholder is a whole segment in a single pair of braces, so a
+		// brace anywhere else, as in "{id}}" or "{{id}}", is a mistake.
+		name, isClosed := strings.CutSuffix(segment[1:], "}")
+		if !isClosed || strings.ContainsAny(name, "{}") {
 			panic(fmt.Sprintf("architecturekit: segment %q in %q is malformed", segment, pattern))
 		}
 
-		name := segment[1 : len(segment)-1]
 		if name == "" {
 			panic(fmt.Sprintf("architecturekit: pattern %q has an unnamed placeholder", pattern))
+		}
+		if !hasOnlySubjectCharacters(name) {
+			panic(fmt.Sprintf("architecturekit: placeholder %q in %q may only contain %s",
+				name, pattern, subjectCharacters))
 		}
 		if seen[name] {
 			panic(fmt.Sprintf("architecturekit: pattern %q uses the placeholder %q twice", pattern, name))

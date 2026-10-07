@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -312,6 +313,26 @@ func TestWaitCaughtUpForSeveralRuns(t *testing.T) {
 		assert.LessOrEqual(t, runtime.NumGoroutine(), before, "waiting must not leave goroutines behind")
 	})
 
+	t.Run("leaves nothing behind once it returns, also for runs that have caught up", func(t *testing.T) {
+		// Runs that have caught up already let it answer before it hears from
+		// them, so what it started to hear from them must not go on waiting to
+		// tell it.
+		runs := []*architecturekit.ProjectionRun{caughtUpRun(t), caughtUpRun(t), caughtUpRun(t)}
+		before := listeningToRuns()
+
+		for range 50 {
+			require.NoError(t, architecturekit.WaitCaughtUp(context.Background(), runs...))
+		}
+
+		// Eventually would count the goroutine it checks the condition in, so
+		// this looks again by itself, until the goroutines have ended.
+		for deadline := time.Now().Add(5 * time.Second); listeningToRuns() > before && time.Now().Before(deadline); {
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		assert.LessOrEqual(t, listeningToRuns(), before, "waiting must not leave goroutines behind")
+	})
+
 	t.Run("panics for a nil run, naming it, before it waits", func(t *testing.T) {
 		// The other run never catches up, so waiting would not return.
 		behind := behindRun(t)
@@ -340,4 +361,20 @@ func (p *failingAfter) Apply(ctx context.Context, _ eventsourcingdb.Event) error
 	}
 
 	return p.err
+}
+
+// listeningToRuns counts the goroutines that WaitCaughtUp has started to hear
+// from the runs. Runs that have caught up follow the stream with goroutines of
+// their own, so it tells them apart by their stacks, rather than counting all
+// goroutines.
+func listeningToRuns() int {
+	stacks := make([]byte, 1<<20)
+	for {
+		length := runtime.Stack(stacks, true)
+		if length < len(stacks) {
+			return strings.Count(string(stacks[:length]), "architecturekit.WaitCaughtUp.func")
+		}
+
+		stacks = make([]byte, 2*len(stacks))
+	}
 }
