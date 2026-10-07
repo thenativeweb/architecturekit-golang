@@ -190,6 +190,11 @@ func TestQueryOptions(t *testing.T) {
 		assert.Empty(t, response.Header().Get("ETag"))
 	})
 
+	t.Run("a wait of zero is fine, since it answers at once", func(t *testing.T) {
+		assert.NotPanics(t, func() { wire(httpapi.Revisioned(noteView(), 0)) })
+		assert.NotPanics(t, func() { wire(httpapi.Awaiting(noteView(), 0)) })
+	})
+
 	t.Run("Varying before Revisioned is fine", func(t *testing.T) {
 		assert.NotPanics(t, func() { wire(httpapi.Varying(day), httpapi.Revisioned(noteView(), time.Second)) })
 	})
@@ -273,6 +278,20 @@ func TestRevisioned(t *testing.T) {
 		assert.Equal(t, "2", response.Header().Get(httpapi.HeaderRevision))
 	})
 
+	t.Run("a query answers at once with no wait at all", func(t *testing.T) {
+		view := noteView()
+		insertNote(t, view, "3", noteItem{Text: "one"})
+		view.Seen("3")
+
+		started := time.Now()
+		response := askNotes(servingNotes(t, view, 0), map[string]string{httpapi.HeaderWaitFor: "99"})
+
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.Less(t, time.Since(started), time.Second, "waited although it was not to wait at all")
+		assert.Equal(t, "3", response.Header().Get(httpapi.HeaderRevision), "the answer shows what the view holds")
+		assert.Equal(t, "1\n", response.Body.String())
+	})
+
 	t.Run("a wanted revision that is not one is refused", func(t *testing.T) {
 		view := noteView()
 		view.Seen("1")
@@ -331,6 +350,36 @@ func TestRevisioned(t *testing.T) {
 		mux.ServeHTTP(response, request)
 
 		assert.Equal(t, http.StatusOK, response.Code, "the tag of /notes matched /other")
+	})
+
+	t.Run("the tag of one query string does not match another", func(t *testing.T) {
+		// The query string belongs to the resource, even if the query is built
+		// without it, so the tag of one page must not match another one.
+		view := noteView()
+		view.Seen("4")
+		mux := servingNotes(t, view, time.Second)
+
+		askPage := func(page, tag string) *httptest.ResponseRecorder {
+			request := httptest.NewRequest("QUERY", "/notes?page="+page, nil)
+			request.Header.Set("X-User", "someone")
+			if tag != "" {
+				request.Header.Set("If-None-Match", tag)
+			}
+
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, request)
+
+			return response
+		}
+
+		tag := askPage("1", "").Header().Get("ETag")
+		require.NotEmpty(t, tag)
+		require.Equal(t, http.StatusNotModified, askPage("1", tag).Code, "the same page with its own tag has not changed")
+
+		other := askPage("2", tag)
+
+		assert.Equal(t, http.StatusOK, other.Code, "the tag of ?page=1 matched ?page=2")
+		assert.NotEqual(t, tag, other.Header().Get("ETag"))
 	})
 
 	t.Run("a view that has seen nothing carries no tag", func(t *testing.T) {
