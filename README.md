@@ -2745,11 +2745,11 @@ Once the view has seen at least one event, the response contains the revision it
 
 The header is read as HTTP has it: it may hold a list of tags, separated by commas, or `*`, which stands for any tag. A tag also counts if it is marked as weak, as `W/"…"`, which a proxy does when it compresses the answer.
 
-HTTP has `304 Not Modified` for `GET` and `HEAD` requests, and for `QUERY`, which it treats like `GET`, also when the query asks with a body. Since `Query` accepts only `QUERY`, a query whose answer has not changed is always answered with `304 Not Modified`.
+HTTP has `304 Not Modified` for `GET` and `HEAD` requests, and for `QUERY`, which it treats like `GET`, also when the query asks with a body. Since `Query` accepts only `QUERY`, a query whose answer has not changed is always answered with `304 Not Modified`. Browsers, though, never cache answers to `QUERY`, so they never send `If-None-Match` for one. The `ETag` and `304 Not Modified` only help a client that keeps the `ETag` and sends it itself, such as one of your own.
 
 Every other answer that the kit writes carries no revision, and says `Cache-Control: no-store`, so that no cache keeps it. That holds for the answer to a command, for every failure, and for the answer of a query without `Revisioned`, or of one whose view has not seen any event yet. Without a word on caching, HTTP would let a cache keep such an answer for a while it picks itself, and hand it out again.
 
-The `ETag` holds the query that was asked, with every field. So two callers get the same `ETag` only if their queries are equal: a query that holds the user, or anything else that tells callers apart, gets an `ETag` of its own for each of them. That matters as soon as callers share a browser one after the other, since the browser asks with the `ETag` it kept for the one before. The query is built before the route waits or tells the caller that nothing has changed, so a caller who may not ask is refused first.
+The `ETag` holds the query that was asked, with every field. So two callers get the same `ETag` only if their queries are equal: a query that holds the user, or anything else that tells callers apart, gets an `ETag` of its own for each of them. That matters as soon as callers share a client that keeps the tags, one after the other, since it asks with the `ETag` it kept for the one before. The query is built before the route waits or tells the caller that nothing has changed, so a caller who may not ask is refused first.
 
 This holds as long as the answer depends on nothing but the query and the view, which is why the answer sees neither the request nor the user. Three things get past it:
 
@@ -3021,6 +3021,8 @@ To test deciders without a database, use the `architecturekittest` package:
 import "github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
 ```
 
+The examples use the commands as [Defining Commands](#defining-commands) declares them, with `OnStateRead`, apart from those under [Expecting Preconditions](#expecting-preconditions), which use the `BorrowBook` that checks the revision of the caller with `OnEventID` (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)) and the `AcquireBook` that prevents duplicates with `OnPristineSubject` (see [Preventing Duplicates](#preventing-duplicates)).
+
 Call the `Given` function with a `*testing.T`, the decider, and the events that have happened so far. Then call the `When` function with the command, and check the decision:
 
 ```go
@@ -3105,7 +3107,7 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
   ThenPreconditions(architecturekittest.OnEventID("/books/42", "0"))
 ```
 
-`ThenPreconditions` describes a precondition by what the database checks, so `OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` also describe a precondition made with `Require` from the function of the client SDK that does the same, such as `NewIsSubjectPristinePrecondition`. A test that expects a pristine subject fails for a command that declares a populated one, and the failure names both. For example, `AcquireBook` requires a pristine subject (see [Preventing Duplicates](#preventing-duplicates)):
+`ThenPreconditions` describes a precondition by what the database checks, so `OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` also describe a precondition made with `Require` from the function of the client SDK that does the same, such as `NewIsSubjectPristinePrecondition`. A test that expects a pristine subject fails for a command that declares a populated one, and the failure names both. For example, the `AcquireBook` that prevents duplicates requires a pristine subject (see [Preventing Duplicates](#preventing-duplicates)):
 
 ```go
 architecturekittest.Given(t, acquireBook).

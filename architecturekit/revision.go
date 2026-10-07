@@ -44,6 +44,12 @@ type Revisioned interface {
 
 // RevisionSink is what a view implements to record how far its projection has
 // come. InMemoryView does.
+//
+// It is meant for a view that keeps no transaction, since Tracking records
+// the revision once the projection has applied the event, apart from its
+// data. Where data and revision have to become durable together, as in a view
+// in a database, the revision belongs inside the transaction, so the
+// projection has to write it itself (see Tracking).
 type RevisionSink interface {
 	// Seen records an event as processed. Events may arrive more than once and
 	// out of order after a restart, so an older ID never moves the revision
