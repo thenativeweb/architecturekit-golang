@@ -103,6 +103,13 @@ func TestSubjectScheme(t *testing.T) {
 			{name: "space in a literal", pattern: "/my books/{book}"},
 			{name: "umlaut in a literal", pattern: "/b\u00fccher/{book}"},
 			{name: "dots as a literal", pattern: "/../{book}"},
+			{name: "closing brace too many", pattern: "/{a}}"},
+			{name: "placeholder in braces twice", pattern: "/{{a}}"},
+			{name: "opening brace in a placeholder", pattern: "/{a{b}"},
+			{name: "space in a placeholder", pattern: "/{a b}"},
+			{name: "umlaut in a placeholder", pattern: "/{\u00e4}"},
+			{name: "dot as a placeholder", pattern: "/{.}"},
+			{name: "asterisk as a placeholder", pattern: "/x/{*}"},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				assert.Panics(t, func() {
@@ -122,6 +129,71 @@ func TestSubjectScheme(t *testing.T) {
 		assert.PanicsWithValue(t,
 			`architecturekit: segment "pre{id}" in "/workshop/pre{id}" is malformed`,
 			func() { architecturekit.NewSubjectScheme("/workshop/pre{id}") })
+	})
+
+	t.Run("names what is wrong with a placeholder", func(t *testing.T) {
+		for _, test := range []struct {
+			pattern string
+			panic   string
+		}{
+			{"/{a b}", `architecturekit: placeholder "a b" in "/{a b}" may only contain A-Z, a-z, 0-9, underscores, and hyphens`},
+			{"/{\u00e4}", "architecturekit: placeholder \"\u00e4\" in \"/{\u00e4}\" may only contain A-Z, a-z, 0-9, underscores, and hyphens"},
+			{"/{.}", `architecturekit: placeholder "." in "/{.}" may only contain A-Z, a-z, 0-9, underscores, and hyphens`},
+			{"/x/{*}", `architecturekit: placeholder "*" in "/x/{*}" may only contain A-Z, a-z, 0-9, underscores, and hyphens`},
+			{"/books/{book.id}", `architecturekit: placeholder "book.id" in "/books/{book.id}" may only contain A-Z, a-z, 0-9, underscores, and hyphens`},
+
+			// A brace that does not open or close the segment means a mistake in
+			// the braces, which says more than the characters.
+			{"/{a}}", `architecturekit: segment "{a}}" in "/{a}}" is malformed`},
+			{"/{{a}}", `architecturekit: segment "{{a}}" in "/{{a}}" is malformed`},
+			{"/{a{b}", `architecturekit: segment "{a{b}" in "/{a{b}" is malformed`},
+			{"/{a}{b}", `architecturekit: segment "{a}{b}" in "/{a}{b}" is malformed`},
+			{"/{}}", `architecturekit: segment "{}}" in "/{}}" is malformed`},
+			{"/{{}", `architecturekit: segment "{{}" in "/{{}" is malformed`},
+			{"/{a}b", `architecturekit: segment "{a}b" in "/{a}b" is malformed`},
+			{"/{", `architecturekit: segment "{" in "/{" is malformed`},
+			{"/}", `architecturekit: segment "}" in "/}" is malformed`},
+			{"/a}", `architecturekit: segment "a}" in "/a}" is malformed`},
+			{"/{}", `architecturekit: pattern "/{}" has an unnamed placeholder`},
+		} {
+			t.Run(test.pattern, func(t *testing.T) {
+				assert.PanicsWithValue(t, test.panic, func() { architecturekit.NewSubjectScheme(test.pattern) })
+			})
+		}
+	})
+
+	t.Run("accepts placeholder names with every character the database allows", func(t *testing.T) {
+		scheme := architecturekit.NewSubjectScheme("/tenant/{Tenant_2}/agreements/{license-agreement}/{_}/{-}/{0}")
+
+		assert.Equal(t, []string{"Tenant_2", "license-agreement", "_", "-", "0"}, scheme.Placeholders())
+
+		subject := scheme.Build("acme", "42", "a", "b", "c")
+		assert.Equal(t, "/tenant/acme/agreements/42/a/b/c", subject)
+
+		values, ok := scheme.Match(subject)
+		require.True(t, ok, "%q should match %q", subject, scheme.Pattern())
+		assert.Equal(t, map[string]string{"Tenant_2": "acme", "license-agreement": "42", "_": "a", "-": "b", "0": "c"}, values)
+
+		agreement, ok := scheme.Value(subject, "license-agreement")
+		require.True(t, ok)
+		assert.Equal(t, "42", agreement)
+
+		assert.NotPanics(t, func() { architecturekit.NewSubjectScheme("/{" + databaseCharacters + "}") })
+	})
+
+	t.Run("accepts the placeholder names that applications use", func(t *testing.T) {
+		for _, name := range []string{
+			"user", "todo", "customer", "license-agreement", "master-agreement", "migration-ticket",
+			"trial-license", "instance", "hour", "access", "key",
+		} {
+			t.Run(name, func(t *testing.T) {
+				scheme := architecturekit.NewSubjectScheme("/things/{" + name + "}")
+
+				value, ok := scheme.Value(scheme.Build("42"), name)
+				require.True(t, ok)
+				assert.Equal(t, "42", value)
+			})
+		}
 	})
 
 	t.Run("accepts literals with every character the database allows", func(t *testing.T) {
@@ -324,6 +396,13 @@ func TestSubjectScheme(t *testing.T) {
 				assert.NotPanics(t, build, "literal %q should pass", value)
 			} else {
 				assert.Panics(t, build, "literal %q should be refused", value)
+			}
+
+			name := func() { architecturekit.NewSubjectScheme("/workshop/{" + value + "}") }
+			if allowed {
+				assert.NotPanics(t, name, "placeholder %q should pass", value)
+			} else {
+				assert.Panics(t, name, "placeholder %q should be refused", value)
 			}
 		}
 	})

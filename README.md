@@ -1187,7 +1187,7 @@ So far, subjects have been composed by hand. To define their structure once, cal
 var bookSubject = architecturekit.NewSubjectScheme("/books/{book}")
 ```
 
-Each segment of a subject may only contain the characters that EventSourcingDB allows: the letters `A-Z` and `a-z`, the digits `0-9`, underscores, and hyphens. This applies to the literal segments of the pattern as well as to the values that fill its placeholders.
+Each segment of a subject may only contain the characters that EventSourcingDB allows: the letters `A-Z` and `a-z`, the digits `0-9`, underscores, and hyphens. This applies to the literal segments of the pattern as well as to the values that fill its placeholders. The names of the placeholders follow the same rule, as `book` and `license-agreement` do, so that a typo, such as a brace too many in `{book}}`, is not taken for a name.
 
 The function returns a `*SubjectScheme`. To compose a subject, call the `Build` function with one value per placeholder, in the order in which they appear in the pattern. Use it in every command that acts on a book:
 
@@ -1231,7 +1231,7 @@ run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree(b
 
 *Note that other subjects may lie under the same root, such as `/books/42/reviews/7` under `/books`. Use `Match` in the projection to tell them apart.*
 
-*Note that a malformed pattern panics, including one with a literal segment that contains a character EventSourcingDB does not allow, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains such a character, for example a slash, a dot, or a space.*
+*Note that a malformed pattern panics, including one with a literal segment or a placeholder name that contains a character EventSourcingDB does not allow, as does calling `Build` with the wrong number of values, with an empty value, or with a value that contains such a character, for example a slash, a dot, or a space.*
 
 Values that come from outside, such as an ID in a request, may well be empty or contain such characters, and that is not a programming error. So always check them before building a subject: call the `Check` function with the same values as `Build`. It returns an error that says what is wrong, such as which characters a value may contain, instead of panicking. The error may reach the caller of an API, for example through the function that returns a command (see [Handling Commands over HTTP](#handling-commands-over-http)), so it names the placeholder of the value, but neither the package nor the pattern, as in `value for "book" must not be empty`:
 
