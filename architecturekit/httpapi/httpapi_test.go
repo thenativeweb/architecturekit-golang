@@ -171,6 +171,7 @@ func TestStatusFor(t *testing.T) {
 			{"permanent", architecturekit.ErrPermanent, http.StatusInternalServerError},
 			{"unverified", architecturekit.ErrUnverified, http.StatusInternalServerError},
 			{"an outcome that is unknown", fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/notes/1"), http.StatusInternalServerError},
+			{"a view that did not catch up", fmt.Errorf("%w: the events were written, but the view did not catch up within 5s", architecturekit.ErrNotCaughtUp), http.StatusInternalServerError},
 			{"anything else", errors.New("who knows"), http.StatusInternalServerError},
 			{"a caller who went away", fmt.Errorf("architecturekit: reading: %w", context.Canceled), 499},
 			{"a deadline that ran out", fmt.Errorf("architecturekit: reading: %w", context.DeadlineExceeded), http.StatusServiceUnavailable},
@@ -205,6 +206,34 @@ func TestStatusFor(t *testing.T) {
 				assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(fmt.Errorf("%w: %w", other, unknown)))
 			})
 		}
+	})
+
+	t.Run("maps a view that did not catch up to 500, also if it wraps a status that invites trying again", func(t *testing.T) {
+		// The write has succeeded, so trying again stores its events twice, and
+		// neither 409 nor 503 may win, and nor may 499, which is not logged.
+		notCaughtUp := fmt.Errorf("%w: the events were written, but the view did not catch up within 5s", architecturekit.ErrNotCaughtUp)
+
+		for _, other := range []error{
+			architecturekit.ErrConflict, architecturekit.ErrTransient, context.Canceled, context.DeadlineExceeded,
+			architecturekit.ErrPermanent, architecturekit.ErrNotARevision, architecturekit.ErrEmptyRange,
+			architecturekit.ErrOutcomeUnknown,
+		} {
+			t.Run(other.Error(), func(t *testing.T) {
+				assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(errors.Join(notCaughtUp, other)))
+				assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(errors.Join(other, notCaughtUp)))
+				assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(fmt.Errorf("%w: %w", other, notCaughtUp)))
+			})
+		}
+	})
+
+	t.Run("maps what WaitForWritten returns once the time has run out to 500, not to 503", func(t *testing.T) {
+		view := architecturekit.NewInMemoryView(func(item string) string { return item })
+		written := []eventsourcingdb.Event{{ID: "7", Subject: "/notes/1"}}
+
+		err := architecturekit.WaitForWritten(context.Background(), view, written, 20*time.Millisecond)
+
+		require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp)
+		assert.Equal(t, http.StatusInternalServerError, httpapi.StatusFor(err), "a retry would write the events twice")
 	})
 
 	t.Run("maps a value that is not a revision to 400, unless it is a permanent failure", func(t *testing.T) {
@@ -981,6 +1010,7 @@ var userFromFailures = []struct {
 	{"that is permanent", fmt.Errorf("%w: the session key is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, true},
 	{"that is unverified", fmt.Errorf("%w: the session is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, true},
 	{"whose outcome is unknown", fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/sessions/23"), http.StatusInternalServerError, true},
+	{"of a view that did not catch up", fmt.Errorf("%w: the events were written, but the view did not catch up within 5s", architecturekit.ErrNotCaughtUp), http.StatusInternalServerError, true},
 	{"of the domain", architecturekit.NewDomainError("the reader is suspended"), http.StatusUnprocessableEntity, true},
 	{"that is not a revision", fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc"), http.StatusBadRequest, true},
 	{"that is not a revision, but permanent", fmt.Errorf("%w: %w", architecturekit.ErrPermanent, fmt.Errorf("%w: %q", architecturekit.ErrNotARevision, "abc")), http.StatusInternalServerError, true},
@@ -1063,6 +1093,7 @@ var buildFailures = []struct {
 	{"that is permanent", fmt.Errorf("%w: the catalog at /etc/catalog.yaml is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, "internal server error", true},
 	{"that is unverified", fmt.Errorf("%w: the reader is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, "internal server error", true},
 	{"whose outcome is unknown", fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/readers/23"), http.StatusInternalServerError, "outcome unknown: the request may have succeeded", true},
+	{"of a view that did not catch up", fmt.Errorf("%w: the events were written, but the view did not catch up within 5s", architecturekit.ErrNotCaughtUp), http.StatusInternalServerError, "the request succeeded, but its result is not visible yet", true},
 	{"because the caller went away", fmt.Errorf("looking up the reader: %w", context.Canceled), 499, "request canceled", true},
 	{"because the deadline ran out", fmt.Errorf("looking up the reader: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, "internal server error", true},
 }

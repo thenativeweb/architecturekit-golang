@@ -866,6 +866,93 @@ func TestAnsweringRefusals(t *testing.T) {
 			}
 		})
 
+		t.Run(name+" answers a view that did not catch up with 500 and a fixed text of its own, and logs the failure as an error", func(t *testing.T) {
+			var logs bytes.Buffer
+			request, api := inAHandler(&logs)
+			recorder := httptest.NewRecorder()
+
+			// The error is the one WaitForWritten returns once the time has run
+			// out, after a write to the subject that the log has to name.
+			view := architecturekit.NewInMemoryView(func(item string) string { return item })
+			err := architecturekit.WaitForWritten(context.Background(), view,
+				[]eventsourcingdb.Event{{ID: "7", Subject: "/tenants/acme-bank/books/42"}}, 20*time.Millisecond)
+			require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp)
+
+			answer(recorder, request, api, fmt.Errorf("borrowing %q: %w", "/tenants/acme-bank/books/42", err))
+
+			assert.Equal(t, http.StatusInternalServerError, recorder.Code, "503 would invite trying again, which writes twice")
+			assert.JSONEq(t, `{"message": "the request succeeded, but its result is not visible yet"}`, recorder.Body.String(),
+				"the caller has to learn that the write has succeeded, but not the internals")
+			assert.Equal(t, 1, strings.Count(logs.String(), "\n"), "want exactly one entry")
+			assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: internal failure"`)
+			assert.Contains(t, logs.String(), "method=GET")
+			assert.Contains(t, logs.String(), `route="GET /notes"`)
+			assert.Contains(t, logs.String(), "status=500")
+			assert.Contains(t, logs.String(), "/tenants/acme-bank/books/42", "the details have to reach the log")
+			assert.Contains(t, logs.String(), "did not catch up within 20ms", "the details have to reach the log")
+		})
+
+		t.Run(name+" answers a view that did not catch up with its fixed text, also if it wraps a status that invites trying again", func(t *testing.T) {
+			notCaughtUp := fmt.Errorf("%w: the events were written, but the view did not catch up within 5s", architecturekit.ErrNotCaughtUp)
+
+			for _, other := range []error{
+				architecturekit.ErrConflict, architecturekit.ErrTransient, context.Canceled, context.DeadlineExceeded,
+				architecturekit.ErrPermanent,
+			} {
+				t.Run(other.Error(), func(t *testing.T) {
+					var logs bytes.Buffer
+					request, api := inAHandler(&logs)
+					recorder := httptest.NewRecorder()
+
+					answer(recorder, request, api, errors.Join(other, notCaughtUp))
+
+					assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+					assert.JSONEq(t, `{"message": "the request succeeded, but its result is not visible yet"}`, recorder.Body.String())
+					assert.Contains(t, logs.String(), `level=ERROR msg="httpapi: internal failure"`)
+				})
+			}
+		})
+
+		t.Run(name+" answers a view that did not catch up after a write whose outcome is unknown with the text of the unknown outcome", func(t *testing.T) {
+			// Both at once contradict each other, so the caller is told the more
+			// careful of the two, which does not claim that the write succeeded.
+			var logs bytes.Buffer
+			request, api := inAHandler(&logs)
+			recorder := httptest.NewRecorder()
+
+			answer(recorder, request, api, errors.Join(architecturekit.ErrNotCaughtUp, architecturekit.ErrOutcomeUnknown))
+
+			assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+			assert.JSONEq(t, `{"message": "outcome unknown: the request may have succeeded"}`, recorder.Body.String())
+		})
+
+		t.Run(name+" answers a view that did not catch up that has a status of its own as well as that status", func(t *testing.T) {
+			// StatusFor maps the errors of httpapi and ErrDomain before
+			// ErrNotCaughtUp, so the status and the message have to agree.
+			notCaughtUp := fmt.Errorf("%w: the events were written, but the view did not catch up within 5s", architecturekit.ErrNotCaughtUp)
+
+			for _, other := range []error{
+				httpapi.ErrUnauthorized, httpapi.ErrForbidden, httpapi.ErrMalformed, httpapi.ErrNotFound,
+				httpapi.ErrTooLarge, httpapi.ErrUnsupportedMediaType, query.ErrNoItems,
+				architecturekit.NewDomainError("the reader is suspended"),
+			} {
+				t.Run(other.Error(), func(t *testing.T) {
+					var logs bytes.Buffer
+					request, api := inAHandler(&logs)
+					recorder := httptest.NewRecorder()
+					failure := errors.Join(other, notCaughtUp)
+
+					answer(recorder, request, api, failure)
+
+					assert.Equal(t, httpapi.StatusFor(failure), recorder.Code)
+					assert.NotEqual(t, http.StatusInternalServerError, recorder.Code)
+					assert.NotContains(t, recorder.Body.String(), "not visible yet",
+						"the fixed text of a view that did not catch up belongs to 500")
+					assert.NotContains(t, logs.String(), "internal failure", "the server did not fail with that status")
+				})
+			}
+		})
+
 		t.Run(name+" answers 500 with a fixed text, and logs the failure as an error", func(t *testing.T) {
 			var logs bytes.Buffer
 			request, api := inAHandler(&logs)

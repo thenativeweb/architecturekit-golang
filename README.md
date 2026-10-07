@@ -790,7 +790,7 @@ Like a command, a write declares at least one precondition, such as `OnPristineS
 
 ### Handling Errors
 
-Apart from the end of the context, `ErrOutcomeUnknown`, `ErrNotARevision`, and `ErrEmptyRange`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
+Apart from the end of the context, `ErrOutcomeUnknown`, `ErrNotCaughtUp`, `ErrNotARevision`, and `ErrEmptyRange`, which belong to no category (see below), every failure of architecturekit itself in reading and writing belongs to one of four categories. Use `errors.Is` to check for a category rather than for a concrete error:
 
 - `ErrDomain` means that a business rule rejected the command, as with `NewDomainError`.
 - `ErrConflict` means that a precondition did not hold.
@@ -840,7 +840,9 @@ Only a write that certainly stored nothing keeps its category: one whose request
 
 *Note that the kit tells from a trace in the context of the request whether the request has not left, for example because no connection could be made. The client SDK sends every request with `http.DefaultClient`, so if your application gives it a transport of its own that does not hand the context of the request on, the kit can not tell, and a write that fails without an answer that refuses it is `ErrOutcomeUnknown`, even if the database can not be reached.*
 
-Yet another exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
+Yet another exception is `ErrNotCaughtUp`, which belongs to no category either. It means that a view did not catch up with written events in time, which is what `WaitForWritten` returns once the time it waits has run out (see [Waiting for Written Events](#waiting-for-written-events)). The events were written, so the write has succeeded, and only the view lags behind. So it is not `ErrTransient`, since trying the write again would store its events twice, and not `ErrPermanent`, since the view may still catch up. The error wraps `ErrNotCaughtUp` and says how long it waited, as in `not caught up: the events were written, but the view did not catch up within 5s`, so check for it with `errors.Is`. `StatusFor` maps it to `500 Internal Server Error` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), but a handler that waits after a command usually answers it with success, since the write has succeeded.
+
+One more exception is `ErrNotARevision`, which belongs to no category either. It means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, the revision for `WaitFor`, or a value for `CompareRevisions` or `ParseRevision` (see [Comparing Revisions](#comparing-revisions)). The error wraps `ErrNotARevision` and names the value, so check for it with `errors.Is` as well. Such a value usually comes from a request, so `StatusFor` maps it to `400 Bad Request` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). Only a function of a view, which refuses the ID of an event it is to apply, wraps it together with `ErrPermanent` (see [Defining Views](#defining-views)).
 
 The last exception is `ErrEmptyRange`, which belongs to no category either. It means that the bounds of `Read` leave no room for any event, such as `BeforeEvent("0")` (see [Reading Events](#reading-events)). The error wraps `ErrEmptyRange` and names the values, so check for it with `errors.Is` as well. Such bounds usually come from a request, so `StatusFor` maps it to `400 Bad Request` as well.
 
@@ -2086,7 +2088,7 @@ A view lags behind the events that have been written, by however long its projec
 
 The ID of the last event a view has seen is its revision. Since the database assigns event IDs in ascending order across all subjects, revisions can be compared.
 
-A view sees only the events of the subjects its projection reads. So wait only for a write to one of those subjects: if the write went to another subject, the view does not reach its revision until a later event lands in one of its own subjects, and waiting for it lasts the full time, with `WaitFor`, with `Await`, and with the `Wait-For-Revision` header alike. `WaitForWritten` even fails then, with an error of the category `ErrTransient`, so hand it only the events written to the subjects the view reads.
+A view sees only the events of the subjects its projection reads. So wait only for a write to one of those subjects: if the write went to another subject, the view does not reach its revision until a later event lands in one of its own subjects, and waiting for it lasts the full time, with `WaitFor`, with `Await`, and with the `Wait-For-Revision` header alike. `WaitForWritten` even fails then, with an error that wraps `ErrNotCaughtUp`, so hand it only the events written to the subjects the view reads.
 
 #### Tracking Revisions
 
@@ -2175,12 +2177,18 @@ if err != nil {
 }
 
 err = architecturekit.WaitForWritten(ctx, catalog, writtenEvents, 5*time.Second)
-if err != nil {
+switch {
+case errors.Is(err, architecturekit.ErrNotCaughtUp):
+  // The command has succeeded, so answer with success all the same, and with
+  // the revision, for which the caller can wait with Wait-For-Revision.
+case err != nil:
   // ...
 }
 ```
 
-It waits with `WaitFor` for the revision that `RevisionOf` returns for the events, and returns `nil` once the view has reached it. If no events were written, it returns `nil` at once, since there is nothing to wait for. If the time runs out first, it returns an error of the category `ErrTransient` that says so, as in `the view did not catch up within 5s`, since the view may still catch up. If the context ends first, it returns the error of the context, and any other error of the view as it is.
+It waits with `WaitFor` for the revision that `RevisionOf` returns for the events, and returns `nil` once the view has reached it. If no events were written, it returns `nil` at once, since there is nothing to wait for. If the time runs out first, it returns an error that wraps `ErrNotCaughtUp` and says so, as in `not caught up: the events were written, but the view did not catch up within 5s`. If the context ends first, it returns the error of the context, and any other error of the view as it is.
+
+`ErrNotCaughtUp` belongs to no category, since the write has succeeded, and only the view lags behind: trying the write again would store its events twice, and the view may still catch up (see [Handling Errors](#handling-errors)). So a handler that waits after a command usually answers with success when it gets `ErrNotCaughtUp`, as in the example above, and with the revision of the written events. If the caller needs to see what was written, it can wait for the revision with the `Wait-For-Revision` header of a query (see [Reading Your Own Writes over HTTP](#reading-your-own-writes-over-http)). Answered as an error, `StatusFor` maps it to `500 Internal Server Error`, rather than to a status that invites trying again, and the message says that the request has succeeded (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
 *Note that the view sees only the events of the subjects its projection reads, so hand over only the events written to those subjects. For a write to several subjects, such as one with `Write`, the highest ID of all events may lie in a subject the view does not read, and then the view does not reach it until a later event lands in one of its own subjects (see [Waiting for Revisions](#waiting-for-revisions)).*
 
@@ -2212,7 +2220,7 @@ api := httpapi.NewAPI(store, userFrom)
 mux := http.NewServeMux()
 ```
 
-If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so do an error of the category `ErrPermanent` and one of a write whose outcome is unknown, `ErrOutcomeUnknown`, which are answered with `500 Internal Server Error`. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
+If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so do an error of the category `ErrPermanent`, one of a write whose outcome is unknown, `ErrOutcomeUnknown`, and one of a view that did not catch up with a write, `ErrNotCaughtUp`, which are answered with `500 Internal Server Error`. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
 
 *Note that to answer an error that has a status code of its own with `401 Unauthorized` all the same, the function wraps it with `httpapi.ErrUnauthorized` itself, for example with `fmt.Errorf("%w: %w", httpapi.ErrUnauthorized, err)`.*
 
@@ -2319,6 +2327,7 @@ The message is the error message if the error is written for the caller, such as
 | `409 Conflict` | `conflict: the data has changed since it was read` |
 | `499 Client Closed Request` | `request canceled` |
 | `500 Internal Server Error`, for a write whose outcome is unknown | `outcome unknown: the request may have succeeded` |
+| `500 Internal Server Error`, for a view that did not catch up with a write | `the request succeeded, but its result is not visible yet` |
 | `500` and above | `internal server error` |
 
 The actual error is logged, so that it does not vanish (see [Setting Up an HTTP API](#setting-up-an-http-api)): at level `Info` for `401`, `404`, and `409`, since the server did not fail, and at level `Error` for `500` and above. For `404`, that holds only for a query that found no item (see [Reporting Missing Items](#reporting-missing-items)). A request that was canceled, usually because the caller went away, is not logged, since nothing failed.
@@ -2453,7 +2462,7 @@ func toAcquireBook(r *http.Request, request acquireBookRequest, user User) (Acqu
 }
 ```
 
-The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent` or one of `ErrOutcomeUnknown`, which are answered with `500 Internal Server Error`. So if the function looks something up in another service, with the context of the request, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
+The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent`, one of `ErrOutcomeUnknown`, or one of `ErrNotCaughtUp`, which are answered with `500 Internal Server Error`. So if the function looks something up in another service, with the context of the request, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
 
 Any other error returned from the function is answered with `400 Bad Request`, with the error as the message, after the text of `httpapi.ErrMalformed`, as in `malformed request: borrowedUntil must be a date`. In `Handle`, it wraps `httpapi.ErrMalformed` as well as the original error, so that `errors.Is` and `errors.As` find either.
 
@@ -2686,6 +2695,7 @@ It checks the categories in this order:
 | `httpapi.ErrNotFound`, `query.ErrNoItems` | `404 Not Found` |
 | `architecturekit.ErrDomain` | `422 Unprocessable Entity` |
 | `architecturekit.ErrOutcomeUnknown` | `500 Internal Server Error` |
+| `architecturekit.ErrNotCaughtUp` | `500 Internal Server Error` |
 | `architecturekit.ErrConflict` | `409 Conflict` |
 | `architecturekit.ErrTransient` | `503 Service Unavailable` |
 | `context.Canceled` | `499 Client Closed Request` |
@@ -2698,15 +2708,17 @@ It checks the categories in this order:
 
 *Note that `ErrOutcomeUnknown` means that a write may or may not have stored its events (see [Handling Errors](#handling-errors)). So it comes before `ErrConflict`, `ErrTransient`, and the end of the context, and an error that wraps one of them as well is answered with `500 Internal Server Error` all the same: trying again, which `409` and `503` invite, may store the events twice, and `499` is not logged. Its message is `outcome unknown: the request may have succeeded`, so that the caller does not simply try again, while the error, which may name internals, such as the subject, is logged at level `Error`.*
 
+*Note that `ErrNotCaughtUp` means that a write has succeeded, but that a view did not catch up with it in time (see [Waiting for Written Events](#waiting-for-written-events)). Trying again would store the events twice, so it comes right after `ErrOutcomeUnknown`, and is answered with `500 Internal Server Error` the same way, also if it wraps `ErrConflict`, `ErrTransient`, or the end of the context as well. Its message is `the request succeeded, but its result is not visible yet`, while the error is logged at level `Error`. A handler that waits after a command usually answers it with success, though, since the write has succeeded.*
+
 *Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, a value for `CompareRevisions` or `ParseRevision`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
 
 *Note that `ErrEmptyRange` means that the bounds of `Read` leave no room for any event, which usually come from the request as well. So it is answered the same way, with `400 Bad Request` and the error as the message, such as `empty range: no event can lie before "0"`, unless the error belongs to the category `ErrPermanent` as well (see [Reading Events](#reading-events)).*
 
-*Note that an error of the function that returns a command, of the one that returns a query, or of the one that determines the user keeps its status code only if it has one of its own, belongs to the category `ErrPermanent`, or wraps `ErrOutcomeUnknown`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
+*Note that an error of the function that returns a command, of the one that returns a query, or of the one that determines the user keeps its status code only if it has one of its own, belongs to the category `ErrPermanent`, or wraps `ErrOutcomeUnknown` or `ErrNotCaughtUp`. Any other error is answered with `400 Bad Request` for the first two, and with `401 Unauthorized` for the last (see [Authorizing Commands](#authorizing-commands) and [Setting Up an HTTP API](#setting-up-an-http-api)).*
 
 *Note that a panic while a route handles a request is answered with `500 Internal Server Error` as well (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
-*Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, `499`, and `500` and above, as `Respond`, `RespondResult`, and `RespondError` do, since it may name internals, say `not found` for `query.ErrNoItems`, and tell the caller for `ErrOutcomeUnknown` that the request may have succeeded (see [Handling Commands over HTTP](#handling-commands-over-http)).*
+*Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, `499`, and `500` and above, as `Respond`, `RespondResult`, and `RespondError` do, since it may name internals, say `not found` for `query.ErrNoItems`, tell the caller for `ErrOutcomeUnknown` that the request may have succeeded, and for `ErrNotCaughtUp` that it has succeeded, but that its result is not visible yet (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
 ### Reading Your Own Writes over HTTP
 

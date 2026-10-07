@@ -226,6 +226,16 @@ func RevisionOf(events []eventsourcingdb.Event) string {
 	return highest
 }
 
+// ErrNotCaughtUp means that a view did not catch up with written events in
+// time (see WaitForWritten). The events were written, so the write has
+// succeeded, and only the view lags behind.
+//
+// It belongs to no category. It is not ErrTransient, since trying the write
+// again would store its events twice, and not ErrPermanent, since the view may
+// still catch up. So it is usually answered as the success that the write is,
+// with the revision of the events, for which the caller can wait itself.
+var ErrNotCaughtUp = errors.New("not caught up")
+
 // WaitForWritten waits until the view has seen the events that Execute or
 // Write returned, for a step on the server that builds on what was just
 // written, such as one that reads from the view what a command has changed:
@@ -245,9 +255,12 @@ func RevisionOf(events []eventsourcingdb.Event) string {
 //
 // Unlike Await of httpapi, which answers a caller with what the view holds,
 // running out of time is an error, since the step needs what was written: if
-// timeout runs out while ctx has not ended, it returns an error of the
-// category ErrTransient, which says so, since the view may still catch up. If
-// ctx ends first, it returns the error of ctx, and any other error of the
+// timeout runs out while ctx has not ended, it returns an error that wraps
+// ErrNotCaughtUp, which says so. That is no ErrTransient, since the write has
+// succeeded, and trying it again would store the events twice. So a handler
+// that waits after a command usually answers ErrNotCaughtUp with success,
+// and with the revision of the events, for which the caller can wait itself.
+// If ctx ends first, it returns the error of ctx, and any other error of the
 // view as it is.
 //
 // A nil view, including a nil pointer, is a programming error, and so is a
@@ -278,7 +291,7 @@ func WaitForWritten(ctx context.Context, view Revisioned, written []eventsourcin
 	case ctx.Err() != nil:
 		return ctx.Err()
 	case waiting.Err() != nil && errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("%w: the view did not catch up within %s", ErrTransient, timeout)
+		return fmt.Errorf("%w: the events were written, but the view did not catch up within %s", ErrNotCaughtUp, timeout)
 	default:
 		return err
 	}

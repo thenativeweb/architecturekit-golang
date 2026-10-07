@@ -82,22 +82,33 @@ func TestWaitForWritten(t *testing.T) {
 		assert.NoError(t, architecturekit.WaitForWritten(endedContext(t), view, nil, time.Hour))
 	})
 
-	t.Run("fails as transient if the view does not catch up in time", func(t *testing.T) {
+	t.Run("fails with ErrNotCaughtUp if the view does not catch up in time", func(t *testing.T) {
 		started := time.Now()
 
 		err := architecturekit.WaitForWritten(waitingContext(t), viewAt("4"), writtenUpTo("5"), 50*time.Millisecond)
 
-		require.ErrorIs(t, err, architecturekit.ErrTransient, "the view may still catch up")
-		assert.NotErrorIs(t, err, architecturekit.ErrPermanent)
-		assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context of the caller may look like one")
-		assert.EqualError(t, err, "transient failure: the view did not catch up within 50ms")
+		require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp)
+		assert.EqualError(t, err, "not caught up: the events were written, but the view did not catch up within 50ms")
 		assert.GreaterOrEqual(t, time.Since(started), 50*time.Millisecond, "it has to wait for the full time")
+	})
+
+	t.Run("belongs to no category if the view does not catch up in time, since the write has succeeded", func(t *testing.T) {
+		err := architecturekit.WaitForWritten(waitingContext(t), viewAt("4"), writtenUpTo("5"), 20*time.Millisecond)
+
+		require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp)
+		assert.NotErrorIs(t, err, architecturekit.ErrTransient, "trying the write again would store its events twice")
+		assert.NotErrorIs(t, err, architecturekit.ErrPermanent, "the view may still catch up")
+		assert.NotErrorIs(t, err, architecturekit.ErrDomain)
+		assert.NotErrorIs(t, err, architecturekit.ErrOutcomeUnknown, "the write has succeeded")
+		assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context of the caller may look like one")
+		assert.Equal(t, architecturekit.ErrNotCaughtUp, errors.Unwrap(err), "it wraps nothing else")
+		assert.EqualError(t, architecturekit.ErrNotCaughtUp, "not caught up", "the text leaves out the name of the package")
 	})
 
 	t.Run("names the timeout the way a duration prints", func(t *testing.T) {
 		err := architecturekit.WaitForWritten(waitingContext(t), viewAt("4"), writtenUpTo("5"), 1500*time.Microsecond)
 
-		assert.EqualError(t, err, "transient failure: the view did not catch up within 1.5ms")
+		assert.EqualError(t, err, "not caught up: the events were written, but the view did not catch up within 1.5ms")
 	})
 
 	t.Run("returns the error of the context if it ends first", func(t *testing.T) {
@@ -119,7 +130,7 @@ func TestWaitForWritten(t *testing.T) {
 		err := architecturekit.WaitForWritten(ctx, viewAt("4"), writtenUpTo("5"), 5*time.Second)
 
 		assert.Equal(t, context.DeadlineExceeded, err, "the deadline of the caller is not the timeout")
-		assert.NotErrorIs(t, err, architecturekit.ErrTransient)
+		assert.NotErrorIs(t, err, architecturekit.ErrNotCaughtUp)
 	})
 
 	t.Run("returns the error of the context that has ended already", func(t *testing.T) {

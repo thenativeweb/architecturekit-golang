@@ -32,9 +32,9 @@ const MethodQuery = "QUERY"
 //
 // Its errors are treated as those of ToCommand: one that StatusFor maps to a
 // status of its own keeps it, and so do one of the category
-// architecturekit.ErrPermanent and one of architecturekit.ErrOutcomeUnknown,
-// while any other error comes back wrapped with ErrMalformed, and is answered
-// with 400.
+// architecturekit.ErrPermanent, one of architecturekit.ErrOutcomeUnknown, and
+// one of architecturekit.ErrNotCaughtUp, while any other error comes back
+// wrapped with ErrMalformed, and is answered with 400.
 type ToQuery[TUser any, TRequest any, TQuery any] func(r *http.Request, request TRequest, user TUser) (TQuery, error)
 
 // Answer answers a query. It sees neither the request nor HTTP, which is the
@@ -337,8 +337,8 @@ func Query[TUser any, TRequest any, TQuery any, TResult any](
 
 // RespondResult writes a query result, or answers the error the way Respond
 // does for commands, with the same messages: a fixed one for 401, 409, a
-// query that found no item, a write whose outcome is unknown, and 500 and
-// above, while the error is logged through the logger of the API, with the
+// query that found no item, a write whose outcome is unknown, a view that did
+// not catch up with a write, and 500 and above, while the error is logged through the logger of the API, with the
 // route of the request (see WithLogger), and the error itself otherwise. A
 // result that can not be encoded, such as one that holds NaN, is answered with
 // 500 as well. Like Respond, it says Cache-Control: no-store, so that no cache
