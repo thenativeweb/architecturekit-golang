@@ -33,8 +33,9 @@ const MethodQuery = "QUERY"
 // Its errors are treated as those of ToCommand: one that StatusFor maps to a
 // status of its own keeps it, and so do one of the category
 // architecturekit.ErrPermanent, one of architecturekit.ErrOutcomeUnknown, and
-// one of architecturekit.ErrNotCaughtUp, while any other error comes back
-// wrapped with ErrMalformed, and is answered with 400.
+// one of architecturekit.ErrNotCaughtUp, which is answered as "internal server
+// error", since the query has not been answered, while any other error comes
+// back wrapped with ErrMalformed, and is answered with 400.
 type ToQuery[TUser any, TRequest any, TQuery any] func(r *http.Request, request TRequest, user TUser) (TQuery, error)
 
 // Answer answers a query. It sees neither the request nor HTTP, which is the

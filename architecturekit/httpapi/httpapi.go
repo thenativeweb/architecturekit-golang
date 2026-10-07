@@ -77,9 +77,11 @@ var errNoStore = errors.New("httpapi: the API has no store, so it can not execut
 // do an error of the category architecturekit.ErrPermanent, one of a write
 // whose outcome is unknown, architecturekit.ErrOutcomeUnknown, and one of a
 // view that did not catch up with a write, architecturekit.ErrNotCaughtUp,
-// which are answered with 500. Any other error means that the request can not
-// be turned into a command, and comes back wrapped with ErrMalformed, which is
-// answered with 400 and the error as the message.
+// which are answered with 500. The command has not run then, so the answer
+// does not say that the request succeeded, as it does for ErrNotCaughtUp after
+// a command, but "internal server error". Any other error means that the
+// request can not be turned into a command, and comes back wrapped with
+// ErrMalformed, which is answered with 400 and the error as the message.
 type ToCommand[TUser any, TRequest any, TCommand any] func(r *http.Request, request TRequest, user TUser) (TCommand, error)
 
 // API bundles what all routes share.
@@ -199,8 +201,12 @@ func (api *API[TUser]) explain(r *http.Request) func(status int, err error) stri
 		// A view that did not catch up with a write is an internal failure as
 		// well, and logged as one, but the write has succeeded, which the caller
 		// has to learn, so that it does not try again. As above, it gets a fixed
-		// text, and only if it is answered with 500.
-		case status == http.StatusInternalServerError && errors.Is(err, architecturekit.ErrNotCaughtUp):
+		// text, and only if it is answered with 500. That holds only after the
+		// command, though: if it came from determining the user, or from turning
+		// the request into a command or a query, nothing of the request has
+		// run, so it is answered as any other internal failure below.
+		case status == http.StatusInternalServerError && errors.Is(err, architecturekit.ErrNotCaughtUp) &&
+			!isBeforeRunning(err):
 			api.logFailure(r, status, err)
 
 			return "the request succeeded, but its result is not visible yet"
@@ -305,7 +311,10 @@ func (api *API[TUser]) loggerOrDefault() *slog.Logger {
 // An error of userFrom that StatusFor maps to a status of its own comes back
 // as it is, and so do one of the category architecturekit.ErrPermanent, one
 // of architecturekit.ErrOutcomeUnknown, and one of
-// architecturekit.ErrNotCaughtUp, so that they keep their status.
+// architecturekit.ErrNotCaughtUp, so that they keep their status. Only the
+// last one comes back marked, with the same text, so that it is answered as
+// "internal server error" rather than as a request that has succeeded, since
+// nothing of the request has run yet. errors.Is and errors.As still find it.
 // If the session store is down, for example, userFrom says so with
 // architecturekit.ErrTransient, which is answered with 503 and logged, rather
 // than sending the caller off to sign in again. Only an error without such a
@@ -318,7 +327,7 @@ func UserOf[TUser any](r *http.Request, api *API[TUser]) (TUser, error) {
 		var none TUser
 
 		if hasCategory(err) {
-			return none, err
+			return none, beforeRunning(err)
 		}
 
 		return none, fmt.Errorf("%w: %w", ErrUnauthorized, err)
@@ -865,9 +874,12 @@ func fieldsOf(value any) (fields map[string]any, err error) {
 // Without this, an application that returns ErrForbidden from ToCommand would
 // see its 403 turned into a 400, and one whose session store is down would
 // tell the caller that the request is to blame.
+//
+// An error of architecturekit.ErrNotCaughtUp is marked as well (see
+// beforeRunning), since the command or the query has not run.
 func categorise(err error) error {
 	if hasCategory(err) {
-		return err
+		return beforeRunning(err)
 	}
 
 	return fmt.Errorf("%w: %w", ErrMalformed, err)
@@ -882,6 +894,41 @@ func hasCategory(err error) bool {
 	return StatusFor(err) != http.StatusInternalServerError ||
 		errors.Is(err, architecturekit.ErrPermanent) || errors.Is(err, architecturekit.ErrOutcomeUnknown) ||
 		errors.Is(err, architecturekit.ErrNotCaughtUp)
+}
+
+// notRun is an error of architecturekit.ErrNotCaughtUp that came before the
+// command ran or the query was answered: from determining the user, or from
+// turning the request into a command or a query, such as one that waits for
+// a write of its own. Nothing of the request has run then, so explain does not
+// tell the caller that it has succeeded, as it does for ErrNotCaughtUp after
+// a command.
+//
+// It has the text of the error, and unwraps to it, so that StatusFor, errors.Is
+// and errors.As treat it as the error itself.
+type notRun struct {
+	err error
+}
+
+func (failure *notRun) Error() string { return failure.err.Error() }
+
+func (failure *notRun) Unwrap() error { return failure.err }
+
+// beforeRunning marks an error of architecturekit.ErrNotCaughtUp as one that
+// came before the command ran or the query was answered (see notRun), and
+// leaves every other error as it is.
+func beforeRunning(err error) error {
+	if !errors.Is(err, architecturekit.ErrNotCaughtUp) {
+		return err
+	}
+
+	return &notRun{err: err}
+}
+
+// isBeforeRunning reports whether an error was marked by beforeRunning.
+func isBeforeRunning(err error) bool {
+	_, isMarked := errors.AsType[*notRun](err)
+
+	return isMarked
 }
 
 // panicError is a panic while a request was handled, which is answered like
