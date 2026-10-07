@@ -673,8 +673,10 @@ const statusClientClosedRequest = 499
 // twice, and 499 is not logged. So it comes before ErrConflict, ErrTransient,
 // and the end of the context, also if it wraps one of them as well. The same
 // holds for an error that wraps architecturekit.ErrNotCaughtUp, of a view that
-// did not catch up with a write in time (see architecturekit.WaitForWritten),
-// since the write has succeeded, and trying it again stores its events twice.
+// did not catch up with a write (see architecturekit.WaitForWritten), since
+// the write has succeeded, and trying it again stores its events twice. It
+// comes before ErrTransient, ErrPermanent, and the end of the context, which
+// it wraps if they kept the view from catching up.
 //
 // The status says nothing about what to tell the caller. Respond,
 // RespondResult, and RespondError explain only an error that is written for

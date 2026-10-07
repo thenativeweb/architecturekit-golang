@@ -232,9 +232,10 @@ func RevisionOf(events []eventsourcingdb.Event) string {
 	return highest
 }
 
-// ErrNotCaughtUp means that a view did not catch up with written events in
-// time (see WaitForWritten). The events were written, so the write has
-// succeeded, and only the view lags behind.
+// ErrNotCaughtUp means that a view did not catch up with written events (see
+// WaitForWritten), because the time ran out, the context ended, or the view
+// could not be asked. The events were written, so the write has succeeded,
+// and only the view lags behind.
 //
 // It belongs to no category. It is not ErrTransient, since trying the write
 // again would store its events twice, and not ErrPermanent, since the view may
@@ -260,14 +261,26 @@ var ErrNotCaughtUp = errors.New("not caught up")
 // written, since there is nothing to wait for then.
 //
 // Unlike Await of httpapi, which answers a caller with what the view holds,
-// running out of time is an error, since the step needs what was written: if
-// timeout runs out while ctx has not ended, it returns an error that wraps
-// ErrNotCaughtUp, which says so. That is no ErrTransient, since the write has
-// succeeded, and trying it again would store the events twice. So a handler
-// that waits after a command usually answers ErrNotCaughtUp with success,
-// and with the revision of the events, for which the caller can wait itself.
-// If ctx ends first, it returns the error of ctx, and any other error of the
-// view as it is.
+// running out of time is an error, since the step needs what was written.
+// Every error it returns wraps ErrNotCaughtUp, since the events were written
+// in any case, and says why the view has not caught up, keeping the cause for
+// errors.Is and errors.As:
+//
+//   - if timeout runs out while ctx has not ended, the error says so, as in
+//     "not caught up: the events were written, but the view did not catch up
+//     within 5s";
+//   - if ctx ends first, it wraps the error of ctx, as in "not caught up: the
+//     events were written, but waiting for the view ended: context canceled";
+//   - if the view fails otherwise, it wraps the error of the view, as in "not
+//     caught up: the events were written, but the view could not be asked:
+//     ...".
+//
+// The write has succeeded, and trying it again would store the events twice,
+// so check for ErrNotCaughtUp before a category, which the cause may belong
+// to, such as ErrTransient of a view in a database, as StatusFor of httpapi
+// does. A handler that waits after a command usually answers ErrNotCaughtUp
+// with success, and with the revision of the events, for which the caller can
+// wait itself.
 //
 // A nil view, including a nil pointer, is a programming error, and so is a
 // timeout that is not positive, since a view that has to catch up with a
@@ -295,10 +308,10 @@ func WaitForWritten(ctx context.Context, view Revisioned, written []eventsourcin
 	case err == nil:
 		return nil
 	case ctx.Err() != nil:
-		return ctx.Err()
+		return fmt.Errorf("%w: the events were written, but waiting for the view ended: %w", ErrNotCaughtUp, ctx.Err())
 	case waiting.Err() != nil && errors.Is(err, context.DeadlineExceeded):
 		return fmt.Errorf("%w: the events were written, but the view did not catch up within %s", ErrNotCaughtUp, timeout)
 	default:
-		return err
+		return fmt.Errorf("%w: the events were written, but the view could not be asked: %w", ErrNotCaughtUp, err)
 	}
 }

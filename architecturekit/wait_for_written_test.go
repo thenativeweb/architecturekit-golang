@@ -27,6 +27,13 @@ func viewAt(revision string) *architecturekit.InMemoryView[string, string] {
 	return view
 }
 
+// brokenView is an error of a view that carries more than its text.
+type brokenView struct {
+	reason string
+}
+
+func (e *brokenView) Error() string { return e.reason }
+
 // waitingView is a view whose WaitFor is the given function. It embeds the
 // interface for the rest of it, which WaitForWritten does not call.
 type waitingView struct {
@@ -111,7 +118,7 @@ func TestWaitForWritten(t *testing.T) {
 		assert.EqualError(t, err, "not caught up: the events were written, but the view did not catch up within 1.5ms")
 	})
 
-	t.Run("returns the error of the context if it ends first", func(t *testing.T) {
+	t.Run("fails with ErrNotCaughtUp that wraps the error of the context if it ends first", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
 			time.Sleep(20 * time.Millisecond)
@@ -120,26 +127,49 @@ func TestWaitForWritten(t *testing.T) {
 
 		err := architecturekit.WaitForWritten(ctx, viewAt("4"), writtenUpTo("5"), 5*time.Second)
 
-		assert.Equal(t, context.Canceled, err)
+		require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp, "the events were written all the same")
+		assert.ErrorIs(t, err, context.Canceled, "errors.Is has to find the end of the context")
+		assert.EqualError(t, err, "not caught up: the events were written, but waiting for the view ended: context canceled")
 	})
 
-	t.Run("returns the error of the context if its deadline comes first", func(t *testing.T) {
+	t.Run("fails with ErrNotCaughtUp that wraps the error of the context if its deadline comes first", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		defer cancel()
 
 		err := architecturekit.WaitForWritten(ctx, viewAt("4"), writtenUpTo("5"), 5*time.Second)
 
-		assert.Equal(t, context.DeadlineExceeded, err, "the deadline of the caller is not the timeout")
-		assert.NotErrorIs(t, err, architecturekit.ErrNotCaughtUp)
+		require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp, "the events were written all the same")
+		assert.ErrorIs(t, err, context.DeadlineExceeded, "errors.Is has to find the end of the context")
+		assert.EqualError(t, err, "not caught up: the events were written, but waiting for the view ended: context deadline exceeded",
+			"the deadline of the caller is not the timeout")
 	})
 
-	t.Run("returns the error of the context that has ended already", func(t *testing.T) {
-		assert.Equal(t, context.DeadlineExceeded,
-			architecturekit.WaitForWritten(endedContext(t), viewAt("4"), writtenUpTo("5"), time.Hour))
+	t.Run("fails with ErrNotCaughtUp that wraps the error of the context that has ended already", func(t *testing.T) {
+		err := architecturekit.WaitForWritten(endedContext(t), viewAt("4"), writtenUpTo("5"), time.Hour)
+
+		require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp)
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.EqualError(t, err, "not caught up: the events were written, but waiting for the view ended: context deadline exceeded")
 	})
 
-	t.Run("returns any other error of the view as it is", func(t *testing.T) {
-		broken := errors.New("the view is broken")
+	t.Run("wraps the error of the context rather than what the view made of it, if the context ends first", func(t *testing.T) {
+		// A view in a database may report the end of the context in words of
+		// its own, but the context is the cause.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		view := waitingView{waitFor: func(ctx context.Context, _ string) error {
+			return fmt.Errorf("polling the revision: %w", ctx.Err())
+		}}
+
+		err := architecturekit.WaitForWritten(ctx, view, writtenUpTo("5"), time.Hour)
+
+		require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.EqualError(t, err, "not caught up: the events were written, but waiting for the view ended: context canceled")
+	})
+
+	t.Run("fails with ErrNotCaughtUp that wraps any other error of the view", func(t *testing.T) {
+		broken := &brokenView{reason: "the index is gone"}
 
 		for name, waitFor := range map[string]func(ctx context.Context, revision string) error{
 			"at once": func(context.Context, string) error {
@@ -153,12 +183,31 @@ func TestWaitForWritten(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				err := architecturekit.WaitForWritten(waitingContext(t), waitingView{waitFor: waitFor}, writtenUpTo("5"), 20*time.Millisecond)
 
-				assert.Equal(t, broken, err)
+				require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp, "the events were written all the same")
+				assert.ErrorIs(t, err, broken, "errors.Is has to find the error of the view")
+				found, isFound := errors.AsType[*brokenView](err)
+				require.True(t, isFound, "errors.As has to find the error of the view")
+				assert.Same(t, broken, found)
+				assert.EqualError(t, err, "not caught up: the events were written, but the view could not be asked: the index is gone")
 			})
 		}
 	})
 
-	t.Run("returns an error of the view that looks like a timeout as it is, if the time has not run out", func(t *testing.T) {
+	t.Run("keeps the category of an error of the view, behind ErrNotCaughtUp", func(t *testing.T) {
+		// A view in a database may fail to read its revision for now.
+		view := waitingView{waitFor: func(context.Context, string) error {
+			return fmt.Errorf("%w: polling the revision: connection refused", architecturekit.ErrTransient)
+		}}
+
+		err := architecturekit.WaitForWritten(waitingContext(t), view, writtenUpTo("5"), time.Hour)
+
+		require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp, "the write has succeeded, so it must not look like a failed one")
+		assert.ErrorIs(t, err, architecturekit.ErrTransient, "errors.Is has to find the category of the cause")
+		assert.EqualError(t, err,
+			"not caught up: the events were written, but the view could not be asked: transient failure: polling the revision: connection refused")
+	})
+
+	t.Run("fails with ErrNotCaughtUp that wraps an error of the view that looks like a timeout, if the time has not run out", func(t *testing.T) {
 		// A view backed by a database may time out on its own.
 		failure := fmt.Errorf("reading the revision: %w", context.DeadlineExceeded)
 		view := waitingView{waitFor: func(context.Context, string) error {
@@ -167,7 +216,10 @@ func TestWaitForWritten(t *testing.T) {
 
 		err := architecturekit.WaitForWritten(waitingContext(t), view, writtenUpTo("5"), time.Hour)
 
-		assert.Equal(t, failure, err)
+		require.ErrorIs(t, err, architecturekit.ErrNotCaughtUp)
+		assert.ErrorIs(t, err, failure)
+		assert.EqualError(t, err, "not caught up: the events were written, but the view could not be asked: reading the revision: context deadline exceeded",
+			"the error of the view is not the timeout")
 	})
 
 	t.Run("waits for what Execute wrote in a view whose projection is tracked", func(t *testing.T) {
