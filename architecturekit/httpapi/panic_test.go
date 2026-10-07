@@ -524,3 +524,97 @@ func TestMissingPartsInHandleAndAsk(t *testing.T) {
 		})
 	}
 }
+
+// explosiveAbort aborts the response while it is encoded, the way net/http
+// expects a handler to.
+type explosiveAbort struct{}
+
+func (explosiveAbort) MarshalJSON() ([]byte, error) {
+	panic(http.ErrAbortHandler)
+}
+
+// explosiveTransient panics while it is encoded, with an error that claims to
+// be transient.
+type explosiveTransient struct{}
+
+func (explosiveTransient) MarshalJSON() ([]byte, error) {
+	panic(fmt.Errorf("%w: the encoder is down", architecturekit.ErrTransient))
+}
+
+func TestPanicsWhileEncodingInAHandlerOfYourOwn(t *testing.T) {
+	// Without a route, there is no answerPanic to catch a panic in a
+	// MarshalJSON function, so RespondResult has to, or net/http closes the
+	// connection without an answer.
+	for name, result := range map[string]any{
+		"a result":                    explosive{},
+		"a result in a slice":         []explosive{{}},
+		"a result in a field":         struct{ Notes []explosive }{Notes: []explosive{{}}},
+		"a result behind a pointer":   &explosive{},
+		"a result in a map":           map[string]explosive{"note": {}},
+		"a result in an interface":    []any{explosive{}},
+		"a result in a nested struct": struct{ Inner struct{ Note explosive } }{},
+	} {
+		t.Run("RespondResult answers "+name+" whose MarshalJSON panics with 500, and logs the panic", func(t *testing.T) {
+			var logs bytes.Buffer
+			api := httpapi.NewAPI(deadStore(t), userFrom, httpapi.WithLogger(loggerInto(&logs)))
+			mux := http.NewServeMux()
+			mux.HandleFunc("QUERY /notes", func(w http.ResponseWriter, r *http.Request) {
+				httpapi.RespondResult(w, r, api, result, nil)
+			})
+
+			response := askAsGolo(t, mux, "/notes")
+
+			assertPanicAnswered(t, response, logs.String(), "QUERY", "QUERY /notes", "the encoder is broken", "httpapi_test.explosive.MarshalJSON")
+			assert.Equal(t, "application/json", response.Header().Get("Content-Type"))
+			assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+		})
+	}
+
+	t.Run("RespondResult answers a panic with an error while encoding with 500, whatever its category", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+		recorder := httptest.NewRecorder()
+
+		require.NotPanics(t, func() {
+			httpapi.RespondResult(recorder, request, api, explosiveTransient{}, nil)
+		})
+
+		assertPanicAnswered(t, recorder, logs.String(), "GET", "GET /notes", "transient failure: the encoder is down", "httpapi_test.explosiveTransient.MarshalJSON")
+	})
+
+	t.Run("RespondResult writes nothing before it answers the panic, so that the status is 500", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+		recorder := httptest.NewRecorder()
+
+		httpapi.RespondResult(recorder, request, api, explosive{}, nil)
+
+		assert.Equal(t, http.StatusInternalServerError, recorder.Code, "a status written before the panic would stay")
+		assert.JSONEq(t, `{"message": "internal server error"}`, recorder.Body.String(), "nothing of the result may come first")
+		assert.Empty(t, recorder.Header().Get(httpapi.HeaderRevision))
+	})
+
+	t.Run("RespondResult passes on http.ErrAbortHandler while encoding", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+
+		assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+			httpapi.RespondResult(httptest.NewRecorder(), request, api, explosiveAbort{}, nil)
+		}, "net/http expects the panic, to abort the response")
+		assert.Empty(t, logs.String(), "an aborted response is not logged")
+	})
+
+	t.Run("RespondResult answers the error rather than encoding the result, if there is one", func(t *testing.T) {
+		var logs bytes.Buffer
+		request, api := inAHandler(&logs)
+		recorder := httptest.NewRecorder()
+
+		require.NotPanics(t, func() {
+			httpapi.RespondResult(recorder, request, api, explosive{}, fmt.Errorf("%w: book 42 is unknown", httpapi.ErrNotFound))
+		})
+
+		assert.Equal(t, http.StatusNotFound, recorder.Code)
+		assert.JSONEq(t, `{"message": "not found: book 42 is unknown"}`, recorder.Body.String())
+		assert.Empty(t, logs.String())
+	})
+}
