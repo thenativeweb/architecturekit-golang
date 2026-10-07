@@ -4,9 +4,9 @@ Building blocks for DDD-based applications with CQRS and event sourcing in Go, o
 
 architecturekit covers both sides of an event-sourced application: commands, events, and the state to decide on for writing, and projections, views, and queries for reading. An optional package exposes commands and queries over HTTP.
 
-For more information on EventSourcingDB, see its [official documentation](https://docs.eventsourcingdb.io/).
+For more information on EventSourcingDB, see its [official documentation](https://www.eventfoundation.io/docs/eventsourcingdb).
 
-architecturekit includes a test package to test deciders, projections, and queries without a database. For details, see [Testing Deciders](#testing-deciders). For the tests that need a real database, a second package starts one in a container (see [Testing with a Database](#testing-with-a-database)).
+architecturekit includes a test package to test deciders and projections without a database. Queries need no such package, since a test calls them directly. For details, see [Testing Deciders](#testing-deciders). For the tests that need a real database, a second package starts one in a container (see [Testing with a Database](#testing-with-a-database)).
 
 ## Getting Started
 
@@ -182,7 +182,7 @@ type BookBorrowed struct {
 
 *Note that the other examples in this README keep `BorrowedUntil` a `string`. With the `Date` type, they would convert between the two, as in `Date(cmd.BorrowedUntil)`.*
 
-Apart from `time.Time`, `json.Number` and `json.RawMessage`, a type that encodes itself with a `MarshalJSON` function, or with `MarshalJSONTo` of `encoding/json/v2`, which `encoding/json` calls as well, needs such a `Schema` function, too, since the kit can not know what the function writes. So does a type that has its `MarshalText` or `AppendText` function on a pointer receiver only: `encoding/json` calls it only for a value it can take the address of, so whether such a value is written as a string depends on where it is. If the schema of an event can not be derived, for example because of such a type, a recursive type, or a channel, `Evolve` or `Ignore` panics and names the field.
+Apart from `time.Time`, `json.Number` and `json.RawMessage`, a type that encodes itself with a `MarshalJSON` function, or with `MarshalJSONTo` of `encoding/json/v2`, which `encoding/json` calls as well, needs such a `Schema` function, too, since the kit can not know what the function writes. So does a type that has its `MarshalText` or `AppendText` function on a pointer receiver only: `encoding/json` calls it only for a value it can take the address of, so whether such a value is written as a string depends on where it is. If the schema of an event can not be derived, for example because of such a type, a recursive type, a channel, a function, or a complex number, `Evolve` or `Ignore` panics and names the field.
 
 *Note that the derived schema never takes over the `Schema` function of an interface. `encoding/json` writes the value a field of the interface holds, or `null`, so there is no value whose `Schema` function could be asked, and the field is described as if the interface had none. To constrain such a field, or one whose interface encodes itself with `MarshalJSON`, give the event a `Schema` function of its own.*
 
@@ -208,7 +208,7 @@ func (BookCorrected) Schema() map[string]any {
 }
 ```
 
-`DeriveSchema` returns a new schema on every call, with objects as `map[string]any` and arrays as `[]any`, as `encoding/json` decodes them.
+`DeriveSchema` returns a new schema on every call, with objects as `map[string]any`, arrays as `[]any`, and numbers as `float64`, such as the `minItems` of an array, as `encoding/json` decodes them.
 
 A `Schema` function describes the type that declares it. Go also promotes it to a struct that embeds the type, but there it still describes the embedded type alone, while `encoding/json` writes the fields of the embedded struct next to the other fields of the struct. So if an event, or the type of a field, has its `Schema` function only from an embedded field, `Evolve` or `Ignore` panics and names the embedded field, and so does `DeriveSchema` for such a type. Give the struct a `Schema` function of its own, or make the embedded type a named field.
 
@@ -415,7 +415,7 @@ Every command declares at least one precondition, so that writing without any ch
 - `Require` turns any other precondition of the client SDK into one of the command, such as an EventQL query.
 - `Unconditionally` writes without any check.
 
-Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, or combines `Unconditionally` with others, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`. The `CheckReadOptions` function does the same for the options of a read (see [Reading Events](#reading-events)).
+Preconditions can be combined, and all of them must hold. If a precondition does not hold, nothing is written, and `Execute` returns an error of the category `ErrConflict` (see [Handling Errors](#handling-errors)). If a command declares no preconditions, requires a precondition that is `nil`, as with `Require(nil)`, combines `Unconditionally` with others, or declares a zero `Precondition`, which none of these functions returns, `Execute` returns an error of the category `ErrPermanent` before reading anything. To check the preconditions of a command this way without executing it, call the `CheckPreconditions` function with the command, which returns the same error, or `nil`. The `CheckReadOptions` function does the same for the options of a read (see [Reading Events](#reading-events)).
 
 To find out what kind a precondition is, call its `IsOnStateRead` or `IsUnconditional` function. Its `Database` function returns the precondition of the client SDK that the database checks for it: the one `Require` made it from, which is how `OnPristineSubject` and `OnPopulatedSubject` make theirs, or the one of `NewIsSubjectOnEventIDPrecondition` for `OnEventID`. For any other, it returns `false`.
 
@@ -495,6 +495,8 @@ func (c ReturnBook) Preconditions() []architecturekit.Precondition {
 }
 ```
 
+*Note that `OnPopulatedSubject` needs EventSourcingDB 1.2 or later, which added the `isSubjectPopulated` precondition. An older database refuses the write with `400 Bad Request`, so that `Execute` fails with an error of the category `ErrPermanent`.*
+
 #### Enforcing Rules Across Subjects
 
 If a command may only write events depending on an EventQL query, use the `NewIsEventQLQueryTruePrecondition` function of the client SDK, and wrap it with the `Require` function. For example, to acquire every ISBN only once, extend the preconditions of `AcquireBook`:
@@ -530,7 +532,7 @@ var acquireBook = architecturekit.NewDecider(bookState,
 
 *Note that a value must never go into an EventQL query unchecked. A quote, as in `it's`, breaks the query, so that the write fails, and a value made up for that purpose changes what the query checks.*
 
-When the ISBN is taken, the database refuses the write with `precondition failed`, the same answer as for a subject that has changed since it was read. It does not say which precondition failed, so the kit can not tell the two apart:
+When the ISBN is taken, the database refuses the write with `409 Conflict` and the reason `state conflict: precondition failed`, the same answer as for a subject that has changed since it was read. It does not say which precondition failed, so the kit can not tell the two apart:
 
 - The command fails with an error of the category `ErrConflict`, which is transient (see [Handling Errors](#handling-errors)).
 - The `httpapi` package answers it with `409 Conflict` and the message `conflict: the data has changed since it was read`, which tells the caller to try again, although that never helps (see [Handling Commands over HTTP](#handling-commands-over-http)).
@@ -782,7 +784,7 @@ if errors.Is(err, architecturekit.ErrConflict) {
 
 `Write` writes the events with the source of the store, and returns them as the database recorded them. If a precondition does not hold, nothing is written, and the error belongs to the category `ErrConflict`. If the data of one of the events can not be encoded as JSON, nothing is written either, and the error belongs to the category `ErrPermanent`. So does an event without a subject, or one that is `nil`, a `nil` pointer included. Other failures belong to the same categories as for `Execute`, or leave the outcome of the write unknown, as with `Execute` (see [Handling Errors](#handling-errors)).
 
-Like a command, a write declares at least one precondition, such as `OnPristineSubject` or one made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state, so `Write` refuses it with an error of the category `ErrPermanent`, without writing anything. An event ID of `OnEventID` that is not a revision makes `Write` fail with an error that wraps `ErrNotARevision`, as with `Execute`, without writing anything either (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)).
+Like a command, a write declares at least one precondition, such as `OnPristineSubject` or one made with `Require`, or `Unconditionally` to write without any. `OnStateRead` has nothing to guard, since `Write` reads no state, so `Write` refuses it with an error of the category `ErrPermanent`, without writing anything. It refuses no preconditions at all, a precondition that is `nil`, as with `Require(nil)`, `Unconditionally` combined with others, and a zero `Precondition` the same way, as `Execute` does (see [Using Preconditions](#using-preconditions)). An event ID of `OnEventID` that is not a revision makes `Write` fail with an error that wraps `ErrNotARevision`, as with `Execute`, without writing anything either (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)).
 
 *Note that `Write` never decides again, since there is nothing to decide. If nothing is to be written, call it with no events, which writes nothing. It still needs preconditions, though, as any other write, and fails with an error of the category `ErrPermanent` without them, so declare them, for example with `Unconditionally()`.*
 
@@ -830,9 +832,9 @@ A failure of the database wraps the error of the client after its category. So `
 
 An error that your own code returns, for example from a decider or a projection, passes through unchanged, so it belongs to a category only if you wrap it with one, as `NewDomainError` does. A panic in a projection, on the other hand, comes back as an error of the category `ErrPermanent` (see [Running Projections](#running-projections)). The `httpapi` and `query` packages have errors of their own, which `StatusFor` maps to status codes (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes) and [Getting a Single Item](#getting-a-single-item)).
 
-If the context ends, reading stops, and so does writing, but only before it has begun. The error is then the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides. A write that has begun, though, is finished, since the database may store the events as soon as the request has left, and `Execute` and `Write` return its result, the events written or the failure of the write, rather than the error of the context.
+If the context ends, reading stops, and so does writing, but only before it has begun. The error then wraps the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category, as in `architecturekit: reading "/books/42": context canceled`. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides. A write that has begun, though, is finished, since the database may store the events as soon as the request has left, and `Execute` and `Write` return its result, the events written or the failure of the write, rather than the error of the context.
 
-Another exception is `ErrOutcomeUnknown`, which belongs to no category either. It means that a write failed in a way that leaves open whether the database stored the events. The request had left, but no complete answer arrived, for example because the connection broke, the answer was cut off, or a timeout of the client ran out. Or the answer was one that may come after the events were stored, such as `500`, or one that does not come from an EventSourcingDB, such as a `502` or `504` of a proxy in front of it. The error wraps `ErrOutcomeUnknown` and the error of the client, as in `outcome unknown: writing "/books/42": connection reset by peer`, so check for it with `errors.Is`, and use `errors.As` to get at the answer of the database, as for a category. `StatusFor` maps it to `500 Internal Server Error` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
+Another exception is `ErrOutcomeUnknown`, which belongs to no category either. It means that a write failed in a way that leaves open whether the database stored the events. The request had left, but no complete answer arrived, for example because the connection broke, the answer was cut off or could not be decoded, or a timeout of the client ran out. Or the answer was one that may come after the events were stored, such as `500`, or one that does not come from an EventSourcingDB, such as a `502` or `504` of a proxy in front of it. The error wraps `ErrOutcomeUnknown` and the error of the client, as in `outcome unknown: writing "/books/42": Post "http://localhost:3000/api/v1/write-events": …`, which ends in what went wrong, such as `connection reset by peer`, so check for it with `errors.Is`, and use `errors.As` to get at the answer of the database, as for a category. `StatusFor` maps it to `500 Internal Server Error` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
 It is not `ErrTransient`, since trying again may store the events twice: with `Unconditionally`, the same events are written once more, and with `OnStateRead`, `Execute` reads the state anew, which then holds the events, so the precondition holds, and the decider decides once more. So do not try again blindly. Find out first whether the events were stored, for example by reading the subject, or try again only with a precondition that refuses the same events a second time, such as `OnEventID` with the revision the command was decided on, or `OnPristineSubject` for a subject that the command creates. Neither `Execute` nor `Write` tries again by itself, not even on a store that decides again on conflicts.
 
@@ -863,7 +865,7 @@ if err != nil {
 }
 ```
 
-`RegisterSchemas` accepts the schemas of several states at once. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code. If the context ends first, it returns the error of the context. A registration that has begun is finished, since the context no longer stops it, but none begins once the context has ended.
+`RegisterSchemas` accepts the schemas of several states at once. An event type that several of them bring along with the same schema is registered once. If they bring it along with two different schemas, `RegisterSchemas` returns an error of the category `ErrPermanent`, as in `permanent failure: event type "io.eventsourcingdb.library.book-acquired" has two different schemas`, and so it does for a schema that is `nil`, which it reports as `event type … has no schema`, in either case before it registers anything. Call it on every start, before the application serves requests: for an event type the database knows already, it checks that the registered schema is exactly the one from the code. If the context ends first, it returns an error that wraps the one of the context. A registration that has begun is finished, since the context no longer stops it, but none begins once the context has ended.
 
 An event that no state has a rule for, such as `InventoryTaken`, which only `Write` writes (see [Writing to Several Subjects](#writing-to-several-subjects)), is part of no `Schemas`. To register its schema as well, call the `SchemaOf` function with the type of the event. It returns an `EventSchema` by the rule that `Evolve` applies, the event's own schema or the derived one. Since `RegisterSchemas` takes slices of them, hand it over in a slice of its own:
 
@@ -1576,7 +1578,7 @@ To have the projection see the same events as the state, hand over the same set 
 catalogProjection.UpcastWith(libraryUpcasters)
 ```
 
-*Note that calling `On` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer or an interface as the event type, as with `Evolve`.*
+*Note that calling `On` twice for the same event type panics, and so does calling it with `nil` as the function, or with a pointer or an interface as the event type, as with `Evolve`. Calling `UpcastWith` twice, or with `nil`, panics as well, as it does on a state.*
 
 #### Handling Every Event
 
@@ -1698,7 +1700,7 @@ if status.Phase == architecturekit.PhaseReconnecting && time.Since(status.Since)
 }
 ```
 
-To only apply the events that are already stored, for example for a batch job or in a test, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied. If the context ends before that, it returns the error of the context, so that a read model that is only partly built does not look complete. If the projection panics, it returns the same error a run ends with, rather than panicking:
+To only apply the events that are already stored, for example for a batch job or in a test, call the `CatchUpProjection` function instead. It takes the same arguments and returns once all stored events have been applied. If the context ends before that, it returns an error that wraps the one of the context, so that a read model that is only partly built does not look complete. If the projection panics, it returns the same error a run ends with, rather than panicking:
 
 ```go
 err := architecturekit.CatchUpProjection(context.TODO(), store, architecturekit.SubjectTree("/books"), catalogProjection)
@@ -1736,16 +1738,16 @@ func (p *BookTableProjection) SaveCheckpoint(ctx context.Context, eventID string
 To make a projection created with `NewTypedProjection` resumable, embed it in a type of your own, and add the two functions there:
 
 ```go
-type BookTable struct {
+type TypedBookTableProjection struct {
   *architecturekit.TypedProjection
   // ...
 }
 
-func (t *BookTable) Checkpoint(ctx context.Context) (string, error) {
+func (p *TypedBookTableProjection) Checkpoint(ctx context.Context) (string, error) {
   // ...
 }
 
-func (t *BookTable) SaveCheckpoint(ctx context.Context, eventID string) error {
+func (p *TypedBookTableProjection) SaveCheckpoint(ctx context.Context, eventID string) error {
   // ...
 }
 ```
@@ -2098,10 +2100,10 @@ To track the revision of a view, wrap the projection with the `Tracking` functio
 trackedProjection := architecturekit.Tracking(catalogProjection, catalog)
 ```
 
-If the projection writes to several views, hand over all of them, so that each one knows how far it has come:
+If the projection writes to several views, such as a `libraryProjection` that keeps both the `catalog` and the `readers` up to date (see [Sharing Items with Readers](#sharing-items-with-readers)), hand over all of them, so that each one knows how far it has come:
 
 ```go
-trackedProjection := architecturekit.Tracking(libraryProjection, catalog, readers, loans)
+trackedProjection := architecturekit.Tracking(libraryProjection, catalog, readers)
 ```
 
 Then run `trackedProjection` instead of `catalogProjection` (see [Running Projections](#running-projections)).
@@ -2221,7 +2223,7 @@ api := httpapi.NewAPI(store, userFrom)
 mux := http.NewServeMux()
 ```
 
-If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so do an error of the category `ErrPermanent`, one of a write whose outcome is unknown, `ErrOutcomeUnknown`, and one of a view that did not catch up with a write, `ErrNotCaughtUp`, which are answered with `500 Internal Server Error`, the last one with the message `internal server error`, since nothing of the request has run. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
+If the function returns an error, neither a command nor a query is run, and the request is answered with `401 Unauthorized`. An error that has a status code of its own keeps it, though (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), and so do an error of the category `ErrPermanent`, one of a write whose outcome is unknown, `ErrOutcomeUnknown`, and one of a view that did not catch up with a write, `ErrNotCaughtUp`, which are answered with `500 Internal Server Error` and the message `internal server error`, since neither a command nor a query has run. So if the function can not determine the user because the session store is down, for example, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than sending the caller off to sign in again.
 
 *Note that to answer an error that has a status code of its own with `401 Unauthorized` all the same, the function wraps it with `httpapi.ErrUnauthorized` itself, for example with `fmt.Errorf("%w: %w", httpapi.ErrUnauthorized, err)`.*
 
@@ -2287,7 +2289,7 @@ func toBorrowBook(r *http.Request, request borrowBookRequest, user User) (Borrow
 }
 ```
 
-The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake. An expected event ID that is empty or not an event ID at all is answered with `400 Bad Request` without a check of your own, since `OnEventID` refuses it before anything is read (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). Checking it here lets the message name the field, though. `ParseRevision` refuses both, unlike `CompareRevisions`, which takes an empty revision for the one of a view that has seen nothing (see [Comparing Revisions](#comparing-revisions)).
+The function is the place to validate a request, since an error it returns is answered with `400 Bad Request`, unless it has a status code of its own (see [Authorizing Commands](#authorizing-commands)). Check at least what would otherwise fail later: the ID of the book becomes part of a subject, and `Build` panics on an empty ID or one with a character that a segment of a subject may not contain, such as a slash or a dot (see [Composing Subjects](#composing-subjects)), which is answered with `500 Internal Server Error`. A value of the path is no exception, since it may hold a slash, sent as `%2F`. And a value that does not match the schema of its event is refused by the database, which is a permanent failure answered with `500 Internal Server Error` – although it is the caller's mistake. An expected event ID that is empty or not an event ID at all is answered with `400 Bad Request` without a check of your own, since `OnEventID` refuses it before anything is read (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). Checking it here lets the message name the field, though. `ParseRevision` refuses both, unlike `CompareRevisions`, which takes an empty revision for the one of a view that has seen nothing (see [Comparing Revisions](#comparing-revisions)).
 
 Then call the `Route` function with the API, the mux, a pattern, the function that returns the command, and the decider:
 
@@ -2327,7 +2329,7 @@ The message is the error message if the error is written for the caller, such as
 | `404 Not Found`, for a query that found no item | `not found` |
 | `409 Conflict` | `conflict: the data has changed since it was read` |
 | `499 Client Closed Request` | `request canceled` |
-| `500 Internal Server Error`, for a write whose outcome is unknown | `outcome unknown: the request may have succeeded` |
+| `500 Internal Server Error`, for a write of the command whose outcome is unknown | `outcome unknown: the request may have succeeded` |
 | `500 Internal Server Error`, for a view that did not catch up with a write after the command | `the request succeeded, but its result is not visible yet` |
 | `500` and above | `internal server error` |
 
@@ -2463,7 +2465,7 @@ func toAcquireBook(r *http.Request, request acquireBookRequest, user User) (Acqu
 }
 ```
 
-The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent`, one of `ErrOutcomeUnknown`, or one of `ErrNotCaughtUp`, which are answered with `500 Internal Server Error`, the last one with the message `internal server error`, since the command has not run. So if the function looks something up in another service, with the context of the request, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
+The same applies to every error that has a status code of its own (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), such as `httpapi.ErrNotFound` or an error of the category `ErrDomain`, and to an error of the category `ErrPermanent`, one of `ErrOutcomeUnknown`, or one of `ErrNotCaughtUp`, which are answered with `500 Internal Server Error` and the message `internal server error`, since the command has not run. So if the function looks something up in another service, with the context of the request, and that service is down, it returns an error of the category `ErrTransient`. The request is then answered with `503 Service Unavailable`, and the failure is logged, rather than blaming the request.
 
 Any other error returned from the function is answered with `400 Bad Request`, with the error as the message, after the text of `httpapi.ErrMalformed`, as in `malformed request: borrowedUntil must be a date`. In `Handle`, it wraps `httpapi.ErrMalformed` as well as the original error, so that `errors.Is` and `errors.As` find either.
 
@@ -2707,9 +2709,9 @@ It checks the categories in this order:
 
 *Note that `context.Canceled` means that the caller went away before it got an answer. HTTP has no status code for that, so `499` is the one that nginx introduced, and which logs and metrics commonly know. Since nothing failed, it is not logged. Its message is `request canceled`, because the error may name internals, such as the subject that was read.*
 
-*Note that `ErrOutcomeUnknown` means that a write may or may not have stored its events (see [Handling Errors](#handling-errors)). So it comes before `ErrConflict`, `ErrTransient`, and the end of the context, and an error that wraps one of them as well is answered with `500 Internal Server Error` all the same: trying again, which `409` and `503` invite, may store the events twice, and `499` is not logged. Its message is `outcome unknown: the request may have succeeded`, so that the caller does not simply try again, while the error, which may name internals, such as the subject, is logged at level `Error`.*
+*Note that `ErrOutcomeUnknown` means that a write may or may not have stored its events (see [Handling Errors](#handling-errors)). So it comes before `ErrConflict`, `ErrTransient`, and the end of the context, and an error that wraps one of them as well is answered with `500 Internal Server Error` all the same: trying again, which `409` and `503` invite, may store the events twice, and `499` is not logged. Its message is `outcome unknown: the request may have succeeded`, so that the caller does not simply try again, while the error, which may name internals, such as the subject, is logged at level `Error`. Only if it comes from the function that returns a command, from the one that returns a query, or from the one that determines the user, the command or the query has not run, so its message is `internal server error`, as for any other internal failure. `Handle`, `Ask`, and `UserOf` return such an error marked for that, with the same text, which `errors.Is` and `errors.As` see through.*
 
-*Note that `ErrNotCaughtUp` means that a write has succeeded, but that a view did not catch up with it (see [Waiting for Written Events](#waiting-for-written-events)). Trying again would store the events twice, so it comes right after `ErrOutcomeUnknown`, and is answered with `500 Internal Server Error` the same way, also if it wraps `ErrConflict`, `ErrTransient`, `ErrPermanent`, or the end of the context as well, as it does when one of them kept the view from catching up. Its message is `the request succeeded, but its result is not visible yet`, while the error is logged at level `Error`. A handler that waits after a command usually answers it with success, though, since the write has succeeded. Only if it comes from the function that returns a command, from the one that returns a query, or from the one that determines the user, nothing of the request has run, so its message is `internal server error`, as for any other internal failure. `Handle`, `Ask`, and `UserOf` return such an error marked for that, with the same text, which `errors.Is` and `errors.As` see through.*
+*Note that `ErrNotCaughtUp` means that a write has succeeded, but that a view did not catch up with it (see [Waiting for Written Events](#waiting-for-written-events)). Trying again would store the events twice, so it comes right after `ErrOutcomeUnknown`, and is answered with `500 Internal Server Error` the same way, also if it wraps `ErrConflict`, `ErrTransient`, `ErrPermanent`, or the end of the context as well, as it does when one of them kept the view from catching up. Its message is `the request succeeded, but its result is not visible yet`, while the error is logged at level `Error`. A handler that waits after a command usually answers it with success, though, since the write has succeeded. Only if it comes from the function that returns a command, from the one that returns a query, or from the one that determines the user, the command or the query has not run, so its message is `internal server error`, and `Handle`, `Ask`, and `UserOf` return it marked for that, as they do for `ErrOutcomeUnknown`.*
 
 *Note that `ErrNotARevision` means that a value that was handed over is not a revision, such as a bound of `Read`, the event ID of `OnEventID`, a value for `CompareRevisions` or `ParseRevision`, or the revision a view is to wait for, which usually comes from the request. So it is answered with `400 Bad Request` and the error as the message, like any other mistake in the request, also if it is the function that answers a query that finds it. An ID that the server stored or made itself and that is broken is a failure of the server, though, so an error of the category `ErrPermanent` is answered with `500 Internal Server Error`, even if it wraps `ErrNotARevision` as well. Both come last, so that an error that belongs to another category as well keeps its status code.*
 
@@ -2719,7 +2721,7 @@ It checks the categories in this order:
 
 *Note that a panic while a route handles a request is answered with `500 Internal Server Error` as well (see [Handling Commands over HTTP](#handling-commands-over-http)).*
 
-*Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, `499`, and `500` and above, as `Respond`, `RespondResult`, and `RespondError` do, since it may name internals, say `not found` for `query.ErrNoItems`, tell the caller for `ErrOutcomeUnknown` that the request may have succeeded, and for `ErrNotCaughtUp` that it has succeeded, but that its result is not visible yet (see [Handling Commands over HTTP](#handling-commands-over-http)).*
+*Note that the status code says nothing about what to tell the caller. If you answer in a format of your own, leave out the error for `401`, `409`, `499`, and `500` and above, as `Respond`, `RespondResult`, and `RespondError` do, since it may name internals, say `not found` for `query.ErrNoItems`, tell the caller for `ErrOutcomeUnknown` that the request may have succeeded, and for `ErrNotCaughtUp` that it has succeeded, but that its result is not visible yet (see [Handling Commands over HTTP](#handling-commands-over-http)). `Respond`, `RespondResult`, and `RespondError` answer such an error from before the command or the query with `internal server error` instead, by the mark that `Handle`, `Ask`, and `UserOf` give it. Only they can tell it apart, so in a format of your own, answer both kinds the same way, or answer failures with `RespondError`.*
 
 ### Reading Your Own Writes over HTTP
 
@@ -2760,7 +2762,7 @@ This holds as long as the answer depends on nothing but the query and the view, 
 
 For an answer that depends on more than the query and `Varying` can capture, wait without a tag (see [Waiting for a Revision Without a Tag](#waiting-for-a-revision-without-a-tag)).
 
-A query that holds a function or a channel can not be written into an `ETag`, and its answer goes without one.
+A query that holds a function, a channel, or an unsafe pointer, or a value that contains itself, can not be written into an `ETag`, and its answer goes without one.
 
 *Note that the constants `httpapi.HeaderWaitFor` and `httpapi.HeaderRevision` contain the names of the two headers.*
 
@@ -2879,7 +2881,7 @@ mux.HandleFunc("GET /api/books.csv", func(w http.ResponseWriter, r *http.Request
 
 ### Checking Health over HTTP
 
-An orchestrator such as Kubernetes regularly asks an application whether it can serve requests, and whether it is alive. To answer both by the state of the projections, hand the runs started with `StartProjection` over to the `Readiness` and `Liveness` functions, and serve the handlers they return on paths of your choice. They list each projection by the name it was given with `Named`:
+An orchestrator such as Kubernetes regularly asks an application whether it can serve requests, and whether it is alive. To answer both by the state of the projections, hand the runs started with `StartProjection` or `StartTransactionalProjection` over to the `Readiness` and `Liveness` functions, and serve the handlers they return on paths of your choice. They list each projection by the name it was given with `Named`:
 
 ```go
 run := architecturekit.StartProjection(ctx, store, architecturekit.SubjectTree("/books"), catalogProjection,
@@ -2927,7 +2929,9 @@ The body of `Liveness` has the same shape, but tells whether the application is 
 
 ### Putting It Together
 
-So far, the pieces have been shown one at a time. A `main` function wires them together: it creates the store, registers the schemas, starts the projection and waits until it has caught up, serves the routes and the health checks, and shuts down cleanly once it is asked to stop:
+So far, the pieces have been shown one at a time. A `main` function wires them together: it creates the store, registers the schemas, starts the projection and waits until it has caught up, serves the routes and the health checks, and shuts down cleanly once it is asked to stop.
+
+It uses the pieces as the sections above define them: `bookState` and `borrowBook` from [Defining State](#defining-state) and [Making Decisions](#making-decisions), `newCatalog` and `newCatalogProjection` from [Defining Views](#defining-views) and [Defining Projections](#defining-projections), `listBooks` from [Defining Queries](#defining-queries), `userFrom` from [Setting Up an HTTP API](#setting-up-an-http-api), `toBorrowBook` from [Handling Commands over HTTP](#handling-commands-over-http), and `toListBooks` and `answerBooks` from [Handling Queries over HTTP](#handling-queries-over-http). `toBorrowBook` returns the `BorrowBook` with the field `ExpectedEventID`, which checks the revision of the caller (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)):
 
 ```go
 func main() {
@@ -3148,7 +3152,7 @@ architecturekittest.Given(t, returnBook, BookAcquired{}, BookBorrowed{}).
 
 #### Testing Upcasters
 
-To test an upcaster, call the `GivenStored` function instead of `Given`, and hand over the events as they are stored. They run through the upcasters, as they do when reading from the database. To turn a typed event into a stored one, call the `StoredEvent` function with the subject, the event ID, and the event:
+To test an upcaster, call the `GivenStored` function instead of `Given`, and hand over the events as they are stored. They run through the upcasters of the decider's state, as they do when reading from the database, so the example below needs `bookState.UpcastWith(libraryUpcasters)` (see [Versioning Events](#versioning-events)). Without it, the state has no rule for the older event type, and `GivenStored` fails the test. To turn a typed event into a stored one, call the `StoredEvent` function with the subject, the event ID, and the event:
 
 ```go
 architecturekittest.GivenStored(t, borrowBook,

@@ -980,19 +980,20 @@ func TestUserOf(t *testing.T) {
 }
 
 // assertKept asserts that an error of userFrom, ToCommand, or ToQuery came
-// back as it is. Only one of ErrNotCaughtUp comes back marked, since nothing
-// of the request has run, with the same text, and unwrapping to the error.
+// back as it is. Only one of ErrOutcomeUnknown or ErrNotCaughtUp comes back
+// marked, since the command or the query has not run, with the same text, and
+// unwrapping to the error.
 func assertKept(t *testing.T, want, got error) {
 	t.Helper()
 
-	if !errors.Is(want, architecturekit.ErrNotCaughtUp) {
+	if !errors.Is(want, architecturekit.ErrOutcomeUnknown) && !errors.Is(want, architecturekit.ErrNotCaughtUp) {
 		assert.Equal(t, want, got, "the error has to come back as it is")
 		return
 	}
 
 	assert.EqualError(t, got, want.Error(), "the error has to keep its text")
 	assert.Equal(t, want, errors.Unwrap(got), "the error has to come back wrapped only by the mark")
-	assert.ErrorIs(t, got, architecturekit.ErrNotCaughtUp)
+	assert.ErrorIs(t, got, want)
 }
 
 // expiredToken is an error of userFrom that carries more than its text.
@@ -1108,7 +1109,7 @@ var buildFailures = []struct {
 	{"that is transient", fmt.Errorf("%w: session store at redis://10.0.3.9 is down", architecturekit.ErrTransient), http.StatusServiceUnavailable, "internal server error", true},
 	{"that is permanent", fmt.Errorf("%w: the catalog at /etc/catalog.yaml is missing", architecturekit.ErrPermanent), http.StatusInternalServerError, "internal server error", true},
 	{"that is unverified", fmt.Errorf("%w: the reader is forged", architecturekit.ErrUnverified), http.StatusInternalServerError, "internal server error", true},
-	{"whose outcome is unknown", fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/readers/23"), http.StatusInternalServerError, "outcome unknown: the request may have succeeded", true},
+	{"whose outcome is unknown", fmt.Errorf("%w: writing %q: EOF", architecturekit.ErrOutcomeUnknown, "/readers/23"), http.StatusInternalServerError, "internal server error", true},
 	{"of a view that did not catch up", fmt.Errorf("%w: the events were written, but the view did not catch up within 5s", architecturekit.ErrNotCaughtUp), http.StatusInternalServerError, "internal server error", true},
 	{"because the caller went away", fmt.Errorf("looking up the reader: %w", context.Canceled), 499, "request canceled", true},
 	{"because the deadline ran out", fmt.Errorf("looking up the reader: %w", context.DeadlineExceeded), http.StatusServiceUnavailable, "internal server error", true},
