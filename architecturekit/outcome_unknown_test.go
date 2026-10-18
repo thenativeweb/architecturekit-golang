@@ -7,8 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -306,167 +304,25 @@ func TestAFailedWrite(t *testing.T) {
 	})
 }
 
-// ownProcess tells a test process that it is the one in which the test it
-// names runs on its own (see inAProcessOfItsOwn).
-const ownProcess = "ARCHITECTUREKIT_TEST_OWN_PROCESS"
-
-// inAProcessOfItsOwn reports whether the test runs in a process of its own,
-// which runs nothing else. If it does not, it runs the test there, asserts
-// that the test and each of the given subtests ran there and passed, and
-// reports false, so that the test returns.
-//
-// The client sends every request with http.DefaultClient, which the whole
-// process shares, including the requests that other tests leave running. So
-// a test changes it only in a process of its own.
-func inAProcessOfItsOwn(t *testing.T, subtests ...string) bool {
-	t.Helper()
-
-	if os.Getenv(ownProcess) == t.Name() {
-		return true
-	}
-
-	process := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.short", "-test.count=1", "-test.v")
-	process.Env = append(os.Environ(), ownProcess+"="+t.Name())
-
-	output, err := process.CombinedOutput()
-	require.NoError(t, err, "the test failed in its own process:\n%s", output)
-
-	// A process that runs no test passes as well, so the test has to say that
-	// it ran, and so does each of its subtests.
-	assert.NotContains(t, string(output), "no tests to run")
-	assert.Contains(t, string(output), "--- PASS: "+t.Name()+" (")
-	for _, subtest := range subtests {
-		assert.Contains(t, string(output), "--- PASS: "+t.Name()+"/"+strings.ReplaceAll(subtest, " ", "_")+" (",
-			"the subtest %q did not pass in its own process:\n%s", subtest, output)
-	}
-
-	return false
-}
-
-// subtestsOf returns the names of the subtests that run for each of the
-// writes of the kit, which begin with the name of the write.
-func subtestsOf(name string) []string {
-	subtests := make([]string, len(kitWrites))
-	for i, write := range kitWrites {
-		subtests[i] = write.name + " " + name
-	}
-
-	return subtests
-}
-
-// roundTripperFunc is a transport made of a function.
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (send roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return send(request)
-}
-
-func TestATransportOfTheApplication(t *testing.T) {
-	// The kit tells from the hooks of a trace in the context of the request
-	// whether a request certainly has not been sent. A transport of the
-	// application's own on http.DefaultClient may hide them, if it does not
-	// hand the context on, and then nothing tells that the request has not
-	// been sent, so the outcome is unknown even if it was not. The test sets
-	// the transport, in a process of its own.
-	var subtests []string
-	for _, transport := range []string{"that hides the requests", "that hands on the context"} {
-		for _, failure := range []string{"when the database can not be reached", "when the connection breaks"} {
-			subtests = append(subtests, subtestsOf("with a transport "+transport+", "+failure)...)
-		}
-	}
-	if !inAProcessOfItsOwn(t, subtests...) {
-		return
-	}
-
-	inner := &http.Transport{}
-	t.Cleanup(inner.CloseIdleConnections)
-	t.Cleanup(func() { http.DefaultClient.Transport = nil })
-
-	transports := []struct {
-		name string
-		send roundTripperFunc
-
-		// isUnsentKnown tells whether the transport lets the kit know that a
-		// request was not sent.
-		isUnsentKnown bool
-	}{
-		{"that hides the requests", func(request *http.Request) (*http.Response, error) {
-			return inner.RoundTrip(request.Clone(context.Background()))
-		}, false},
-		{"that hands on the context", func(request *http.Request) (*http.Response, error) {
-			return inner.RoundTrip(request)
-		}, true},
-	}
-
-	unreachable := func(t *testing.T, write string) *eventsourcingdb.Client {
-		// Execute reads before it writes, so its database has to answer the
-		// read, and go away before the write.
-		if write == "Execute" {
-			return vanishingDatabase(t)
-		}
-
-		return deadClient(t)
-	}
-	breaking := func(t *testing.T, _ string) *eventsourcingdb.Client {
-		return writingDatabase(t, "/api/v1/write-events", func(http.ResponseWriter, *http.Request) {
-			panic(http.ErrAbortHandler)
-		})
-	}
-
-	for _, transport := range transports {
-		http.DefaultClient.Transport = transport.send
-
-		for _, write := range kitWrites {
-			t.Run(write.name+" with a transport "+transport.name+", when the database can not be reached", func(t *testing.T) {
-				store := architecturekit.NewStore(unreachable(t, write.name), "https://thenativeweb.io")
-
-				err := write.write(context.Background(), store, incremented{By: 1})
-
-				if transport.isUnsentKnown {
-					assert.ErrorIs(t, err, architecturekit.ErrTransient, "the kit knows that the request was not sent")
-					assert.NotErrorIs(t, err, architecturekit.ErrOutcomeUnknown)
-				} else {
-					assertOutcomeUnknown(t, err)
-				}
-				assert.ErrorContains(t, err, "connection refused")
-			})
-
-			t.Run(write.name+" with a transport "+transport.name+", when the connection breaks", func(t *testing.T) {
-				store := architecturekit.NewStore(breaking(t, write.name), "https://thenativeweb.io")
-
-				err := write.write(context.Background(), store, incremented{By: 1})
-
-				assertOutcomeUnknown(t, err)
-			})
-		}
-	}
-}
-
-func TestAClientTimeoutWhileWaitingForTheAnswer(t *testing.T) {
-	// The only deadline that can run out while a write waits for its answer is
-	// the timeout of http.DefaultClient, so the test sets it, in a process of
-	// its own.
-	if !inAProcessOfItsOwn(t, subtestsOf("leaves the outcome unknown")...) {
-		return
-	}
-
-	http.DefaultClient.Timeout = 200 * time.Millisecond
-
+func TestAStallWhileWaitingForTheAnswer(t *testing.T) {
+	// The client ends a request on which nothing has arrived for its stall
+	// timeout. A write that waits that long for its answer has left, so
+	// whether the database stored the events is unknown.
 	for _, write := range kitWrites {
 		t.Run(write.name+" leaves the outcome unknown", func(t *testing.T) {
 			store := architecturekit.NewStore(writingDatabase(t, "/api/v1/write-events",
 				func(_ http.ResponseWriter, request *http.Request) {
-					// The client goes away once its timeout has run out.
+					// The client goes away once its stall timeout has run out.
 					select {
 					case <-request.Context().Done():
 					case <-time.After(5 * time.Second):
 					}
-				}), "https://thenativeweb.io")
+				}, eventsourcingdb.WithStallTimeout(200*time.Millisecond)), "https://thenativeweb.io")
 
 			err := write.write(context.Background(), store, incremented{By: 1})
 
 			assertOutcomeUnknown(t, err)
-			assert.ErrorContains(t, err, "Client.Timeout exceeded while awaiting headers")
+			assert.ErrorContains(t, err, "connection stalled")
 		})
 	}
 }
