@@ -528,12 +528,9 @@ func (s *Store) write(
 // trace of a request that was written, though, outweighs a failed attempt
 // before it, as with a transport that tries again.
 //
-// A transport that does not hand the context of the request on to net/http,
-// such as one of the application's own on http.DefaultClient, calls no hooks
-// at all. Without evidence, though, the request may have been sent, so the
-// outcome of the write is unknown then. The same goes for an answer that
-// arrives before the hook of the written request is called, which HTTP/2
-// allows.
+// Without evidence, the request may have been sent, so the outcome of the
+// write is unknown then, as for an answer that arrives before the hook of the
+// written request is called, which HTTP/2 allows.
 type requestTrace struct {
 	isConnecting atomic.Bool
 	isConnected  atomic.Bool

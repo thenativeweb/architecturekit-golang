@@ -169,7 +169,7 @@ func refusingDatabase(t *testing.T, path string, status int, reason string) *eve
 // has read the request completely, as EventSourcingDB does with a write or the
 // registration of a schema, and every other request with an empty result, as
 // for a subject without events. It returns a client for it.
-func writingDatabase(t *testing.T, path string, answer http.HandlerFunc) *eventsourcingdb.Client {
+func writingDatabase(t *testing.T, path string, answer http.HandlerFunc, options ...eventsourcingdb.ClientOption) *eventsourcingdb.Client {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -182,7 +182,7 @@ func writingDatabase(t *testing.T, path string, answer http.HandlerFunc) *events
 	}))
 	t.Cleanup(server.Close)
 
-	return clientFor(t, server)
+	return clientFor(t, server, options...)
 }
 
 // vanishingDatabase answers reading with no events, and stops taking
@@ -223,13 +223,13 @@ func hangingUpDatabase(t *testing.T) *eventsourcingdb.Client {
 }
 
 // clientFor returns a client for the given server.
-func clientFor(t *testing.T, server *httptest.Server) *eventsourcingdb.Client {
+func clientFor(t *testing.T, server *httptest.Server, options ...eventsourcingdb.ClientOption) *eventsourcingdb.Client {
 	t.Helper()
 
 	serverURL, err := url.Parse(server.URL)
 	require.NoError(t, err)
 
-	client, err := eventsourcingdb.NewClient(serverURL, "secret")
+	client, err := eventsourcingdb.NewClient(serverURL, "secret", options...)
 	require.NoError(t, err)
 
 	return client
