@@ -34,12 +34,49 @@ func TestIsEqual(t *testing.T) {
 		))
 	})
 
-	t.Run("reports a type that cannot be compared as unequal instead of panicking", func(t *testing.T) {
+	t.Run("takes checks with options as equal if they were built alike", func(t *testing.T) {
+		// The client holds the options behind a pointer, which differs for
+		// every check, so == would tell these apart.
+		recursive := eventsourcingdb.PreconditionOptions{Recursive: true}
+
+		assert.True(t, isEqual(
+			eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1", recursive),
+			eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1", recursive),
+		))
+		assert.True(t, isEqual(
+			eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1", recursive),
+			eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1", recursive),
+		))
+		assert.True(t, isEqual(
+			eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/1", "7", recursive),
+			eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/1", "7", recursive),
+		))
+	})
+
+	t.Run("tells a recursive check from one of the subject alone", func(t *testing.T) {
+		recursive := eventsourcingdb.PreconditionOptions{Recursive: true}
+		alone := eventsourcingdb.PreconditionOptions{Recursive: false}
+
+		assert.False(t, isEqual(
+			eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1", recursive),
+			eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1"),
+		))
+		assert.False(t, isEqual(
+			eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1", recursive),
+			eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1", alone),
+		))
+		assert.False(t, isEqual(
+			eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/1", "7", recursive),
+			eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/1", "7"),
+		))
+	})
+
+	t.Run("compares a type that cannot be compared by its values instead of panicking", func(t *testing.T) {
 		declared := uncomparable{subjects: []string{"/account/1"}}
-		built := uncomparable{subjects: []string{"/account/1"}}
 
 		assert.NotPanics(t, func() {
-			assert.False(t, isEqual(declared, built))
+			assert.True(t, isEqual(declared, uncomparable{subjects: []string{"/account/1"}}))
+			assert.False(t, isEqual(declared, uncomparable{subjects: []string{"/account/2"}}))
 		})
 	})
 }

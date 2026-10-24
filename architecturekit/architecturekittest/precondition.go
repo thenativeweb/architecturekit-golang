@@ -13,26 +13,37 @@ import (
 //
 // The client keeps its precondition types unexported, so this is reconstructed
 // from the methods they expose. A check for a pristine subject and one for a
-// populated subject expose the same method, so they are told apart by
-// comparing them with one built anew.
+// populated subject expose the same method, and no check exposes whether it is
+// recursive, so they are told apart by comparing them with ones built anew.
 type Precondition struct {
 	// Subject is set for every precondition of the client that guards one.
 	Subject string
 
 	// Pristine is set only for a check that the subject has no events yet, as
 	// built by architecturekit.OnPristineSubject, or by Require with
-	// eventsourcingdb.NewIsSubjectPristinePrecondition.
+	// eventsourcingdb.NewIsSubjectPristinePrecondition. For a recursive one,
+	// Recursive is set as well.
 	Pristine bool
 
 	// Populated is set only for a check that the subject has events, as built
 	// by architecturekit.OnPopulatedSubject, or by Require with
-	// eventsourcingdb.NewIsSubjectPopulatedPrecondition.
+	// eventsourcingdb.NewIsSubjectPopulatedPrecondition. For a recursive one,
+	// Recursive is set as well.
 	Populated bool
 
 	// EventID is set only for a revision check, as built by
 	// architecturekit.OnEventID, or by Require with
-	// eventsourcingdb.NewIsSubjectOnEventIDPrecondition.
+	// eventsourcingdb.NewIsSubjectOnEventIDPrecondition. For a recursive one,
+	// Recursive is set as well.
 	EventID string
+
+	// Recursive is set only for a pristine, populated, or revision check that
+	// applies to the subject together with all subjects below it, as built by
+	// Require with eventsourcingdb.PreconditionOptions{Recursive: true}. Such
+	// a check is another one than the same check of the subject alone, so the
+	// two never compare as equal. Options that leave a check to the subject
+	// alone mean the same as none, so Recursive is not set for them.
+	Recursive bool
 
 	// Query is set only for an EventQL precondition.
 	Query string
@@ -59,6 +70,10 @@ type revisionPrecondition interface {
 type queryPrecondition interface {
 	Query() string
 }
+
+// recursive makes a check of the client apply to the subject together with
+// all subjects below it.
+var recursive = eventsourcingdb.PreconditionOptions{Recursive: true}
 
 // PreconditionsOf reports what a command declared. A command that declares
 // none, which Execute rejects, yields an empty slice.
@@ -91,19 +106,30 @@ func PreconditionsOf(cmd architecturekit.Command) []Precondition {
 		switch typed := database.(type) {
 		// The revision check comes first, because it also carries a subject.
 		case revisionPrecondition:
+			// It exposes its subject and its ID, so only whether it is
+			// recursive takes a comparison.
+			subject, eventID := typed.Subject(), typed.EventID()
+			recursively := eventsourcingdb.NewIsSubjectOnEventIDPrecondition(subject, eventID, recursive)
+
 			described = append(described, Precondition{
-				Subject: typed.Subject(),
-				EventID: typed.EventID(),
+				Subject:   subject,
+				EventID:   eventID,
+				Recursive: isEqual(database, recursively),
 			})
 		case queryPrecondition:
 			described = append(described, Precondition{Query: typed.Query()})
 		case subjectPrecondition:
 			subject := typed.Subject()
+			isPristine, isRecursivelyPristine := isBuiltBy(
+				database, eventsourcingdb.NewIsSubjectPristinePrecondition, subject)
+			isPopulated, isRecursivelyPopulated := isBuiltBy(
+				database, eventsourcingdb.NewIsSubjectPopulatedPrecondition, subject)
 
 			described = append(described, Precondition{
 				Subject:   subject,
-				Pristine:  isEqual(database, eventsourcingdb.NewIsSubjectPristinePrecondition(subject)),
-				Populated: isEqual(database, eventsourcingdb.NewIsSubjectPopulatedPrecondition(subject)),
+				Pristine:  isPristine,
+				Populated: isPopulated,
+				Recursive: isRecursivelyPristine || isRecursivelyPopulated,
 			})
 		}
 	}
@@ -111,20 +137,36 @@ func PreconditionsOf(cmd architecturekit.Command) []Precondition {
 	return described
 }
 
+// isBuiltBy tells whether a check of the client on a subject equals one that
+// build makes for the same subject, and if so, whether it is recursive.
+// Options that leave the check to the subject alone mean the same to the
+// database as none, so a check built with them counts as one built without.
+func isBuiltBy(
+	declared eventsourcingdb.Precondition,
+	build func(subject string, options ...eventsourcingdb.PreconditionOptions) eventsourcingdb.Precondition,
+	subject string,
+) (isBuilt, isRecursive bool) {
+	if isEqual(declared, build(subject, recursive)) {
+		return true, true
+	}
+
+	isBuilt = isEqual(declared, build(subject)) ||
+		isEqual(declared, build(subject, eventsourcingdb.PreconditionOptions{}))
+
+	return isBuilt, false
+}
+
 // isEqual tells whether a precondition of the client equals one built anew.
 // The client's preconditions are plain structs, so they are equal exactly when
 // the same function built both from the same values.
 //
-// Comparing values of a type that cannot be compared panics. The client's
-// types can be compared, so such a type would take a change to the client.
-// It is reported as unequal then, so that the test that expects it fails,
-// instead of the whole run panicking.
+// They are compared deeply, since a check on a subject holds its options
+// behind a pointer, which differs for every check built with options, so that
+// == would tell even two checks apart that were built alike. Unlike ==,
+// reflect.DeepEqual does not panic for a type that cannot be compared either,
+// which would take a change to the client, but compares its values.
 func isEqual(declared, built eventsourcingdb.Precondition) bool {
-	if !reflect.ValueOf(declared).Comparable() {
-		return false
-	}
-
-	return declared == built
+	return reflect.DeepEqual(declared, built)
 }
 
 // describePrecondition spells out the fields that are set, so that a failure
@@ -155,18 +197,22 @@ func describePreconditions(preconditions []Precondition) string {
 
 // OnPristineSubject describes architecturekit.OnPristineSubject, a check that
 // the subject has no events yet, which is what a command that creates
-// something usually declares.
+// something usually declares. It does not describe the recursive check, which
+// the kit has no function for either, so a test describes that one as a
+// Precondition with Recursive set as well.
 func OnPristineSubject(subject string) Precondition {
 	return Precondition{Subject: subject, Pristine: true}
 }
 
 // OnPopulatedSubject describes architecturekit.OnPopulatedSubject, a check that
-// the subject has events.
+// the subject has events. Like OnPristineSubject, it does not describe the
+// recursive check.
 func OnPopulatedSubject(subject string) Precondition {
 	return Precondition{Subject: subject, Populated: true}
 }
 
-// OnEventID describes architecturekit.OnEventID, a revision check.
+// OnEventID describes architecturekit.OnEventID, a revision check. Like
+// OnPristineSubject, it does not describe the recursive check.
 func OnEventID(subject, eventID string) Precondition {
 	return Precondition{Subject: subject, EventID: eventID}
 }
