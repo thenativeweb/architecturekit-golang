@@ -92,12 +92,13 @@ func readFailure(ctx context.Context, err error, doing string) error {
 // ErrOutcomeUnknown, which wraps the failure of the client after it, as a
 // category does (see causeOf). The client decides that, by the same rule in
 // every SDK of EventSourcingDB: a write was certainly not stored only if the
-// client could not connect to the database at all, or if the database refused
-// it. Everything else leaves its outcome open: the connection broke after it
-// was established, the answer was cut off, the database stalled, it failed
-// unexpectedly, or the answer does not come from an EventSourcingDB, such as a
-// 502 or 504 of a proxy in front of it, which may answer so after the
-// database has stored the events.
+// client could not connect to the database at all, if it did not send the
+// write, since the database does not support what the write needs, or if the
+// database refused it. Everything else leaves its outcome open: the
+// connection broke after it was established, the answer was cut off, the
+// database stalled, it failed unexpectedly, or the answer does not come from
+// an EventSourcingDB, such as a 502 or 504 of a proxy in front of it, which
+// may answer so after the database has stored the events.
 //
 // A write that was certainly not stored keeps the category that
 // databaseFailure sorts it into, so that trying it again unchanged can not
@@ -140,6 +141,15 @@ var transientCodes = []string{
 // here. A write gets here only if it certainly stored nothing (see
 // writeFailure).
 //
+// The client refuses a request before it sends it if the database does not
+// support what the request needs, such as a write with a recursive
+// precondition to a database that offers just the v1 API, which can not check
+// it, and reports that with eventsourcingdb.ErrIncompatibleServer. Such a
+// failure comes without an answer, but unlike a database that can not be
+// reached, trying again does not help, only upgrading the database does, so
+// it is permanent, and the message says so. A write that fails so has
+// certainly stored nothing, since it was never sent.
+//
 // An error the database reports with a code is sorted by its code alone,
 // since a database that offers the v2 API reports the errors of a request
 // with the status 200, and the client gives the errors of the v1 API the code
@@ -159,9 +169,10 @@ var transientCodes = []string{
 // A failure without a code is sorted by its status:
 //
 //   - Without an answer, the database is unreachable or the connection broke,
-//     which is transient. The client reports data it can not encode without an
-//     answer as well, which is why candidateFor encodes the data of every event
-//     before it is written.
+//     which is transient, unless the client refused the request (see above).
+//     The client reports data it can not encode without an answer as well,
+//     which is why candidateFor encodes the data of every event before it is
+//     written.
 //   - An answer from a server that is not an EventSourcingDB is transient as
 //     well. It may come from a wrong address, but also from a proxy in front of
 //     the database, which answers on its own while the database restarts, and
@@ -187,6 +198,11 @@ var transientCodes = []string{
 //
 // Every category wraps the failure of the client after it (see causeOf).
 func databaseFailure(err error, doing string) error {
+	if errors.Is(err, eventsourcingdb.ErrIncompatibleServer) {
+		return fmt.Errorf("%w: %s: the database does not support what the request needs, and has to be upgraded: %w",
+			ErrPermanent, doing, causeOf(err))
+	}
+
 	if code := codeOf(err); code != "" {
 		switch {
 		case code == eventsourcingdb.CodePreconditionViolated:
@@ -257,9 +273,10 @@ func schemaRefusal(eventType string, refusal error) error {
 // the failure the client reported, so that errors.As reaches an
 // *eventsourcingdb.DBAPIError with the status, the code, and the description
 // the database gave, and errors.Is reaches eventsourcingdb.ErrOutcomeUnknown,
-// eventsourcingdb.ErrInvalidServerHeader, and
-// eventsourcingdb.ErrConnectionStalled. The category comes first, and it is the
-// category that decides what the failure means.
+// eventsourcingdb.ErrInvalidServerHeader,
+// eventsourcingdb.ErrConnectionStalled, and
+// eventsourcingdb.ErrIncompatibleServer. The category comes first, and it is
+// the category that decides what the failure means.
 //
 // A failure of the client that errors.Is takes for context.Canceled or
 // context.DeadlineExceeded keeps its message, and errors.Is and errors.As still

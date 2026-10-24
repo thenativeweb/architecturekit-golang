@@ -36,7 +36,8 @@ var (
 
 	// ErrPermanent means trying again will not help, and something is wrong
 	// with the code, the data or the configuration, for example an event whose
-	// data can not be encoded as JSON, such as a float NaN.
+	// data can not be encoded as JSON, such as a float NaN, or a database that
+	// does not support what a request needs, and has to be upgraded.
 	ErrPermanent = errors.New("permanent failure")
 )
 
