@@ -35,7 +35,12 @@ func TestMain(m *testing.M) {
 	}
 
 	ctx := context.Background()
+	// The image is the one the environment chooses, as for dbtest and the
+	// tests of the client SDK, so that the QA runs against preview as well.
 	container := eventsourcingdbtest.NewContainer().WithSigningKey()
+	if tag := os.Getenv("EVENTSOURCINGDB_IMAGE_TAG"); tag != "" {
+		container = container.WithImageTag(tag)
+	}
 
 	if err := container.Start(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to start eventsourcingdb: %v\n", err)

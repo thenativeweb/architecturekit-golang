@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdbtest"
 )
 
 // tbSpy is a testing.TB that records what would skip or end a test, and ends
@@ -167,7 +166,7 @@ func TestStartFailure(t *testing.T) {
 	})
 
 	t.Run("reports a container without an address", func(t *testing.T) {
-		_, err := databaseIn(context.Background(), eventsourcingdbtest.NewContainer())
+		_, err := databaseIn(context.Background(), newContainer())
 
 		assert.Error(t, err, "a container that is not running has no address")
 	})
@@ -256,5 +255,19 @@ func TestStopSharedDatabase(t *testing.T) {
 		})})
 
 		assert.EqualError(t, StopSharedDatabase(), "container is stuck")
+	})
+}
+
+func TestImageTag(t *testing.T) {
+	t.Run("is the tag the environment names, as for the tests of the client SDK", func(t *testing.T) {
+		t.Setenv("EVENTSOURCINGDB_IMAGE_TAG", "preview")
+
+		assert.Equal(t, "preview", imageTag())
+	})
+
+	t.Run("is empty without the environment variable, which leaves latest", func(t *testing.T) {
+		t.Setenv("EVENTSOURCINGDB_IMAGE_TAG", "")
+
+		assert.Empty(t, imageTag())
 	})
 }

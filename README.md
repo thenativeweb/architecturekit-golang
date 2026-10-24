@@ -3354,7 +3354,7 @@ config := server.Config{
 
 *Note that a `nil` option makes `Store`, `IsolatedStore`, and the `Store` function of a `Database` panic before they ask for a database, so with `-short` as well.*
 
-*Note that the database runs the image `thenativeweb/eventsourcingdb:latest`, as the client SDK starts it, rather than a version of your choice. Docker pulls the image only if it is missing, so which release that is depends on what the machine has pulled before. The database runs without a signing key, so its events carry no signature, and a store with `WithSignatureVerification` fails to read them with an error of the category `ErrUnverified`. Signature verification can therefore not be tested with it (see [Verifying Events](#verifying-events)).*
+*Note that the database runs the image `thenativeweb/eventsourcingdb:latest`, as the client SDK starts it. To run another one, such as the preview of the next release, set the environment variable `EVENTSOURCINGDB_IMAGE_TAG` to its tag, as for the tests of the client SDK, for example `EVENTSOURCINGDB_IMAGE_TAG=preview go test ./...`. Docker pulls the image only if it is missing, so which release a tag stands for depends on what the machine has pulled before. The database runs without a signing key, so its events carry no signature, and a store with `WithSignatureVerification` fails to read them with an error of the category `ErrUnverified`. Signature verification can therefore not be tested with it (see [Verifying Events](#verifying-events)).*
 
 *Note that `dbtest` is a package of its own because it starts the database with Testcontainers, which brings along the Docker client. A package whose tests only import `architecturekittest`, for example to test deciders and projections, builds without either.*
 
