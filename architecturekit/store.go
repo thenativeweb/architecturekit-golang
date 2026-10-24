@@ -108,19 +108,28 @@ func WithStateCache(maxSubjects int) StoreOption {
 // moment later. Without this option, Execute reports the conflict right away.
 //
 // This applies only to commands whose preconditions include OnStateRead, since
-// only then does the conflict come from the state Execute read. A command that
+// only then can the conflict come from the state Execute read. A command that
 // checks only a revision the caller hands over is never decided again: the
 // caller has to learn about the conflict, and deciding again would fail the
-// same way. A command that checks both is decided again, since the database
-// does not say which precondition did not hold, so if the revision of the
-// caller is outdated, every attempt fails the same way until the retries are
-// used up. On the same subject, one of the two is enough: if the revision of
-// the caller holds, so does OnStateRead.
+// same way. A command that checks both, or OnStateRead together with any
+// other precondition, such as one made with Require, is decided again only if
+// OnStateRead did not hold. A database that offers the v2 API names the
+// precondition that did not hold, so if it is another one, such as an
+// outdated revision of the caller, Execute reports the conflict at once. A
+// database that offers just the v1 API, such as EventSourcingDB 1.2, does not
+// name it, so then Execute decides again whenever OnStateRead is among the
+// preconditions, and if another one did not hold, every attempt fails the
+// same way until the retries are used up. On the same subject, a revision of
+// the caller and OnStateRead need not both be checked: if the revision of the
+// caller holds, so does OnStateRead.
 //
-// Once the retries are used up, Execute reports the conflict, an error of the
-// category ErrConflict. Write never decides again, since it decides nothing.
-// Nor does Execute try a write again whose outcome is unknown, since its
-// events may have been stored (see ErrOutcomeUnknown).
+// Once the retries are used up, or once the database names another
+// precondition, Execute reports the conflict, an error of the category
+// ErrConflict in either case, which wraps the answer of the database, so that
+// errors.As reaches its details (see ErrConflict). Write never decides
+// again, since it decides nothing. Nor does Execute try a write again whose
+// outcome is unknown, since its events may have been stored (see
+// ErrOutcomeUnknown).
 //
 // A negative number of retries is a programming error, so it panics.
 func WithConflictRetries(retries int) StoreOption {
@@ -659,8 +668,9 @@ func isSameSchema(left, right map[string]any) (bool, error) {
 
 // Execute loads the state, lets the decider decide, and appends the resulting
 // events. A conflict is reported, and the caller decides what to do about it,
-// unless the store was created with WithConflictRetries and the command
-// decides on the state read, in which case Execute decides again first.
+// unless the store was created with WithConflictRetries and the conflict may
+// come from the state Execute read, in which case Execute decides again first
+// (see WithConflictRetries).
 //
 // All preconditions come from the command, which has to declare at least one.
 // OnStateRead is filled in with the last event Execute has read, so that the
@@ -718,6 +728,13 @@ func Execute[TCommand Command, TState any](
 	for attempt := 0; ; attempt++ {
 		written, err := executeOnce(ctx, store, decider, cmd, declared)
 		if !errors.Is(err, ErrConflict) || attempt == retries || ctx.Err() != nil {
+			return written, err
+		}
+
+		// Deciding again only helps if the state Execute read has changed. If
+		// the database names another precondition as the one that did not
+		// hold, every attempt would fail the same way.
+		if violated, isNamed := violatedPrecondition(err, declared); isNamed && !violated.IsOnStateRead() {
 			return written, err
 		}
 	}

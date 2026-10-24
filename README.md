@@ -445,7 +445,9 @@ store := architecturekit.NewStore(client, "https://library.eventsourcingdb.io", 
 
 *Note that the store decides again only on a conflict. A write whose outcome is unknown is never tried again, since its events may have been stored (see [Handling Errors](#handling-errors)).*
 
-*Note that this only applies to commands whose preconditions include `OnStateRead`. A command that checks only a revision the caller hands over is never decided again, since the caller has to learn about the conflict, and deciding again would fail the same way (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). A command that checks both is decided again, since the database does not say which precondition did not hold. If the revision of the caller is outdated, every attempt fails the same way, until the retries are used up. On the same subject, one of the two is enough: if the revision of the caller holds, so does `OnStateRead`.*
+*Note that this only applies to commands whose preconditions include `OnStateRead`. A command that checks only a revision the caller hands over is never decided again, since the caller has to learn about the conflict, and deciding again would fail the same way (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)). A command that checks both, or `OnStateRead` together with any other precondition, such as one made with `Require`, is decided again only if `OnStateRead` did not hold. A database that offers the v2 API names the precondition that did not hold, so if it is another one, such as an outdated revision of the caller, `Execute` reports the conflict at once. A database that offers just the v1 API, such as EventSourcingDB 1.2, does not name it, so then `Execute` decides again whenever `OnStateRead` is among the preconditions, and if another one did not hold, every attempt fails the same way, until the retries are used up. On the same subject, a revision of the caller and `OnStateRead` need not both be checked: if the revision of the caller holds, so does `OnStateRead`.*
+
+*Note that the conflict is an error of the category `ErrConflict` in every case, and `errors.As` finds the answer of the database in it (see [Handling Errors](#handling-errors)). Through the v2 API, its details name the precondition that did not hold by its index among the preconditions the command declares, as in `{"precondition":1}`, so that you can find out yourself which one it was.*
 
 #### Checking the Revision of the Caller
 
@@ -467,6 +469,8 @@ func (c BorrowBook) Preconditions() []architecturekit.Precondition {
 ```
 
 *Note that the caller has to provide the event ID. A view can keep it for that purpose, as long as its items follow every event of their subject (see [Defining Views](#defining-views)).*
+
+*Note that an outdated event ID is reported as a conflict at once, also by a store that decides again on conflicts, since deciding again would fail the same way. That holds as well for a command that declares `OnStateRead` besides, as long as the database offers the v2 API, which names the precondition that did not hold. A database that offers just the v1 API does not, so then `Execute` decides again until the retries are used up (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).*
 
 *Note that the event ID usually comes from the caller, so `Execute` checks it before it reads anything. An empty event ID, or one that is not an event ID at all, makes `Execute` fail with an error that wraps `ErrNotARevision` and names the ID, as in `not a revision: "abc"`, as `Read` does for a bound (see [Reading Events](#reading-events)), and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). It does so only once nothing else is wrong with the preconditions, so that a mistake in the code is not hidden behind one of the caller, and `Write`, `CheckPreconditions`, and the test fixture of `architecturekittest` refuse the ID the same way. `Require` with `NewIsSubjectOnEventIDPrecondition` of the client SDK leaves the ID to the database instead, which refuses such an ID as a malformed request, so that `Execute` fails with an error of the category `ErrPermanent`.*
 
@@ -532,11 +536,11 @@ var acquireBook = architecturekit.NewDecider(bookState,
 
 *Note that a value must never go into an EventQL query unchecked. A quote, as in `it's`, breaks the query, so that the write fails, and a value made up for that purpose changes what the query checks.*
 
-When the ISBN is taken, the database refuses the write with the code `precondition-violated`, the same answer as for a subject that has changed since it was read. Which precondition did not hold is only in the details of the answer, so the kit does not tell the two apart:
+When the ISBN is taken, the database refuses the write with the code `precondition-violated`, the same answer as for a subject that has changed since it was read. Which precondition did not hold is only in the details of the answer, so the kit reports the two alike:
 
 - The command fails with an error of the category `ErrConflict`, which is transient (see [Handling Errors](#handling-errors)).
 - The `httpapi` package answers it with `409 Conflict` and the message `conflict: the data has changed since it was read`, which tells the caller to try again, although that never helps (see [Handling Commands over HTTP](#handling-commands-over-http)).
-- If the command declares `OnStateRead` as well, and the store decides again on conflicts, `Execute` decides again and again in vain, until the retries are used up (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
+- If the command declares `OnStateRead` as well, and the store decides again on conflicts, `Execute` reads the details to tell the two apart, and reports the taken ISBN at once, since deciding again would fail the same way. A database that offers just the v1 API sends no details, so then `Execute` decides again and again in vain, until the retries are used up (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
 
 To answer a taken ISBN with a domain error instead, check it in the decider, against a view that holds the acquired books by their ISBN (see [Defining Views](#defining-views)). The catalog does not hold the ISBN, so here, a small view of its own does, which a projection fills (see [Defining Projections](#defining-projections)):
 
@@ -835,7 +839,7 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 *Note that `ErrConflict` is a special case of `ErrTransient`, so check for it first.*
 
-A failure of the database wraps the error of the client after its category. So `errors.As` finds the `*eventsourcingdb.DBAPIError` with the status, the code, and the description the database gave, for example to log them, and `errors.Is` finds `eventsourcingdb.ErrInvalidServerHeader`, `eventsourcingdb.ErrConnectionStalled`, and `eventsourcingdb.ErrIncompatibleServer`. It is the category, though, that tells what the failure means, so check for it first.
+A failure of the database wraps the error of the client after its category. So `errors.As` finds the `*eventsourcingdb.DBAPIError` with the status, the code, the description, and the details the database gave, for example to log them, and `errors.Is` finds `eventsourcingdb.ErrInvalidServerHeader`, `eventsourcingdb.ErrConnectionStalled`, and `eventsourcingdb.ErrIncompatibleServer`. It is the category, though, that tells what the failure means, so check for it first. For a conflict, a database that offers the v2 API names the precondition that did not hold in the details, by its index among the preconditions of the command or the write, as in `{"precondition":1}`, while a database that offers just the v1 API does not (see [Guarding Against Concurrent Changes](#guarding-against-concurrent-changes)).
 
 An error that your own code returns, for example from a decider or a projection, passes through unchanged, so it belongs to a category only if you wrap it with one, as `NewDomainError` does. A panic in a projection, on the other hand, comes back as an error of the category `ErrPermanent` (see [Running Projections](#running-projections)). The `httpapi` and `query` packages have errors of their own, which `StatusFor` maps to status codes (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes) and [Getting a Single Item](#getting-a-single-item)).
 

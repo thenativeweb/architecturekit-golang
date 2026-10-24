@@ -17,9 +17,9 @@ import (
 //
 // A failure of the database wraps the error of the client after its category,
 // or after ErrOutcomeUnknown, so that errors.As finds an
-// *eventsourcingdb.DBAPIError with the status, the code, and the description
-// the database gave. It is the category, though, that tells what the failure
-// means.
+// *eventsourcingdb.DBAPIError with the status, the code, the description, and
+// the details the database gave. It is the category, though, that tells what
+// the failure means.
 //
 // The texts of the categories leave out the name of the package, since an
 // error that is written for a caller, such as one of ErrDomain, may reach them
@@ -43,6 +43,14 @@ var (
 
 // ErrConflict means a precondition of the write did not hold. It is transient,
 // because the state it disagreed with has moved on.
+//
+// A database that offers the v2 API names the precondition that did not hold
+// in the Details of the *eventsourcingdb.DBAPIError that errors.As reaches,
+// by its index among the preconditions of the write, as in {"precondition":1}.
+// Execute and Write send the preconditions in the order they were declared,
+// so that is the index among them, which is how Execute tells OnStateRead
+// from the others (see WithConflictRetries). A database that offers just the
+// v1 API does not name it.
 //
 // An event that does not match its schema is not a conflict, although
 // EventSourcingDB refuses the write for it as well. Writing it again yields
