@@ -87,7 +87,9 @@ func Write(
 
 // writePreconditions checks the preconditions of a write the way
 // checkPreconditions does those of a command, except that OnStateRead has
-// nothing to refer to, and turns them into the ones the database checks. Like
+// nothing to refer to, and turns them into the ones the database checks, in
+// their order, so that the index by which the database names a precondition
+// that did not hold is the index of the given one (see ErrConflict). Like
 // checkPreconditions, it checks the IDs of OnEventID last.
 func writePreconditions(declared []Precondition) ([]eventsourcingdb.Precondition, error) {
 	if len(declared) == 0 {

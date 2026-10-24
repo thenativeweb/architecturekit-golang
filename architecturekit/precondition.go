@@ -1,6 +1,7 @@
 package architecturekit
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
@@ -196,6 +197,12 @@ func checkEventIDs(declared []Precondition) error {
 // resolvePreconditions turns the declared preconditions into the ones the
 // database checks, given the ID of the last event the state was read up to,
 // which is empty for a subject without events.
+//
+// It turns every declared precondition into exactly one, in the order they
+// are declared, and adds none of its own, so that the index by which the
+// database names a precondition that did not hold is the index of the
+// declared one (see violatedPrecondition). Only Unconditionally turns into
+// none, but a command declares it alone, so then nothing is checked at all.
 func resolvePreconditions(
 	subject string,
 	declared []Precondition,
@@ -220,4 +227,34 @@ func resolvePreconditions(
 	}
 
 	return resolved
+}
+
+// violatedPrecondition returns the declared precondition that the database
+// names as the one that did not hold, or false if it names none. A database
+// that offers the v2 API refuses such a write with the code
+// precondition-violated, and names the index of the precondition among those
+// of the write in the details, as in {"precondition":1}, which is its index
+// among the declared ones, since resolvePreconditions keeps their order. A
+// database that offers just the v1 API names none. Details that can not be
+// read, that hold no index, or one beyond the declared preconditions, name
+// none either, rather than one the kit would have to guess.
+func violatedPrecondition(err error, declared []Precondition) (Precondition, bool) {
+	answer := answerOf(err)
+	if answer == nil || answer.Code != eventsourcingdb.CodePreconditionViolated {
+		return Precondition{}, false
+	}
+
+	var details struct {
+		Precondition *int `json:"precondition"`
+	}
+	if json.Unmarshal(answer.Details, &details) != nil || details.Precondition == nil {
+		return Precondition{}, false
+	}
+
+	index := *details.Precondition
+	if index < 0 || index >= len(declared) {
+		return Precondition{}, false
+	}
+
+	return declared[index], true
 }
