@@ -338,6 +338,7 @@ func TestDatabaseFailuresOfTheV2API(t *testing.T) {
 			{"a precondition that did not hold is a conflict", eventsourcingdb.CodePreconditionViolated, architecturekit.ErrConflict},
 			{"an exceeded capacity is transient, not a conflict", eventsourcingdb.CodeCapacityExceeded, architecturekit.ErrTransient},
 			{"a database that shuts down is transient", eventsourcingdb.CodeServerShuttingDown, architecturekit.ErrTransient},
+			{"a store that failed is transient, since it refuses writes until the database is restarted", eventsourcingdb.CodeStoreFailed, architecturekit.ErrTransient},
 			{"an event that does not match its schema is permanent", eventsourcingdb.CodeEventSchemaViolated, architecturekit.ErrPermanent},
 			{"a code the kit does not know is permanent", "https://docs.eventsourcingdb.io/errors/something-new", architecturekit.ErrPermanent},
 		}
@@ -363,20 +364,6 @@ func TestDatabaseFailuresOfTheV2API(t *testing.T) {
 					assert.Equal(t, http.StatusOK, answer.Status)
 				})
 			}
-		}
-	})
-
-	t.Run("leave the outcome of a write unknown where the client does, as for a store that failed", func(t *testing.T) {
-		for _, write := range kitWrites {
-			t.Run(write.name, func(t *testing.T) {
-				store := architecturekit.NewStore(
-					v2Database(t, "/api/v2/data/write-events", errorItem(eventsourcingdb.CodeStoreFailed)), "https://thenativeweb.io")
-
-				err := write.write(context.Background(), store, incremented{By: 1})
-
-				assertOutcomeUnknown(t, err)
-				assert.ErrorIs(t, err, eventsourcingdb.ErrOutcomeUnknown)
-			})
 		}
 	})
 
