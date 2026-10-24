@@ -15,7 +15,7 @@ architecturekit needs Go 1.27.1 or later, and a running EventSourcingDB. To star
 Install the packages:
 
 ```shell
-go get github.com/thenativeweb/architecturekit-golang/architecturekit github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb
+go get github.com/thenativeweb/architecturekit-golang/v2/architecturekit github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb
 ```
 
 Import the package, create an EventSourcingDB client, and create a store by providing the client and the source to use for all events you write:
@@ -24,8 +24,8 @@ Import the package, create an EventSourcingDB client, and create a store by prov
 import (
   "net/url"
 
-  "github.com/thenativeweb/architecturekit-golang/architecturekit"
-  "github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+  "github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+  "github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // ...
@@ -532,7 +532,7 @@ var acquireBook = architecturekit.NewDecider(bookState,
 
 *Note that a value must never go into an EventQL query unchecked. A quote, as in `it's`, breaks the query, so that the write fails, and a value made up for that purpose changes what the query checks.*
 
-When the ISBN is taken, the database refuses the write with `409 Conflict` and the reason `state conflict: precondition failed`, the same answer as for a subject that has changed since it was read. It does not say which precondition failed, so the kit can not tell the two apart:
+When the ISBN is taken, the database refuses the write with the code `precondition-violated`, the same answer as for a subject that has changed since it was read. Which precondition did not hold is only in the details of the answer, so the kit does not tell the two apart:
 
 - The command fails with an error of the category `ErrConflict`, which is transient (see [Handling Errors](#handling-errors)).
 - The `httpapi` package answers it with `409 Conflict` and the message `conflict: the data has changed since it was read`, which tells the caller to try again, although that never helps (see [Handling Commands over HTTP](#handling-commands-over-http)).
@@ -799,13 +799,19 @@ Apart from the end of the context, `ErrOutcomeUnknown`, `ErrNotCaughtUp`, `ErrNo
 - `ErrTransient` means that trying again may help, for example if the database can not be reached. A write that fails with it has certainly stored nothing, so trying it again can not store its events twice.
 - `ErrPermanent` means that trying again will not help, for example if an event could not be decoded, if the data of an event can not be encoded as JSON, such as a float `NaN`, if an event does not match the schema of its type, if a subject contains an event type the state has no rule for, if a decider returns one, or if it returns an event that is `nil`.
 
-A failure of the database is sorted by what its answer means, the same way for reading and for writing, apart from `409`, and apart from a write whose outcome is unknown (see below):
+A failure of the database is sorted by what its answer means, the same way for reading and for writing, apart from a write whose outcome is unknown (see below). The database names each error it reports with a code, such as `https://docs.eventsourcingdb.io/errors/precondition-violated`, and it is the code that decides:
 
-- If the database can not be reached, if the connection breaks, if the database asks to slow down (`429`), or if it is unable to answer for now (`5xx`), for example because it is shutting down, the error belongs to `ErrTransient`.
+- If a precondition did not hold (`precondition-violated`), the error belongs to `ErrConflict`.
+- If the database refuses the request for now, since it is shutting down (`server-shutting-down`), its store is read-only (`store-read-only`), it rebuilds its indexes (`indexes-rebuilding`), it restores a backup (`restore-in-progress`), its disk is full (`disk-full`), its store has failed and waits for a restart (`store-failed`), or its license has run out (`license-invalid`) or its store has reached the capacity of the license (`capacity-exceeded`), the error belongs to `ErrTransient`. Trying again only helps once somebody has dealt with the cause in some of these cases, but reading the state anew never does, so none of them is a conflict.
+- Every other code means that the request itself is wrong, for example a malformed subject, an event that does not match the schema of its type, or a range of `FromLatestEvent` that no event can satisfy, since the latest event of the type comes after the upper bound, and the error belongs to `ErrPermanent` (see [Reading Events](#reading-events)). So does a code that the kit does not know, from a newer database.
+
+A failure without a code is sorted by what happened:
+
+- If the database can not be reached, if the connection breaks or stalls, if the database asks to slow down (`429`), or if it is unable to answer for now (`5xx`), the error belongs to `ErrTransient`.
 - If the answer does not come from an EventSourcingDB, the error belongs to `ErrTransient` as well, since a proxy in front of the database answers on its own while the database restarts. The message says so, so that a wrong address stands out in the log.
-- If the database rejects the API token (`401`), or if it rejects the request itself, for example because it is malformed (`400`) or too large (`413`), the error belongs to `ErrPermanent`. For a rejected API token, the message says so.
-- If a precondition did not hold when writing (`409`), the error belongs to `ErrConflict`. If an event does not match its schema, which the database answers with the same status, it belongs to `ErrPermanent`.
-- Reading has no preconditions, so when reading, a `409` is a refusal of the request like any other, and the error belongs to `ErrPermanent`. The database answers a read with `409` if the latest event of the type given to `FromLatestEvent` comes after the upper bound, and trying again never helps, since new events only move the latest one further away (see [Reading Events](#reading-events)).
+- If the database rejects the API token (`401`), or if it rejects the request itself, for example because it is too large (`413`), the error belongs to `ErrPermanent`. For a rejected API token, the message says so.
+
+*Note that a database that only offers the v1 API, such as EventSourcingDB 1.2, reports its errors without a code. The client gives those that clearly match an error of the v2 API its code, and the kit sorts the others by their status, as it did in version 1 of the kit.*
 
 ```go
 writtenEvents, err := architecturekit.Execute(
@@ -828,17 +834,17 @@ case errors.Is(err, architecturekit.ErrPermanent):
 
 *Note that `ErrConflict` is a special case of `ErrTransient`, so check for it first.*
 
-A failure of the database wraps the error of the client after its category. So `errors.As` finds the `*eventsourcingdb.DBAPIError` with the status code and the reason the database gave, for example to log them, and `errors.Is` finds `eventsourcingdb.ErrInvalidServerHeader` and `eventsourcingdb.ErrHeartbeatTimeout`. It is the category, though, that tells what the failure means, so check for it first.
+A failure of the database wraps the error of the client after its category. So `errors.As` finds the `*eventsourcingdb.DBAPIError` with the status, the code, and the description the database gave, for example to log them, and `errors.Is` finds `eventsourcingdb.ErrInvalidServerHeader` and `eventsourcingdb.ErrConnectionStalled`. It is the category, though, that tells what the failure means, so check for it first.
 
 An error that your own code returns, for example from a decider or a projection, passes through unchanged, so it belongs to a category only if you wrap it with one, as `NewDomainError` does. A panic in a projection, on the other hand, comes back as an error of the category `ErrPermanent` (see [Running Projections](#running-projections)). The `httpapi` and `query` packages have errors of their own, which `StatusFor` maps to status codes (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes) and [Getting a Single Item](#getting-a-single-item)).
 
 If the context ends, reading stops, and so does writing, but only before it has begun. The error then wraps the one of the context, `context.Canceled` or `context.DeadlineExceeded`, which belongs to no category, as in `architecturekit: reading "/books/42": context canceled`. Check for it with `errors.Is` as well. This is never a partial success: a read that the context cut short fails rather than handing out part of a state, and `Execute` writes nothing once the context has ended, also if it ends while the decider decides. A write that has begun, though, is finished, since the database may store the events as soon as the request has left, and `Execute` and `Write` return its result, the events written or the failure of the write, rather than the error of the context.
 
-Another exception is `ErrOutcomeUnknown`, which belongs to no category either. It means that a write failed in a way that leaves open whether the database stored the events. The request had left, but no complete answer arrived, for example because the connection broke, the answer was cut off or could not be decoded, or a timeout of the client ran out. Or the answer was one that may come after the events were stored, such as `500`, or one that does not come from an EventSourcingDB, such as a `502` or `504` of a proxy in front of it. The error wraps `ErrOutcomeUnknown` and the error of the client, as in `outcome unknown: writing "/books/42": Post "http://localhost:3000/api/v1/write-events": …`, which ends in what went wrong, such as `connection reset by peer`, so check for it with `errors.Is`, and use `errors.As` to get at the answer of the database, as for a category. `StatusFor` maps it to `500 Internal Server Error` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
+Another exception is `ErrOutcomeUnknown`, which belongs to no category either. It means that a write failed in a way that leaves open whether the database stored the events, which the client decides and reports with `eventsourcingdb.ErrOutcomeUnknown`. The client had connected, but no answer arrived that says that nothing was stored, for example because the connection broke, the answer was cut off or could not be decoded, or the database stalled. Or the answer was one that may come after the events were stored, such as `500`, or one that does not come from an EventSourcingDB, such as a `502` or `504` of a proxy in front of it. The error wraps `ErrOutcomeUnknown` and the error of the client, as in `outcome unknown: writing "/books/42": outcome unknown, the events may have been written nevertheless: …`, which ends in what went wrong, such as `connection reset by peer`, so check for it with `errors.Is`, and use `errors.As` to get at the answer of the database, as for a category. `StatusFor` maps it to `500 Internal Server Error` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)).
 
 It is not `ErrTransient`, since trying again may store the events twice: with `Unconditionally`, the same events are written once more, and with `OnStateRead`, `Execute` reads the state anew, which then holds the events, so the precondition holds, and the decider decides once more. So do not try again blindly. Find out first whether the events were stored, for example by reading the subject, or try again only with a precondition that refuses the same events a second time, such as `OnEventID` with the revision the command was decided on, or `OnPristineSubject` for a subject that the command creates. Neither `Execute` nor `Write` tries again by itself, not even on a store that decides again on conflicts.
 
-Only a write that certainly stored nothing keeps its category: one whose request never left completely, as when the database can not be reached, and one that the database refused before writing anything, with a `4xx`, such as `409` for a precondition that did not hold, with `503`, which it answers while it shuts down or does not permit writing, or with `507`, which it answers once the license has run out. That way, an error of the category `ErrTransient` means for a write as well that trying it again unchanged is safe. Reading writes nothing, so it is not affected: there, every failure of the database belongs to a category, as described above.
+Only a write that certainly stored nothing keeps its category: one for which the client could not connect to the database at all, and one that the database refused, with a code, such as `precondition-violated`, or with a status that it only answers before writing anything. That way, an error of the category `ErrTransient` means for a write as well that trying it again unchanged is safe. The client applies the same rule in every SDK of EventSourcingDB, which errs on the safe side: a request that was cut off after connecting, but before all of it was sent, leaves the outcome open as well, and so does `store-failed`. Reading writes nothing, so it is not affected: there, every failure of the database belongs to a category, as described above.
 
 Yet another exception is `ErrNotCaughtUp`, which belongs to no category either. It means that a view did not catch up with written events, which is what every error of `WaitForWritten` wraps, whether the time it waits has run out, the context has ended, or the view could not be asked (see [Waiting for Written Events](#waiting-for-written-events)). The events were written, so the write has succeeded, and only the view lags behind. So it is not `ErrTransient`, since trying the write again would store its events twice, and not `ErrPermanent`, since the view may still catch up. The error wraps `ErrNotCaughtUp` and says why, as in `not caught up: the events were written, but the view did not catch up within 5s`, so check for it with `errors.Is`, before any category, which the cause it keeps may belong to. `StatusFor` maps it to `500 Internal Server Error` (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)), but a handler that waits after a command usually answers it with success, since the write has succeeded.
 
@@ -1076,7 +1082,7 @@ The IDs are strings, as everywhere else in the kit. The database hands them out 
 
 Bounds that leave no room for any event are a mistake, since no event can ever lie between them, such as `BeforeEvent("0")`, `AfterEvent` and `BeforeEvent` with two neighboring IDs, a lower bound above the upper one, or `AfterEvent` of the largest revision, `9223372036854775807`, after which no event can ever come. They end the iteration with an error that wraps `ErrEmptyRange` and names the values, before the database is asked, as in `empty range: no event can lie after "0" and before "1"` or `empty range: no event can lie from "2" up to "1"`. The error names the values only, never the options, since a caller of an API does not know them, and the `httpapi` package answers it with `400 Bad Request` and the error as the message (see [Mapping Errors to Status Codes](#mapping-errors-to-status-codes)). A range that is only empty for now, on the other hand, such as the one after the last event written so far, is no mistake, since events can still come there, so `Read` hands out no events for it, without an error. So a reader that pages backwards with `BeforeEvent` and `NewestFirst` stops at a page that ends with the event `0`, since no event can lie before it.
 
-*Note that the lower bound of `FromLatestEvent` is only known once the database has found the latest event of the type, so together with it, only an upper bound that leaves no room on its own, `BeforeEvent("0")`, is refused that way. The database refuses an upper bound before the latest event of the type, and `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the reason the database gives.*
+*Note that the lower bound of `FromLatestEvent` is only known once the database has found the latest event of the type, so together with it, only an upper bound that leaves no room on its own, `BeforeEvent("0")`, is refused that way. The database refuses an upper bound before the latest event of the type, and `Read` then fails with an error of the category `ErrPermanent`, since trying again never helps, and its message keeps the description the database gives.*
 
 To check the options of a read this way without reading, call the `CheckReadOptions` function with the options, which returns the same error, or `nil`, as `CheckPreconditions` does for the preconditions of a command (see [Using Preconditions](#using-preconditions)). That way, bounds that come from a request can be refused before doing something that must not happen for a read that `Read` refuses, for example recording who reads the history of a book:
 
@@ -1652,7 +1658,7 @@ return run.Err()
 
 *Note that if the database can not be reached at the start, the run keeps trying, and `CaughtUp` stays open. To wait for a limited time only, hand `WaitCaughtUp` a context with a deadline, such as one from `context.WithTimeout`. Its end stops the waiting, but not the run (see [Putting It Together](#putting-it-together)).*
 
-If reading fails with an error of the category `ErrTransient`, or if the database ends the stream, for example because it restarts, the run waits and continues after the last event it has applied, until the context is canceled. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again, or has caught up and followed the stream for longer than the initial delay, even if no event arrived. That way, a load balancer that ends long-lived connections regularly does not hold back a quiet projection, while a database that fails before the projection has caught up, or within the initial delay after, is given ever more time.
+If reading fails with an error of the category `ErrTransient`, the run waits and continues after the last event it has applied, until the context is canceled. That includes a stream that ends, for example because the database restarts, or because a load balancer ends long-lived connections: the database never ends a stream on its own, so the client reports that it broke off. The delay starts at one second, doubles with every attempt in a row, and never exceeds one minute. It starts over once the projection has applied an event again, or has caught up and followed the stream for longer than the initial delay, even if no event arrived. That way, a load balancer that ends long-lived connections regularly does not hold back a quiet projection, while a database that fails before the projection has caught up, or within the initial delay after, is given ever more time.
 
 *Note that how long the projection followed the stream is compared with the initial delay, not with the delay it has grown to. Otherwise, once an outage had let the delay grow to one minute, a load balancer that ends connections every 30 seconds would keep a quiet projection waiting for a minute after each of them, and a caller who wants to read their own write in the meantime would not see it (see [Reading Your Own Writes](#reading-your-own-writes)). In return, a database that ends every stream a few seconds after the projection has caught up is tried again every few seconds rather than once a minute. That is not a loop without a pause, and catching up, the expensive part, succeeds each time.*
 
@@ -1675,7 +1681,7 @@ The observer receives a `Reconnect` with these fields:
 
 - `Projection` is the name the projection was given with `Named`, or empty if it has none.
 - `Subject` is the subject the projection reads.
-- `Err` is the reason, which is `nil` if the database ended the stream.
+- `Err` is the reason, such as a stream that broke off.
 - `Delay` is how long the projection waits before the next attempt.
 - `Attempt` counts the attempts in a row, starting at one. It starts over together with the delay once the projection has applied an event, or has followed the stream for longer than the initial delay. So it stays at `1` while a load balancer ends long-lived connections regularly.
 
@@ -1685,7 +1691,7 @@ To find out where a run stands, call the `Status` function. It returns a `Projec
 
 - `Phase` is `PhaseCatchingUp`, `PhaseLive`, `PhaseReconnecting`, or `PhaseStopped`.
 - `Since` is when the phase began. For `PhaseReconnecting`, that is when the disruption began, not when the latest attempt did.
-- `Err` is why the run is reconnecting or has stopped. It is `nil` if the database ended the stream, or if the run stopped because its context ended.
+- `Err` is why the run is reconnecting or has stopped, such as a stream that broke off. It is `nil` if the run stopped because its context ended.
 - `Attempts` counts the attempts to read again within the current disruption. Unlike `Attempt` of `Reconnect`, it starts over whenever the run has caught up, even if the stream ends again within the initial delay.
 - `Revision` is the ID of the last event the run has applied and committed.
 - `HasCaughtUp` tells whether the run has caught up at least once. Like `CaughtUp`, it stays `true` while the run reconnects later on.
@@ -1953,7 +1959,7 @@ A transient failure is tried again without a limit. So if the mail server stays 
 A query describes what someone wants to know. Define it as a struct, and answer it with a function that reads a view. To filter, order, page, and transform the items, use the `query` package:
 
 ```go
-import "github.com/thenativeweb/architecturekit-golang/architecturekit/query"
+import "github.com/thenativeweb/architecturekit-golang/v2/architecturekit/query"
 ```
 
 To turn the items into a slice, call the `Collect` function. If the view fails while it is read, `Collect` returns its error instead:
@@ -2202,7 +2208,7 @@ It waits with `WaitFor` for the revision that `RevisionOf` returns for the event
 To expose commands and queries over HTTP, use the `httpapi` package:
 
 ```go
-import "github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
+import "github.com/thenativeweb/architecturekit-golang/v2/architecturekit/httpapi"
 ```
 
 Define a type that describes who is making a request, and a function that determines it from the request. Then call the `NewAPI` function with the store and this function, and create a mux:
@@ -3021,7 +3027,7 @@ Set up this way, everything lives as long as `main` does. If you move the setup 
 To test deciders without a database, use the `architecturekittest` package:
 
 ```go
-import "github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
+import "github.com/thenativeweb/architecturekit-golang/v2/architecturekit/architecturekittest"
 ```
 
 The examples use the commands as [Defining Commands](#defining-commands) declares them, with `OnStateRead`, apart from those under [Expecting Preconditions](#expecting-preconditions), which use the `BorrowBook` that checks the revision of the caller with `OnEventID` (see [Checking the Revision of the Caller](#checking-the-revision-of-the-caller)) and the `AcquireBook` that prevents duplicates with `OnPristineSubject` (see [Preventing Duplicates](#preventing-duplicates)).
@@ -3286,7 +3292,7 @@ api := httpapi.NewAPI(nil, userFrom)
 Some tests need a real database, for example to run commands from end to end. To get one, use the `dbtest` package:
 
 ```go
-import "github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest/dbtest"
+import "github.com/thenativeweb/architecturekit-golang/v2/architecturekit/architecturekittest/dbtest"
 ```
 
 Call the `Store` function with a `*testing.T`, the source, and the schemas to register. It returns a store on a database that all tests of the package share, which the first test that asks for it starts in a container. Options for the store, such as `WithStateCache`, follow the schemas, so that a test runs with the same store as the application:
@@ -3351,3 +3357,13 @@ config := server.Config{
 *Note that the database runs the image `thenativeweb/eventsourcingdb:latest`, as the client SDK starts it, rather than a version of your choice. Docker pulls the image only if it is missing, so which release that is depends on what the machine has pulled before. The database runs without a signing key, so its events carry no signature, and a store with `WithSignatureVerification` fails to read them with an error of the category `ErrUnverified`. Signature verification can therefore not be tested with it (see [Verifying Events](#verifying-events)).*
 
 *Note that `dbtest` is a package of its own because it starts the database with Testcontainers, which brings along the Docker client. A package whose tests only import `architecturekittest`, for example to test deciders and projections, builds without either.*
+
+## Upgrading From Version 1
+
+Version 2 builds on version 2 of the client SDK for Go, whose types the kit takes and hands out, such as `*eventsourcingdb.Client` and `eventsourcingdb.Event`, so the two move together. Version 1 of the kit is no longer maintained.
+
+- **The module path ends with `/v2`.** Import `github.com/thenativeweb/architecturekit-golang/v2/architecturekit` and the other packages below `github.com/thenativeweb/architecturekit-golang/v2`, together with `github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb`. For what changes in the client, see its [notes on upgrading](https://github.com/thenativeweb/eventsourcingdb-client-golang#upgrading-from-version-1).
+- **A failure of the database is sorted by its code** (see [Handling Errors](#handling-errors)). A database that offers the v2 API reports the errors of a request with the status `200`, so the status no longer tells them apart. Almost every failure keeps its category. A store that has reached the capacity of its license (`capacity-exceeded`) belongs to `ErrTransient` now rather than to `ErrConflict`, so a store that decides again on conflicts no longer does so in vain, and the `httpapi` package answers it with `503 Service Unavailable` rather than `409 Conflict`.
+- **A write that was cut off after the client had connected is reported as `ErrOutcomeUnknown`, rather than as `ErrTransient`, and so is `store-failed` when writing.** Version 1 traced the request itself, to tell one that never left completely. Version 2 follows the client, which applies the same rule in every SDK of EventSourcingDB.
+- **`errors.Is` finds `eventsourcingdb.ErrConnectionStalled` rather than `eventsourcingdb.ErrHeartbeatTimeout`**, and the `*eventsourcingdb.DBAPIError` that `errors.As` finds has a `Status`, a `Code`, and a `Description`, rather than a `StatusCode` and a `Reason`.
+- **A stream that ends counts as broken off.** The `Err` of a `Reconnect` and of a `ProjectionStatus` used to be `nil` then, and is an error of the category `ErrTransient` now, which says that the stream broke off (see [Running Projections](#running-projections)).
