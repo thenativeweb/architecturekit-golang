@@ -12,9 +12,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/httpapi"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // ignoring is a projection that accepts every event.
@@ -32,6 +32,23 @@ func (panickingCheckpoint) Checkpoint(context.Context) (string, error) {
 
 func (panickingCheckpoint) SaveCheckpoint(context.Context, string) error { return nil }
 
+// speakingV1 answers the request with which the client asks a database for its
+// API as a database that offers just the v1 API does, and hands every other
+// request to handler, so that a fake that answers as the v1 API does is asked
+// as one.
+func speakingV1(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.Path == "/api/v2/system/ping" {
+			writer.Header().Set("Server", "EventSourcingDB/test")
+			http.NotFound(writer, request)
+
+			return
+		}
+
+		handler.ServeHTTP(writer, request)
+	})
+}
+
 // emptyDatabase answers like an EventSourcingDB without any events. It keeps
 // an observed stream open, sending heartbeats, or ends it at once, which a
 // real database only does when it restarts. Its store waits an hour before it
@@ -39,7 +56,7 @@ func (panickingCheckpoint) SaveCheckpoint(context.Context, string) error { retur
 func emptyDatabase(t *testing.T, keepsObserving bool) *architecturekit.Store {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "EventSourcingDB/test")
 
 		if r.URL.Path != "/api/v1/observe-events" || !keepsObserving {
@@ -58,7 +75,7 @@ func emptyDatabase(t *testing.T, keepsObserving bool) *architecturekit.Store {
 				w.(http.Flusher).Flush()
 			}
 		}
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	serverURL, err := url.Parse(server.URL)

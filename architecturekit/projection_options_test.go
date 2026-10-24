@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
 )
 
 func TestSubjects(t *testing.T) {
@@ -159,7 +159,9 @@ func TestReconnect(t *testing.T) {
 		for i, report := range reports {
 			assert.Equal(t, "catalog", report.Projection)
 			assert.Equal(t, "/test", report.Subject)
-			assert.NoError(t, report.Err, "a stream that ended is reported without an error")
+			assert.ErrorIs(t, report.Err, architecturekit.ErrTransient,
+				"a stream that ended has broken off, since the database never ends one on its own")
+			assert.ErrorContains(t, report.Err, "the stream broke off")
 			assert.Equal(t, i+1, report.Attempt, "attempt %d", i)
 		}
 

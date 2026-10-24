@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
 )
 
 // A caller that has just written something knows the revision its write

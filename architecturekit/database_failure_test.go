@@ -3,6 +3,7 @@ package architecturekit_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,8 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 func TestDatabaseFailures(t *testing.T) {
@@ -187,9 +188,9 @@ func TestDatabaseFailures(t *testing.T) {
 	t.Run("treat an answer that does not come from an EventSourcingDB as transient", func(t *testing.T) {
 		// A proxy in front of the database answers on its own while the
 		// database restarts, without saying that it is an EventSourcingDB.
-		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			writer.WriteHeader(http.StatusBadGateway)
-		}))
+		})))
 		t.Cleanup(server.Close)
 		store := architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io")
 
@@ -270,16 +271,16 @@ func TestDatabaseFailures(t *testing.T) {
 
 				answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
 				require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", err)
-				assert.Equal(t, path.status, answer.StatusCode)
-				assert.Equal(t, path.reason, answer.Reason)
+				assert.Equal(t, path.status, answer.Status)
+				assert.Equal(t, path.reason, answer.Description)
 			})
 		}
 	})
 
 	t.Run("wrap the error of the client for an answer that does not come from an EventSourcingDB", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			writer.WriteHeader(http.StatusBadGateway)
-		}))
+		})))
 		t.Cleanup(server.Close)
 		store := architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io")
 
@@ -299,6 +300,97 @@ func TestDatabaseFailures(t *testing.T) {
 
 		assert.ErrorIs(t, err, architecturekit.ErrTransient, "an unavailable database is transient")
 		assert.NotErrorIs(t, err, architecturekit.ErrPermanent)
+	})
+}
+
+func TestAnErrorWithinAStreamOfTheV1API(t *testing.T) {
+	// A database that offers just the v1 API reports an error within a stream
+	// without a code, and only when reading is disturbed, e.g. because it is
+	// shutting down, so trying again may help.
+	store := architecturekit.NewStore(writingDatabase(t, "/api/v1/read-events",
+		func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = fmt.Fprintln(writer, `{"type":"error","payload":{"error":"store is shutting down"}}`)
+		}), "https://thenativeweb.io")
+
+	var err error
+	for _, readErr := range architecturekit.Read(context.Background(), store, architecturekit.ExactSubject("/test")) {
+		err = readErr
+	}
+
+	assert.ErrorIs(t, err, architecturekit.ErrTransient)
+	assert.NotErrorIs(t, err, architecturekit.ErrConflict)
+	assert.ErrorContains(t, err, "store is shutting down")
+}
+
+func TestDatabaseFailuresOfTheV2API(t *testing.T) {
+	// A database that offers the v2 API reports the errors of a write with
+	// the status 200 and a code, so it is the code that decides.
+	errorItem := func(code string) string {
+		return `{"type":"error","data":{"code":"` + code + `","description":"refused","details":{}}}`
+	}
+
+	t.Run("are sorted by their code", func(t *testing.T) {
+		tests := []struct {
+			name string
+			code string
+			want error
+		}{
+			{"a precondition that did not hold is a conflict", eventsourcingdb.CodePreconditionViolated, architecturekit.ErrConflict},
+			{"an exceeded capacity is transient, not a conflict", eventsourcingdb.CodeCapacityExceeded, architecturekit.ErrTransient},
+			{"a database that shuts down is transient", eventsourcingdb.CodeServerShuttingDown, architecturekit.ErrTransient},
+			{"an event that does not match its schema is permanent", eventsourcingdb.CodeEventSchemaViolated, architecturekit.ErrPermanent},
+			{"a code the kit does not know is permanent", "https://docs.eventsourcingdb.io/errors/something-new", architecturekit.ErrPermanent},
+		}
+
+		for _, write := range kitWrites {
+			for _, test := range tests {
+				t.Run(write.name+": "+test.name, func(t *testing.T) {
+					store := architecturekit.NewStore(
+						v2Database(t, "/api/v2/data/write-events", errorItem(test.code)), "https://thenativeweb.io")
+
+					err := write.write(context.Background(), store, incremented{By: 1})
+
+					assert.ErrorIs(t, err, test.want)
+					assert.NotErrorIs(t, err, otherCategoryThan(test.want))
+					assert.NotErrorIs(t, err, architecturekit.ErrOutcomeUnknown, "the database refused the write")
+					if !errors.Is(test.want, architecturekit.ErrConflict) {
+						assert.NotErrorIs(t, err, architecturekit.ErrConflict)
+					}
+
+					answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
+					require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", err)
+					assert.Equal(t, test.code, answer.Code)
+					assert.Equal(t, http.StatusOK, answer.Status)
+				})
+			}
+		}
+	})
+
+	t.Run("leave the outcome of a write unknown where the client does, as for a store that failed", func(t *testing.T) {
+		for _, write := range kitWrites {
+			t.Run(write.name, func(t *testing.T) {
+				store := architecturekit.NewStore(
+					v2Database(t, "/api/v2/data/write-events", errorItem(eventsourcingdb.CodeStoreFailed)), "https://thenativeweb.io")
+
+				err := write.write(context.Background(), store, incremented{By: 1})
+
+				assertOutcomeUnknown(t, err)
+				assert.ErrorIs(t, err, eventsourcingdb.ErrOutcomeUnknown)
+			})
+		}
+	})
+
+	t.Run("are sorted by their code when reading", func(t *testing.T) {
+		store := architecturekit.NewStore(
+			v2Database(t, "/api/v2/data/read-events", errorItem(eventsourcingdb.CodeIndexesRebuilding)), "https://thenativeweb.io")
+
+		var err error
+		for _, readErr := range architecturekit.Read(context.Background(), store, architecturekit.ExactSubject("/test")) {
+			err = readErr
+		}
+
+		assert.ErrorIs(t, err, architecturekit.ErrTransient)
+		assert.NotErrorIs(t, err, architecturekit.ErrConflict)
 	})
 }
 

@@ -7,14 +7,13 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // worded hides the text of the error it wraps behind a wording of its own,
@@ -25,12 +24,46 @@ type worded struct{ err error }
 func (w worded) Error() string { return "the client words this differently" }
 func (w worded) Unwrap() error { return w.err }
 
-func answered(status int, reason string) error {
-	return worded{&eventsourcingdb.DBAPIError{Action: "write events", StatusCode: status, Reason: reason}}
+// answered is an answer without a code, as a database that offers just the v1
+// API sends it for an error that the client can not match to a code.
+func answered(status int, description string) error {
+	return worded{&eventsourcingdb.DBAPIError{Action: "write events", Status: status, Description: description}}
 }
 
+// coded is an error that the database reports with a code, as a database that
+// offers the v2 API does in the body of an answer with the status 200.
+func coded(code string) error {
+	return worded{&eventsourcingdb.DBAPIError{
+		Action: "write events", Status: http.StatusOK, Code: code, Description: "the description does not matter",
+	}}
+}
+
+// stalled is a connection that stalled, as the client reports it: errors.Is
+// takes it for eventsourcingdb.ErrConnectionStalled, and for
+// context.DeadlineExceeded as well, as for a timeout of net/http.
+type stalled struct{}
+
+func (stalled) Error() string {
+	return "connection stalled, nothing arrived from the server for 30 seconds"
+}
+
+func (stalled) Is(target error) bool {
+	return target == eventsourcingdb.ErrConnectionStalled || target == context.DeadlineExceeded
+}
+
+// mayHaveBeenWritten is a failure of a write that the client reports as
+// leaving open whether the database stored it, wrapping its cause, as the
+// client does.
+type mayHaveBeenWritten struct{ cause error }
+
+func (m mayHaveBeenWritten) Error() string {
+	return "outcome unknown, the events may have been written nevertheless: " + m.cause.Error()
+}
+func (m mayHaveBeenWritten) Is(target error) bool { return target == eventsourcingdb.ErrOutcomeUnknown }
+func (m mayHaveBeenWritten) Unwrap() error        { return m.cause }
+
 func TestDatabaseFailureByType(t *testing.T) {
-	t.Run("sorts by the status code of the answer, not by the error text", func(t *testing.T) {
+	t.Run("sorts an answer without a code by its status, not by the error text", func(t *testing.T) {
 		tests := []struct {
 			name string
 			err  error
@@ -43,6 +76,8 @@ func TestDatabaseFailureByType(t *testing.T) {
 			{"a rejected API token is permanent", answered(http.StatusUnauthorized, "unauthorized"), ErrPermanent},
 			{"a bad request is permanent", answered(http.StatusBadRequest, "bad request"), ErrPermanent},
 			{"a failure without an answer is transient", worded{errors.New("connection refused")}, ErrTransient},
+			{"an error within a stream of the v1 API is transient", answered(http.StatusOK, "store is shutting down"), ErrTransient},
+			{"a request that did not arrive in time is transient", answered(http.StatusRequestTimeout, ""), ErrTransient},
 		}
 
 		for _, test := range tests {
@@ -54,7 +89,63 @@ func TestDatabaseFailureByType(t *testing.T) {
 		}
 	})
 
-	t.Run("tells a conflict from a schema violation only by the start of the reason", func(t *testing.T) {
+	t.Run("sorts an error with a code by its code alone", func(t *testing.T) {
+		tests := []struct {
+			name string
+			code string
+			want error
+		}{
+			{"a precondition that did not hold is a conflict", eventsourcingdb.CodePreconditionViolated, ErrConflict},
+			{"a database that shuts down is transient", eventsourcingdb.CodeServerShuttingDown, ErrTransient},
+			{"a store that is read-only is transient", eventsourcingdb.CodeStoreReadOnly, ErrTransient},
+			{"indexes that are rebuilt are transient", eventsourcingdb.CodeIndexesRebuilding, ErrTransient},
+			{"a restore in progress is transient", eventsourcingdb.CodeRestoreInProgress, ErrTransient},
+			{"a full disk is transient", eventsourcingdb.CodeDiskFull, ErrTransient},
+			{"a store that failed is transient", eventsourcingdb.CodeStoreFailed, ErrTransient},
+			{"an invalid license is transient", eventsourcingdb.CodeLicenseInvalid, ErrTransient},
+			{"an exceeded capacity is transient", eventsourcingdb.CodeCapacityExceeded, ErrTransient},
+			{"an event that does not match its schema is permanent", eventsourcingdb.CodeEventSchemaViolated, ErrPermanent},
+			{"a malformed subject is permanent", eventsourcingdb.CodeSubjectMalformed, ErrPermanent},
+			{"an event that is too large is permanent", eventsourcingdb.CodeEventTooLarge, ErrPermanent},
+			{"a query that can not be evaluated is permanent", eventsourcingdb.CodeQueryUnevaluable, ErrPermanent},
+			{"a range that no event can satisfy is permanent", eventsourcingdb.CodeRangeUnsatisfiable, ErrPermanent},
+			{"a code the kit does not know is permanent", "https://docs.eventsourcingdb.io/errors/something-new", ErrPermanent},
+		}
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				err := databaseFailure(coded(test.code), "writing")
+
+				assert.ErrorIs(t, err, test.want)
+				if test.want != ErrConflict {
+					assert.NotErrorIs(t, err, ErrConflict, "ErrConflict is transient as well, so only this tells them apart")
+				}
+			})
+		}
+	})
+
+	t.Run("keeps a conflict apart from the other transient failures", func(t *testing.T) {
+		conflict := databaseFailure(coded(eventsourcingdb.CodePreconditionViolated), "writing")
+		capacity := databaseFailure(coded(eventsourcingdb.CodeCapacityExceeded), "writing")
+
+		assert.ErrorIs(t, conflict, ErrConflict, "a precondition that did not hold may hold once the state is read again")
+		assert.NotErrorIs(t, capacity, ErrConflict, "reading the state again never makes room in the store")
+		assert.NotErrorIs(t, conflict, ErrPermanent)
+	})
+
+	t.Run("sorts by the code rather than by the status of the answer", func(t *testing.T) {
+		refusal := worded{&eventsourcingdb.DBAPIError{
+			Action: "write events", Status: http.StatusConflict, Code: eventsourcingdb.CodeEventSchemaViolated,
+			Description: "state conflict: the description does not decide either",
+		}}
+
+		err := databaseFailure(refusal, "writing")
+
+		assert.ErrorIs(t, err, ErrPermanent)
+		assert.NotErrorIs(t, err, ErrConflict)
+	})
+
+	t.Run("tells a conflict from a schema violation only by the start of the description", func(t *testing.T) {
 		err := databaseFailure(answered(http.StatusConflict, "state conflict: the schema conflict is elsewhere"), "writing")
 
 		assert.ErrorIs(t, err, ErrConflict)
@@ -74,13 +165,15 @@ func TestDatabaseFailureByType(t *testing.T) {
 		assert.ErrorContains(t, err, "the answer does not come from an EventSourcingDB")
 	})
 
-	t.Run("sorts a stream on which neither an event nor a heartbeat arrived as transient", func(t *testing.T) {
-		err := databaseFailure(worded{eventsourcingdb.ErrHeartbeatTimeout}, "reading events")
+	t.Run("sorts a connection that stalled as transient, and keeps the stall reachable", func(t *testing.T) {
+		err := databaseFailure(stalled{}, "reading events")
 
 		assert.ErrorIs(t, err, ErrTransient)
+		assert.ErrorIs(t, err, eventsourcingdb.ErrConnectionStalled)
+		assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context is context.DeadlineExceeded")
 	})
 
-	t.Run("sorts a 409 when writing by its reason", func(t *testing.T) {
+	t.Run("sorts a 409 without a code when writing by its description", func(t *testing.T) {
 		conflict := databaseFailure(answered(http.StatusConflict, "state conflict: precondition failed"), "writing")
 		violation := databaseFailure(answered(http.StatusConflict, "schema conflict: event does not match"), "writing")
 
@@ -90,21 +183,24 @@ func TestDatabaseFailureByType(t *testing.T) {
 		assert.NotErrorIs(t, violation, ErrTransient)
 	})
 
-	t.Run("reads no status code from a failure without an answer", func(t *testing.T) {
-		assert.Zero(t, statusCodeOf(errors.New("failed to write events, got HTTP status code '409', expected '200'")),
+	t.Run("reads no status and no code from a failure without an answer", func(t *testing.T) {
+		assert.Zero(t, statusOf(errors.New("failed to write events, got HTTP status code '409', expected '200'")),
 			"a text that looks like an answer is no answer")
-		assert.Equal(t, http.StatusConflict, statusCodeOf(answered(http.StatusConflict, "")))
+		assert.Empty(t, codeOf(errors.New("failed to write events: https://docs.eventsourcingdb.io/errors/precondition-violated")),
+			"a text that looks like a code is no code")
+		assert.Equal(t, http.StatusConflict, statusOf(answered(http.StatusConflict, "")))
+		assert.Equal(t, eventsourcingdb.CodePreconditionViolated, codeOf(coded(eventsourcingdb.CodePreconditionViolated)))
 	})
 }
 
 func TestReadFailure(t *testing.T) {
-	t.Run("sorts a 409 as permanent, whatever the reason, since reading has no preconditions", func(t *testing.T) {
+	t.Run("sorts a 409 without a code as permanent, whatever the description, since reading has no preconditions", func(t *testing.T) {
 		for _, reason := range []string{
-			"state conflict: fromLatestEvent results in an event ID greater than upperBound ID",
-			"schema conflict: the reason does not matter when reading",
+			"state conflict: the description does not matter when reading",
+			"schema conflict: the description does not matter when reading",
 		} {
 			t.Run(reason, func(t *testing.T) {
-				refusal := &eventsourcingdb.DBAPIError{Action: "read events", StatusCode: http.StatusConflict, Reason: reason}
+				refusal := &eventsourcingdb.DBAPIError{Action: "read events", Status: http.StatusConflict, Description: reason}
 
 				err := readFailure(context.Background(), refusal, `reading "/books/42"`)
 
@@ -117,12 +213,25 @@ func TestReadFailure(t *testing.T) {
 		}
 	})
 
+	t.Run("sorts a FromLatestEvent beyond the upper bound as permanent by its code", func(t *testing.T) {
+		refusal := &eventsourcingdb.DBAPIError{
+			Action: "read events", Status: http.StatusConflict, Code: eventsourcingdb.CodeRangeUnsatisfiable,
+			Description: "state conflict: fromLatestEvent results in an event ID greater than upperBound ID",
+		}
+
+		err := readFailure(context.Background(), refusal, "reading events")
+
+		assert.ErrorIs(t, err, ErrPermanent)
+		assert.NotErrorIs(t, err, ErrConflict)
+	})
+
 	t.Run("sorts every other answer as databaseFailure does", func(t *testing.T) {
 		tests := []struct {
 			name string
 			err  error
 			want error
 		}{
+			{"a database that rebuilds its indexes is transient", coded(eventsourcingdb.CodeIndexesRebuilding), ErrTransient},
 			{"an unavailable database is transient", answered(http.StatusServiceUnavailable, "shutting down"), ErrTransient},
 			{"too many requests are transient", answered(http.StatusTooManyRequests, ""), ErrTransient},
 			{"a failure without an answer is transient", worded{errors.New("connection refused")}, ErrTransient},
@@ -155,10 +264,11 @@ func TestReadFailure(t *testing.T) {
 	})
 }
 
-// answer is an answer of the database as the client reports it, with the
-// error that kept the client from reading the reason, if any.
-func answer(status int, reason string, unread error) *eventsourcingdb.DBAPIError {
-	return &eventsourcingdb.DBAPIError{Action: "write events", StatusCode: status, Reason: reason, Err: unread}
+// answer is an answer of the database without a code as the client reports
+// it, with the error that kept the client from reading the description, if
+// any.
+func answer(status int, description string, unread error) *eventsourcingdb.DBAPIError {
+	return &eventsourcingdb.DBAPIError{Action: "write events", Status: status, Description: description, Err: unread}
 }
 
 // dialTimeout returns the error with which the standard library reports that
@@ -192,7 +302,11 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 			{"without an answer", refused, ErrTransient, "%v: %s: %v"},
 			{"from a server that is not an EventSourcingDB", eventsourcingdb.ErrInvalidServerHeader, ErrTransient,
 				"%v: %s: the answer does not come from an EventSourcingDB: %v"},
-			{"on a stream that stalled", eventsourcingdb.ErrHeartbeatTimeout, ErrTransient, "%v: %s: %v"},
+			{"on a connection that stalled", stalled{}, ErrTransient, "%v: %s: %v"},
+			{"with a code of a conflict", &eventsourcingdb.DBAPIError{
+				Action: "write events", Status: http.StatusOK, Code: eventsourcingdb.CodePreconditionViolated,
+				Description: "/preconditions/0: precondition isSubjectPristine does not hold",
+			}, ErrConflict, "%v: %s: %v"},
 			{"with 429", answer(http.StatusTooManyRequests, "slow down", nil), ErrTransient, "%v: %s: %v"},
 			{"with 503", answer(http.StatusServiceUnavailable, "shutting down", nil), ErrTransient, "%v: %s: %v"},
 			{"with a failed precondition", answer(http.StatusConflict, "state conflict: precondition failed", nil),
@@ -239,13 +353,13 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 
 		refusal, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
 		require.True(t, isAnswer, "errors.As has to reach the answer")
-		assert.Equal(t, http.StatusTooManyRequests, refusal.StatusCode)
-		assert.Equal(t, "slow down", refusal.Reason)
+		assert.Equal(t, http.StatusTooManyRequests, refusal.Status)
+		assert.Equal(t, "slow down", refusal.Description)
 	})
 
 	t.Run("after the category when reading, also for a 409", func(t *testing.T) {
 		refusal := &eventsourcingdb.DBAPIError{
-			Action: "read events", StatusCode: http.StatusConflict, Reason: "state conflict: beyond the upper bound",
+			Action: "read events", Status: http.StatusConflict, Description: "state conflict: beyond the upper bound",
 		}
 
 		err := readFailure(context.Background(), refusal, "reading events")
@@ -255,7 +369,7 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 		assert.EqualError(t, err, fmt.Sprintf("%v: reading events: %v", ErrPermanent, refusal))
 	})
 
-	t.Run("keeps a failure of the client that looks like the end of a context as text only", func(t *testing.T) {
+	t.Run("keeps a failure of the client that looks like the end of a context, but not as the end of the context", func(t *testing.T) {
 		// Only the end of the context the caller handed over is to match
 		// context.Canceled or context.DeadlineExceeded. The standard library
 		// reports a timeout while connecting as context.DeadlineExceeded as well,
@@ -293,6 +407,12 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 				err := databaseFailure(test.err, "writing")
 
 				assert.ErrorIs(t, err, test.category)
+				assert.ErrorIs(t, err, test.err, "errors.Is has to reach the failure of the client all the same")
+				if answer, isAnswer := test.err.(*eventsourcingdb.DBAPIError); isAnswer {
+					reached, isReached := errors.AsType[*eventsourcingdb.DBAPIError](err)
+					require.True(t, isReached, "errors.As has to reach the answer of the database all the same")
+					assert.Same(t, answer, reached)
+				}
 				assert.NotErrorIs(t, err, context.Canceled, "only the end of the context is context.Canceled")
 				assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context is context.DeadlineExceeded")
 				assert.EqualError(t, err, fmt.Sprintf(test.message, test.category, "writing", test.err),
@@ -336,19 +456,27 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 }
 
 func TestWriteFailure(t *testing.T) {
-	t.Run("is what databaseFailure reports if the request never left completely", func(t *testing.T) {
-		// The database reads the whole request before it writes anything, so
-		// even an answer that would leave the outcome open, such as 500, comes
-		// before writing then.
+	t.Run("is what databaseFailure reports unless the client reports an unknown outcome", func(t *testing.T) {
+		// The client reports a write as certainly not stored only if it could
+		// not connect, or if the database refused it, by the same rule in
+		// every SDK, so whatever it does not mark is sorted into a category.
 		for _, failure := range []error{
 			worded{errors.New("connection refused")},
 			worded{eventsourcingdb.ErrInvalidServerHeader},
-			answer(http.StatusInternalServerError, "failed", nil),
-			answer(http.StatusConflict, "state conflict: precondition failed", nil),
 			dialTimeout(t),
+			answer(http.StatusBadRequest, "bad request", nil),
+			answer(http.StatusUnauthorized, "unauthorized", nil),
+			answer(http.StatusConflict, "state conflict: precondition failed", nil),
+			answer(http.StatusConflict, "schema conflict: event does not match", nil),
+			answer(http.StatusTooManyRequests, "slow down", nil),
+			answer(http.StatusServiceUnavailable, "server is shutting down", nil),
+			coded(eventsourcingdb.CodePreconditionViolated),
+			coded(eventsourcingdb.CodeEventSchemaViolated),
+			coded(eventsourcingdb.CodeServerShuttingDown),
+			coded("https://docs.eventsourcingdb.io/errors/something-new"),
 		} {
 			t.Run(failure.Error(), func(t *testing.T) {
-				err := writeFailure(failure, true, "writing")
+				err := writeFailure(failure, "writing")
 
 				assert.Equal(t, databaseFailure(failure, "writing"), err)
 				assert.NotErrorIs(t, err, ErrOutcomeUnknown)
@@ -356,47 +484,19 @@ func TestWriteFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("is what databaseFailure reports if the database refused the request before writing", func(t *testing.T) {
-		for _, refusal := range []*eventsourcingdb.DBAPIError{
-			answer(http.StatusBadRequest, "bad request", nil),
-			answer(http.StatusUnauthorized, "unauthorized", nil),
-			answer(http.StatusForbidden, "forbidden", nil),
-			answer(http.StatusNotFound, "not found", nil),
-			answer(http.StatusConflict, "state conflict: precondition failed", nil),
-			answer(http.StatusConflict, "schema conflict: event does not match", nil),
-			answer(http.StatusRequestEntityTooLarge, "too large", nil),
-			answer(http.StatusUnsupportedMediaType, "unsupported", nil),
-			answer(http.StatusUnprocessableEntity, "unprocessable", nil),
-			answer(http.StatusTooManyRequests, "slow down", nil),
-			answer(499, "the last 4xx", nil),
-			answer(http.StatusServiceUnavailable, "server is shutting down", nil),
-			answer(http.StatusInsufficientStorage, "insufficient storage", nil),
-		} {
-			t.Run(refusal.Error(), func(t *testing.T) {
-				err := writeFailure(refusal, false, "writing")
-
-				assert.Equal(t, databaseFailure(refusal, "writing"), err)
-				assert.NotErrorIs(t, err, ErrOutcomeUnknown)
-			})
-		}
-	})
-
-	t.Run("reports every other failure of a request that has left as an unknown outcome", func(t *testing.T) {
+	t.Run("reports a failure that the client reports as an unknown outcome as one", func(t *testing.T) {
 		for _, failure := range []error{
-			worded{errors.New("read: connection reset by peer")},
-			worded{io.ErrUnexpectedEOF},
-			worded{eventsourcingdb.ErrInvalidServerHeader},
-			worded{eventsourcingdb.ErrHeartbeatTimeout},
-			dialTimeout(t),
-			answer(http.StatusPermanentRedirect, "the last 3xx", nil),
-			answer(http.StatusInternalServerError, "failed", nil),
-			answer(http.StatusNotImplemented, "not implemented", nil),
-			answer(http.StatusBadGateway, "bad gateway", nil),
-			answer(http.StatusGatewayTimeout, "gateway timeout", nil),
-			answer(http.StatusLoopDetected, "the status after 507", nil),
+			mayHaveBeenWritten{errors.New("read: connection reset by peer")},
+			mayHaveBeenWritten{io.ErrUnexpectedEOF},
+			mayHaveBeenWritten{eventsourcingdb.ErrInvalidServerHeader},
+			mayHaveBeenWritten{stalled{}},
+			mayHaveBeenWritten{answer(http.StatusInternalServerError, "failed", nil)},
+			mayHaveBeenWritten{answer(http.StatusBadGateway, "bad gateway", nil)},
+			mayHaveBeenWritten{answer(http.StatusConflict, "state conflict: precondition failed", nil)},
+			mayHaveBeenWritten{coded(eventsourcingdb.CodeStoreFailed)},
 		} {
 			t.Run(failure.Error(), func(t *testing.T) {
-				err := writeFailure(failure, false, "writing")
+				err := writeFailure(failure, "writing")
 
 				assert.ErrorIs(t, err, ErrOutcomeUnknown)
 				for _, category := range []error{ErrDomain, ErrTransient, ErrPermanent, ErrNotARevision} {
@@ -412,18 +512,19 @@ func TestWriteFailure(t *testing.T) {
 			err     error
 			message string
 		}{
-			{"without an answer", worded{errors.New("connection reset by peer")}, "%v: %s: %v"},
-			{"with 500", answer(http.StatusInternalServerError, "failed", nil), "%v: %s: %v"},
-			{"from a server that is not an EventSourcingDB", worded{eventsourcingdb.ErrInvalidServerHeader},
+			{"without an answer", mayHaveBeenWritten{errors.New("connection reset by peer")}, "%v: %s: %v"},
+			{"with 500", mayHaveBeenWritten{answer(http.StatusInternalServerError, "failed", nil)}, "%v: %s: %v"},
+			{"from a server that is not an EventSourcingDB", mayHaveBeenWritten{eventsourcingdb.ErrInvalidServerHeader},
 				"%v: %s: the answer does not come from an EventSourcingDB: %v"},
 		}
 
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
-				err := writeFailure(test.err, false, `writing "/books/42"`)
+				err := writeFailure(test.err, `writing "/books/42"`)
 
 				assert.EqualError(t, err, fmt.Sprintf(test.message, ErrOutcomeUnknown, `writing "/books/42"`, test.err))
 				assert.ErrorIs(t, err, test.err, "errors.Is and errors.As have to reach the failure of the client")
+				assert.ErrorIs(t, err, eventsourcingdb.ErrOutcomeUnknown, "errors.Is has to reach the unknown outcome of the client")
 
 				wraps, isMultiple := err.(interface{ Unwrap() []error })
 				require.True(t, isMultiple, "the failure has to wrap ErrOutcomeUnknown and the failure of the client")
@@ -434,10 +535,19 @@ func TestWriteFailure(t *testing.T) {
 		assert.EqualError(t, ErrOutcomeUnknown, "outcome unknown")
 	})
 
-	t.Run("keeps a failure of the client that looks like the end of a context as text only", func(t *testing.T) {
-		// A timeout of the client while it waits for the answer is reported as
-		// context.DeadlineExceeded, although the context of the caller has
-		// not ended, and httpapi.StatusFor would answer it with 503.
+	t.Run("keeps the unknown outcome and the stall reachable after a write that stalled", func(t *testing.T) {
+		err := writeFailure(mayHaveBeenWritten{stalled{}}, "writing")
+
+		assert.ErrorIs(t, err, ErrOutcomeUnknown)
+		assert.ErrorIs(t, err, eventsourcingdb.ErrOutcomeUnknown)
+		assert.ErrorIs(t, err, eventsourcingdb.ErrConnectionStalled)
+		assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context is context.DeadlineExceeded")
+	})
+
+	t.Run("keeps a failure of the client that looks like the end of a context, but not as the end of the context", func(t *testing.T) {
+		// A timeout while connecting is reported as context.DeadlineExceeded,
+		// although the context of the caller has not ended, and
+		// httpapi.StatusFor would answer it with 503.
 		timeout := dialTimeout(t)
 
 		tests := []struct {
@@ -445,16 +555,16 @@ func TestWriteFailure(t *testing.T) {
 			err     error
 			message string
 		}{
-			{"a timeout", timeout, "%v: %s: %v"},
-			{"a request that was canceled", &url.Error{Op: "Post", URL: "http://localhost:3000", Err: context.Canceled}, "%v: %s: %v"},
-			{"an answer from a server that is not an EventSourcingDB", errors.Join(eventsourcingdb.ErrInvalidServerHeader, timeout),
+			{"a timeout", mayHaveBeenWritten{timeout}, "%v: %s: %v"},
+			{"a request that was canceled", mayHaveBeenWritten{&url.Error{Op: "Post", URL: "http://localhost:3000", Err: context.Canceled}}, "%v: %s: %v"},
+			{"an answer from a server that is not an EventSourcingDB", mayHaveBeenWritten{errors.Join(eventsourcingdb.ErrInvalidServerHeader, timeout)},
 				"%v: %s: the answer does not come from an EventSourcingDB: %v"},
-			{"500 whose reason ran into a timeout", answer(http.StatusInternalServerError, "", context.DeadlineExceeded), "%v: %s: %v"},
+			{"500 whose description ran into a timeout", mayHaveBeenWritten{answer(http.StatusInternalServerError, "", context.DeadlineExceeded)}, "%v: %s: %v"},
 		}
 
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
-				err := writeFailure(test.err, false, "writing")
+				err := writeFailure(test.err, "writing")
 
 				assert.ErrorIs(t, err, ErrOutcomeUnknown)
 				assert.NotErrorIs(t, err, context.Canceled, "only the end of the context is context.Canceled")
@@ -466,44 +576,27 @@ func TestWriteFailure(t *testing.T) {
 	})
 }
 
-func TestRequestTrace(t *testing.T) {
-	refused := errors.New("connection refused")
-
-	// The steps are the hooks a transport calls, in their order.
-	type step func(hooks *httptrace.ClientTrace)
-
-	getConn := func(hooks *httptrace.ClientTrace) { hooks.GetConn("localhost:3000") }
-	gotConn := func(hooks *httptrace.ClientTrace) { hooks.GotConn(httptrace.GotConnInfo{}) }
-	wrote := func(hooks *httptrace.ClientTrace) { hooks.WroteRequest(httptrace.WroteRequestInfo{}) }
-	failedToWrite := func(hooks *httptrace.ClientTrace) { hooks.WroteRequest(httptrace.WroteRequestInfo{Err: refused}) }
-
+func TestIsSchemaConflict(t *testing.T) {
 	tests := []struct {
-		name     string
-		steps    []step
-		isUnsent bool
+		name    string
+		refusal error
+		want    bool
 	}{
-		{"a request without any hook, as with a transport that hides it, may have been sent", nil, false},
-		{"a request that never got a connection was not sent", []step{getConn}, true},
-		{"a request whose writing failed was not sent", []step{getConn, gotConn, failedToWrite}, true},
-		{"a request that was written may have been sent", []step{getConn, gotConn, wrote}, false},
-		{"a request on a connection, but without a hook for writing it, may have been sent", []step{getConn, gotConn}, false},
-		{"a request whose writing failed, but without a hook for the connection, was not sent", []step{failedToWrite}, true},
-		{"a request that got a connection on a second attempt may have been sent", []step{getConn, getConn, gotConn}, false},
-		{"a request that was written after a failed attempt may have been sent", []step{getConn, gotConn, failedToWrite, getConn, gotConn, wrote}, false},
-		{"a request that was written before a failed attempt may have been sent", []step{getConn, gotConn, wrote, getConn, gotConn, failedToWrite}, false},
-		{"a request that was written after an attempt without a connection may have been sent", []step{getConn, getConn, gotConn, wrote}, false},
+		{"a schema that is registered already", coded(eventsourcingdb.CodeEventSchemaAlreadyRegistered), true},
+		{"stored events that do not match the schema", coded(eventsourcingdb.CodeEventSchemaViolated), true},
+		{"a 409 without a code, from a database that offers just the v1 API", answered(http.StatusConflict, "schema conflict"), true},
+		{"a malformed schema", coded(eventsourcingdb.CodeEventSchemaMalformed), false},
+		{"a database that shuts down", coded(eventsourcingdb.CodeServerShuttingDown), false},
+		{"a 409 with a code of something else", worded{&eventsourcingdb.DBAPIError{
+			Action: "register event schema", Status: http.StatusConflict, Code: eventsourcingdb.CodeEventSchemaMalformed,
+		}}, false},
+		{"a 503 without a code", answered(http.StatusServiceUnavailable, "shutting down"), false},
+		{"a failure without an answer", worded{errors.New("connection refused")}, false},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			var request requestTrace
-			hooks := request.hooks()
-
-			for _, step := range test.steps {
-				step(hooks)
-			}
-
-			assert.Equal(t, test.isUnsent, request.isUnsent())
+			assert.Equal(t, test.want, isSchemaConflict(test.refusal))
 		})
 	}
 }

@@ -2,6 +2,7 @@ package architecturekit_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -9,8 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // readAll collects what Read hands out, and the errors separately.
@@ -82,10 +83,10 @@ func unaskedDatabase(t *testing.T) (*architecturekit.Store, *atomic.Bool) {
 	t.Helper()
 
 	asked := &atomic.Bool{}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		asked.Store(true)
 		writer.Header().Set("Server", "EventSourcingDB/test")
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	return architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io"), asked
@@ -169,7 +170,7 @@ func TestRead(t *testing.T) {
 	})
 
 	t.Run("sorts an unreachable database as transient", func(t *testing.T) {
-		server := httptest.NewServer(http.NotFoundHandler())
+		server := httptest.NewServer(speakingV1(http.NotFoundHandler()))
 		server.Close()
 		store := architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io")
 
@@ -402,9 +403,10 @@ func TestReadFromLatestEvent(t *testing.T) {
 		subject := subjectFor(t)
 		ids := writeIDs(t, subject, incremented{By: 1}, reset{}, incremented{By: 2})
 
-		// The database answers with 409, which would be a conflict if it were a
-		// write. A read has no precondition that could hold later, though, and
-		// new events only move the latest one further away.
+		// The database refuses the read with the code range-unsatisfiable, which
+		// a database that offers just the v1 API sends as a 409 that the client
+		// gives that code. A read has no precondition that could hold later,
+		// though, and new events only move the latest one further away.
 		for name, upperBound := range map[string]architecturekit.ReadOption{
 			"UpToEvent":   architecturekit.UpToEvent(ids[0]),
 			"BeforeEvent": architecturekit.BeforeEvent(ids[1]),
@@ -418,8 +420,10 @@ func TestReadFromLatestEvent(t *testing.T) {
 				assert.ErrorIs(t, errs[0], architecturekit.ErrPermanent)
 				assert.NotErrorIs(t, errs[0], architecturekit.ErrConflict, "a read has no precondition that did not hold")
 				assert.NotErrorIs(t, errs[0], architecturekit.ErrTransient, "trying again never helps")
-				assert.ErrorContains(t, errs[0], "fromLatestEvent results in an event ID greater than upperBound ID",
-					"the message has to keep the reason of the database")
+				answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](errs[0])
+				require.True(t, isAnswer, "errors.As has to reach the answer of the database")
+				assert.Equal(t, eventsourcingdb.CodeRangeUnsatisfiable, answer.Code)
+				assert.ErrorContains(t, errs[0], answer.Description, "the message has to keep the description of the database")
 				assert.ErrorContains(t, errs[0], `reading "`+subject+`"`)
 			})
 		}

@@ -3,7 +3,7 @@ package architecturekit
 import (
 	"fmt"
 
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // maxUpcastSteps bounds the chain, so that an upcaster which does not change

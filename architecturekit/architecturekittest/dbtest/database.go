@@ -7,8 +7,10 @@
 // decider or a projection builds without either.
 //
 // The container runs the image thenativeweb/eventsourcingdb:latest, as the
-// client SDK starts it, which Docker pulls only if it is missing. The database
-// runs without a signing key, so its events carry no signature, and signature
+// client SDK starts it, which Docker pulls only if it is missing, unless the
+// environment variable EVENTSOURCINGDB_IMAGE_TAG names another tag, such as
+// preview, as it does for the tests of the client SDK. The database runs
+// without a signing key, so its events carry no signature, and signature
 // verification can not be tested with it.
 package dbtest
 
@@ -22,9 +24,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdbtest"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdbtest"
 )
 
 // Database is an EventSourcingDB in a container, for the tests that need a
@@ -223,10 +225,32 @@ func finish(code int, log io.Writer) int {
 	return code
 }
 
+// imageTagVariable names the environment variable that chooses the tag of the
+// image the container runs, as it does for the tests of the client SDK.
+const imageTagVariable = "EVENTSOURCINGDB_IMAGE_TAG"
+
+// imageTag returns the tag of the image the container runs, as the
+// environment chooses it, or an empty tag, which leaves the one the client SDK
+// starts, latest.
+func imageTag() string {
+	return os.Getenv(imageTagVariable)
+}
+
+// newContainer returns a container of the database, which runs the image the
+// environment chooses (see imageTag).
+func newContainer() *eventsourcingdbtest.Container {
+	container := eventsourcingdbtest.NewContainer()
+	if tag := imageTag(); tag != "" {
+		container = container.WithImageTag(tag)
+	}
+
+	return container
+}
+
 // startDatabase starts a database in a container, and stops it again if it
 // cannot be reached.
 func startDatabase(ctx context.Context) (stopper, *Database, error) {
-	container := eventsourcingdbtest.NewContainer()
+	container := newContainer()
 
 	if err := container.Start(ctx); err != nil {
 		return nil, nil, err

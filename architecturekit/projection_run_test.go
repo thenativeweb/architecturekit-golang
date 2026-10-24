@@ -8,8 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // startInBackground starts the projection and returns the run, and a function
@@ -145,7 +145,9 @@ func TestProjectionRun(t *testing.T) {
 
 		status := run.Status()
 		assert.Equal(t, architecturekit.PhaseReconnecting, status.Phase)
-		assert.NoError(t, status.Err, "a stream that ended is reported without an error")
+		assert.ErrorIs(t, status.Err, architecturekit.ErrTransient,
+			"a stream that ended has broken off, since the database never ends one on its own")
+		assert.ErrorContains(t, status.Err, "the stream broke off")
 		assert.Equal(t, 1, status.Attempts)
 		assert.Equal(t, "0", status.Revision)
 

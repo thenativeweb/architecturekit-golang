@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // Projection is what StartProjection drives: it applies events. A projection
@@ -296,9 +296,9 @@ func run(
 }
 
 // follow catches up from the checkpoint and then follows the stream live,
-// until reading fails or the stream ends. It returns how long it followed the
-// stream live, which is zero if it did not catch up, and a nil error if the
-// database ended the stream.
+// until reading fails, which includes a stream that ends, since the client
+// reports that it broke off. It returns how long it followed the stream live,
+// which is zero if it did not catch up.
 //
 // Live, every event is committed on its own, since a batch would only be
 // committed once the next events arrive, which may take a long time.

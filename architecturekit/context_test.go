@@ -13,8 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // A context ends when the caller goes away or runs out of time, and reading has
@@ -223,13 +223,13 @@ func silentClient(t *testing.T) *eventsourcingdb.Client {
 
 	released := make(chan struct{})
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 		case <-released:
 		case <-time.After(5 * time.Second):
 		}
-	}))
+	})))
 	t.Cleanup(func() {
 		close(released)
 		server.Close()
@@ -338,7 +338,9 @@ func TestAWriteThatHasBegun(t *testing.T) {
 
 	t.Run("carries the values of the context, such as a trace", func(t *testing.T) {
 		// A trace that follows the requests of a call sees the write and the
-		// registration as well, not only the reads before them.
+		// registration as well, not only the reads before them. The first
+		// request of a client asks the database for its API, with the context
+		// of the call that needs it, so the trace sees that one, too.
 		calls := []struct {
 			name     string
 			path     string
@@ -346,18 +348,18 @@ func TestAWriteThatHasBegun(t *testing.T) {
 			requests int32
 			call     func(ctx context.Context, store *architecturekit.Store) error
 		}{
-			{"Execute, which reads the state first", "/api/v1/write-events", writtenAnswer, 2,
+			{"Execute, which reads the state first", "/api/v1/write-events", writtenAnswer, 3,
 				func(ctx context.Context, store *architecturekit.Store) error {
 					_, err := architecturekit.Execute(ctx, store, counterDecider(), increment{subject: "/test", By: 1})
 					return err
 				}},
-			{"Write", "/api/v1/write-events", writtenAnswer, 1,
+			{"Write", "/api/v1/write-events", writtenAnswer, 2,
 				func(ctx context.Context, store *architecturekit.Store) error {
 					_, err := architecturekit.Write(ctx, store,
 						[]architecturekit.EventOn{{Subject: "/test", Event: incremented{By: 1}}}, architecturekit.Unconditionally())
 					return err
 				}},
-			{"RegisterSchemas, which reads the registered schemas first", "/api/v1/register-event-schema", "", 2,
+			{"RegisterSchemas, which reads the registered schemas first", "/api/v1/register-event-schema", "", 3,
 				func(ctx context.Context, store *architecturekit.Store) error {
 					return architecturekit.RegisterSchemas(ctx, store,
 						[]architecturekit.EventSchema{architecturekit.SchemaOf[incremented]()})
