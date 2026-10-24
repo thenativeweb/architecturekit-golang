@@ -388,7 +388,10 @@ func TestExecute(t *testing.T) {
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a schema violation is permanent")
 		assert.NotErrorIs(t, err, architecturekit.ErrConflict, "a schema violation is not a conflict")
-		assert.ErrorContains(t, err, "does not match schema", "error should carry the reason from the database")
+		answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
+		require.True(t, isAnswer, "errors.As has to reach the answer of the database")
+		assert.Equal(t, eventsourcingdb.CodeEventSchemaViolated, answer.Code)
+		assert.ErrorContains(t, err, answer.Description, "error should carry the description from the database")
 	})
 
 	t.Run("reports a failing upcaster", func(t *testing.T) {

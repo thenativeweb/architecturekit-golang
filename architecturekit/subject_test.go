@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // databaseCharacters are the characters that EventSourcingDB allows in a
@@ -435,7 +436,7 @@ func TestSubjectScheme(t *testing.T) {
 			_, err := architecturekit.Write(ctx, store,
 				[]architecturekit.EventOn{{Subject: subjectFor(t) + "/" + value, Event: incremented{By: 1}}},
 				architecturekit.Unconditionally())
-			assert.ErrorContains(t, err, "malformed subject", "the database should refuse %q, as Check does", value)
+			assertMalformedSubject(t, err, value)
 		}
 
 		var events []architecturekit.EventOn
@@ -552,4 +553,21 @@ func TestSubjectSchemeValue(t *testing.T) {
 				func() { books.Value("/books/42", name) })
 		}
 	})
+}
+
+// assertMalformedSubject asserts that the database refused a write for the
+// given subject as malformed: with the code subject-malformed, or, from a
+// database that offers just the v1 API, which reports it without a code, with
+// a description that says so.
+func assertMalformedSubject(t *testing.T, err error, subject string) {
+	t.Helper()
+
+	assert.ErrorIs(t, err, architecturekit.ErrPermanent, "the database should refuse %q, as Check does", subject)
+	answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
+	require.True(t, isAnswer, "errors.As has to reach the answer of the database for %q, got: %v", subject, err)
+	if answer.Code == "" {
+		assert.Contains(t, answer.Description, "malformed subject", "the database should refuse %q, as Check does", subject)
+		return
+	}
+	assert.Equal(t, eventsourcingdb.CodeSubjectMalformed, answer.Code, "the database should refuse %q, as Check does", subject)
 }
