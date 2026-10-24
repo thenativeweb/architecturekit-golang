@@ -408,6 +408,11 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 
 				assert.ErrorIs(t, err, test.category)
 				assert.ErrorIs(t, err, test.err, "errors.Is has to reach the failure of the client all the same")
+				if answer, isAnswer := test.err.(*eventsourcingdb.DBAPIError); isAnswer {
+					reached, isReached := errors.AsType[*eventsourcingdb.DBAPIError](err)
+					require.True(t, isReached, "errors.As has to reach the answer of the database all the same")
+					assert.Same(t, answer, reached)
+				}
 				assert.NotErrorIs(t, err, context.Canceled, "only the end of the context is context.Canceled")
 				assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context is context.DeadlineExceeded")
 				assert.EqualError(t, err, fmt.Sprintf(test.message, test.category, "writing", test.err),

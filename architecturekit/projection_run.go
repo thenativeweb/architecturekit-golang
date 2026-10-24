@@ -82,8 +82,9 @@ type ProjectionRun struct {
 // If reading fails, which includes a stream that ends, for example on a
 // restart, since the client reports that it broke off, it waits and catches
 // up again from where it stopped, with a delay that grows with every attempt
-// in a row (see WithReconnectDelays and WithReconnectObserver). An error of Apply of the category ErrTransient is
-// handled the same way, so the event is tried again. Only a failure that
+// in a row (see WithReconnectDelays and WithReconnectObserver). An error of
+// Apply of the category ErrTransient is handled the same way, so the event is
+// tried again. Only a failure that
 // trying again will not fix, such as any other error of Apply, ends the run,
 // and Err returns it. Ending the context is how a projection is stopped, so
 // Err returns nil then. A run whose context ends before it has caught up, for
