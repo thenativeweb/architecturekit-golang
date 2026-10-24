@@ -324,7 +324,10 @@ func (d *Decision[TCommand, TState]) ThenState(
 }
 
 // ThenPreconditions expects the command to declare exactly these, in this
-// order.
+// order. A check of the subject together with all subjects below it matches
+// only a description with Recursive set, such as OnPristineSubjectRecursively
+// returns, and a check of the subject alone only one without it, so that a
+// test does not take the one for the other.
 func (d *Decision[TCommand, TState]) ThenPreconditions(
 	expected ...Precondition,
 ) *Decision[TCommand, TState] {

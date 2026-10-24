@@ -3137,7 +3137,15 @@ architecturekittest.Given(t, borrowBook, BookAcquired{}).
   ThenFailed(architecturekit.ErrNotARevision)
 ```
 
-To get the preconditions of a command directly, call the `PreconditionsOf` function. It returns a slice of `Precondition`, with the fields `Subject`, `Pristine`, `Populated`, `EventID`, `Query`, `OnStateRead`, and `Unconditional`:
+A precondition that checks the subject together with every subject below it, made with `Require` from `NewIsSubjectPristinePrecondition`, `NewIsSubjectPopulatedPrecondition`, or `NewIsSubjectOnEventIDPrecondition` with `PreconditionOptions` that set `Recursive` to `true`, is described by `OnPristineSubjectRecursively`, `OnPopulatedSubjectRecursively`, or `OnEventIDRecursively` (see [Using Preconditions](#using-preconditions)). It checks something else than the precondition of the subject alone, so a test that expects the one fails for a command that declares the other, and the failure names both, the recursive one with `Recursive: true`. `PreconditionOptions` that set `Recursive` to `false` mean the same as none, so `OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` describe such a precondition. For example, an `AcquireBook` that requires neither its subject nor any subject below it to have events yet passes the following test, while the one that prevents duplicates with `OnPristineSubject` fails it:
+
+```go
+architecturekittest.Given(t, acquireBook).
+  When(AcquireBook{BookID: "42"}).
+  ThenPreconditions(architecturekittest.OnPristineSubjectRecursively("/books/42"))
+```
+
+To get the preconditions of a command directly, call the `PreconditionsOf` function. It returns a slice of `Precondition`, with the fields `Subject`, `Pristine`, `Populated`, `EventID`, `Recursive`, `Query`, `OnStateRead`, and `Unconditional`:
 
 ```go
 preconditions := architecturekittest.PreconditionsOf(ReturnBook{BookID: "42"})

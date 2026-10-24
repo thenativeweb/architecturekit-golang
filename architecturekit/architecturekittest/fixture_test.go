@@ -611,6 +611,69 @@ func TestPreconditionsOf(t *testing.T) {
 		}, declared)
 	})
 
+	t.Run("tells a recursive subject check from one of the subject alone", func(t *testing.T) {
+		recursive := eventsourcingdb.PreconditionOptions{Recursive: true}
+
+		declared := architecturekittest.PreconditionsOf(open{
+			preconditions: []architecturekit.Precondition{
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1")),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1", recursive)),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/2")),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/2", recursive)),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/3", "9")),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/3", "9", recursive)),
+			},
+		})
+
+		assert.Equal(t, []architecturekittest.Precondition{
+			{Subject: "/account/1", Pristine: true},
+			{Subject: "/account/1", Pristine: true, Recursive: true},
+			{Subject: "/account/2", Populated: true},
+			{Subject: "/account/2", Populated: true, Recursive: true},
+			{Subject: "/account/3", EventID: "9"},
+			{Subject: "/account/3", EventID: "9", Recursive: true},
+		}, declared)
+	})
+
+	t.Run("describes a recursive subject check with the functions for it", func(t *testing.T) {
+		recursive := eventsourcingdb.PreconditionOptions{Recursive: true}
+
+		architecturekittest.Given(t, decider()).
+			When(open{
+				Owner: "golo",
+				preconditions: []architecturekit.Precondition{
+					architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1", recursive)),
+					architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/2", recursive)),
+					architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/3", "9", recursive)),
+				},
+			}).
+			ThenPreconditions(
+				architecturekittest.OnPristineSubjectRecursively("/account/1"),
+				architecturekittest.OnPopulatedSubjectRecursively("/account/2"),
+				architecturekittest.OnEventIDRecursively("/account/3", "9"),
+			)
+	})
+
+	t.Run("takes options that leave a subject check to the subject alone as none", func(t *testing.T) {
+		// They mean the same to the database, but the client keeps them, so
+		// the check differs from one built without them.
+		alone := eventsourcingdb.PreconditionOptions{Recursive: false}
+
+		declared := architecturekittest.PreconditionsOf(open{
+			preconditions: []architecturekit.Precondition{
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1", alone)),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/2", alone)),
+				architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/3", "9", alone)),
+			},
+		})
+
+		assert.Equal(t, []architecturekittest.Precondition{
+			architecturekittest.OnPristineSubject("/account/1"),
+			architecturekittest.OnPopulatedSubject("/account/2"),
+			architecturekittest.OnEventID("/account/3", "9"),
+		}, declared)
+	})
+
 	t.Run("a subject check of a type that cannot be compared is neither", func(t *testing.T) {
 		// Such a type would take a change to the client. It must not panic,
 		// but show up as a subject of no known kind, so that a test fails.
@@ -1049,6 +1112,10 @@ func TestWhenChecksPreconditions(t *testing.T) {
 			"Unconditionally": {architecturekit.Unconditionally()},
 			"OnEventID":       {architecturekit.OnEventID("/account/1", "0")},
 			"Require":         {architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1"))},
+			"Require recursively": {
+				architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition(
+					"/account/1", eventsourcingdb.PreconditionOptions{Recursive: true})),
+			},
 			"Require and OnStateRead": {
 				architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1")),
 				architecturekit.OnStateRead(),
@@ -1157,6 +1224,90 @@ func TestThenPreconditions(t *testing.T) {
 		})
 
 		recorder.expectFailure(t, `precondition 0: got {Subject: "/account/1"}, want {Subject: "/account/1", Pristine: true}`)
+	})
+
+	t.Run("tells a recursive subject check from one of the subject alone", func(t *testing.T) {
+		recursive := eventsourcingdb.PreconditionOptions{Recursive: true}
+
+		for _, test := range []struct {
+			name     string
+			declared architecturekit.Precondition
+			same     architecturekittest.Precondition
+			other    architecturekittest.Precondition
+			failure  string
+		}{
+			{
+				name:     "a pristine subject",
+				declared: architecturekit.OnPristineSubject("/account/1"),
+				same:     architecturekittest.OnPristineSubject("/account/1"),
+				other:    architecturekittest.OnPristineSubjectRecursively("/account/1"),
+				failure: `precondition 0: got {Subject: "/account/1", Pristine: true}, ` +
+					`want {Subject: "/account/1", Pristine: true, Recursive: true}`,
+			},
+			{
+				name:     "a recursively pristine subject",
+				declared: architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition("/account/1", recursive)),
+				same:     architecturekittest.OnPristineSubjectRecursively("/account/1"),
+				other:    architecturekittest.OnPristineSubject("/account/1"),
+				failure: `precondition 0: got {Subject: "/account/1", Pristine: true, Recursive: true}, ` +
+					`want {Subject: "/account/1", Pristine: true}`,
+			},
+			{
+				name:     "a populated subject",
+				declared: architecturekit.OnPopulatedSubject("/account/1"),
+				same:     architecturekittest.OnPopulatedSubject("/account/1"),
+				other:    architecturekittest.OnPopulatedSubjectRecursively("/account/1"),
+				failure: `precondition 0: got {Subject: "/account/1", Populated: true}, ` +
+					`want {Subject: "/account/1", Populated: true, Recursive: true}`,
+			},
+			{
+				name:     "a recursively populated subject",
+				declared: architecturekit.Require(eventsourcingdb.NewIsSubjectPopulatedPrecondition("/account/1", recursive)),
+				same:     architecturekittest.OnPopulatedSubjectRecursively("/account/1"),
+				other:    architecturekittest.OnPopulatedSubject("/account/1"),
+				failure: `precondition 0: got {Subject: "/account/1", Populated: true, Recursive: true}, ` +
+					`want {Subject: "/account/1", Populated: true}`,
+			},
+			{
+				name:     "a revision",
+				declared: architecturekit.OnEventID("/account/1", "7"),
+				same:     architecturekittest.OnEventID("/account/1", "7"),
+				other:    architecturekittest.OnEventIDRecursively("/account/1", "7"),
+				failure: `precondition 0: got {Subject: "/account/1", EventID: "7"}, ` +
+					`want {Subject: "/account/1", EventID: "7", Recursive: true}`,
+			},
+			{
+				name:     "a recursive revision",
+				declared: architecturekit.Require(eventsourcingdb.NewIsSubjectOnEventIDPrecondition("/account/1", "7", recursive)),
+				same:     architecturekittest.OnEventIDRecursively("/account/1", "7"),
+				other:    architecturekittest.OnEventID("/account/1", "7"),
+				failure: `precondition 0: got {Subject: "/account/1", EventID: "7", Recursive: true}, ` +
+					`want {Subject: "/account/1", EventID: "7"}`,
+			},
+		} {
+			cmd := open{Owner: "golo", preconditions: []architecturekit.Precondition{test.declared}}
+
+			t.Run("accepts "+test.name+" as the same", func(t *testing.T) {
+				recorder := &spy{}
+
+				architecturekittest.Given(recorder, decider()).
+					When(cmd).
+					ThenPreconditions(test.same)
+
+				recorder.expectNoFailure(t)
+			})
+
+			t.Run("fails on "+test.name+" where the other is expected, naming both", func(t *testing.T) {
+				recorder := &spy{}
+
+				architecturekittest.Given(recorder, decider()).
+					When(cmd).
+					ThenPreconditions(test.other)
+
+				require.Len(t, recorder.failures, 1)
+				assert.Equal(t, test.failure, recorder.firstFailure())
+			})
+		}
 	})
 
 	t.Run("shows an invalid precondition as one without fields", func(t *testing.T) {
