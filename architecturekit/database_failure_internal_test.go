@@ -165,6 +165,18 @@ func TestDatabaseFailureByType(t *testing.T) {
 		assert.ErrorContains(t, err, "the answer does not come from an EventSourcingDB")
 	})
 
+	t.Run("sorts a request that the database does not support as permanent, and names it", func(t *testing.T) {
+		// The client refuses such a request before it sends it, so it comes
+		// without an answer, as from a database that can not be reached, but
+		// only upgrading the database helps.
+		err := databaseFailure(worded{eventsourcingdb.ErrIncompatibleServer}, "writing")
+
+		assert.ErrorIs(t, err, ErrPermanent)
+		assert.NotErrorIs(t, err, ErrTransient, "trying again never helps")
+		assert.ErrorIs(t, err, eventsourcingdb.ErrIncompatibleServer, "errors.Is has to reach the error of the client")
+		assert.ErrorContains(t, err, "the database does not support what the request needs, and has to be upgraded")
+	})
+
 	t.Run("sorts a connection that stalled as transient, and keeps the stall reachable", func(t *testing.T) {
 		err := databaseFailure(stalled{}, "reading events")
 
@@ -252,6 +264,17 @@ func TestReadFailure(t *testing.T) {
 		assert.ErrorContains(t, err, "the database rejected the API token")
 	})
 
+	t.Run("sorts a request that the database does not support as permanent", func(t *testing.T) {
+		// Once the client no longer speaks the v1 API, it refuses every read
+		// from a database that offers just the v1 API this way.
+		err := readFailure(context.Background(), worded{eventsourcingdb.ErrIncompatibleServer}, "reading events")
+
+		assert.ErrorIs(t, err, ErrPermanent)
+		assert.NotErrorIs(t, err, ErrTransient, "trying again never helps")
+		assert.ErrorIs(t, err, eventsourcingdb.ErrIncompatibleServer, "errors.Is has to reach the error of the client")
+		assert.ErrorContains(t, err, "the database does not support what the request needs, and has to be upgraded")
+	})
+
 	t.Run("reports the end of the context rather than a 409", func(t *testing.T) {
 		ended, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -303,6 +326,8 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 			{"from a server that is not an EventSourcingDB", eventsourcingdb.ErrInvalidServerHeader, ErrTransient,
 				"%v: %s: the answer does not come from an EventSourcingDB: %v"},
 			{"on a connection that stalled", stalled{}, ErrTransient, "%v: %s: %v"},
+			{"for a request that the database does not support", eventsourcingdb.ErrIncompatibleServer, ErrPermanent,
+				"%v: %s: the database does not support what the request needs, and has to be upgraded: %v"},
 			{"with a code of a conflict", &eventsourcingdb.DBAPIError{
 				Action: "write events", Status: http.StatusOK, Code: eventsourcingdb.CodePreconditionViolated,
 				Description: "/preconditions/0: precondition isSubjectPristine does not hold",
@@ -463,6 +488,7 @@ func TestWriteFailure(t *testing.T) {
 		for _, failure := range []error{
 			worded{errors.New("connection refused")},
 			worded{eventsourcingdb.ErrInvalidServerHeader},
+			worded{eventsourcingdb.ErrIncompatibleServer},
 			dialTimeout(t),
 			answer(http.StatusBadRequest, "bad request", nil),
 			answer(http.StatusUnauthorized, "unauthorized", nil),
@@ -482,6 +508,18 @@ func TestWriteFailure(t *testing.T) {
 				assert.NotErrorIs(t, err, ErrOutcomeUnknown)
 			})
 		}
+	})
+
+	t.Run("sorts a write that the database does not support as permanent, rather than as an unknown outcome", func(t *testing.T) {
+		// The client refuses such a write before it sends it, so nothing was
+		// stored, and only upgrading the database helps.
+		err := writeFailure(worded{eventsourcingdb.ErrIncompatibleServer}, `writing "/books/42"`)
+
+		assert.ErrorIs(t, err, ErrPermanent)
+		assert.NotErrorIs(t, err, ErrOutcomeUnknown, "the write was never sent")
+		assert.NotErrorIs(t, err, ErrTransient, "trying again never helps")
+		assert.ErrorIs(t, err, eventsourcingdb.ErrIncompatibleServer, "errors.Is has to reach the error of the client")
+		assert.ErrorContains(t, err, `writing "/books/42": the database does not support what the request needs, and has to be upgraded`)
 	})
 
 	t.Run("reports a failure that the client reports as an unknown outcome as one", func(t *testing.T) {
