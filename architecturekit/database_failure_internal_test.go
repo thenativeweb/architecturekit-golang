@@ -493,7 +493,6 @@ func TestWriteFailure(t *testing.T) {
 			mayHaveBeenWritten{answer(http.StatusInternalServerError, "failed", nil)},
 			mayHaveBeenWritten{answer(http.StatusBadGateway, "bad gateway", nil)},
 			mayHaveBeenWritten{answer(http.StatusConflict, "state conflict: precondition failed", nil)},
-			mayHaveBeenWritten{coded(eventsourcingdb.CodeStoreFailed)},
 		} {
 			t.Run(failure.Error(), func(t *testing.T) {
 				err := writeFailure(failure, "writing")

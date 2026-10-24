@@ -62,8 +62,8 @@ var ErrUnverified = fmt.Errorf("%w: an event could not be verified", ErrPermanen
 // but no answer arrived that says that nothing was stored, since the request
 // or the answer was cut off, the answer could not be decoded, or the database
 // stalled, or the answer was one that may come after the events were stored,
-// such as 500 or store-failed, or one that does not come from an
-// EventSourcingDB, such as a 502 or 504 of a proxy in front of it.
+// such as 500, or one that does not come from an EventSourcingDB, such as a
+// 502 or 504 of a proxy in front of it.
 //
 // It belongs to no category. It is not ErrTransient, since trying again may
 // store the events twice, and not ErrPermanent, since trying again may be
