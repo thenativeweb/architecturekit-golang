@@ -60,9 +60,11 @@ func (r *reconnects) reports() []architecturekit.Reconnect {
 
 // reconnectingStore waits with these delays. They are well above how long a
 // stream that the database ends right away stays live, since a stream that
-// stays live for longer than the initial delay starts the delay over.
+// stays live for longer than the initial delay starts the delay over. On a
+// busy machine, such as while the tests of other packages run alongside,
+// that can take a good part of 20 milliseconds.
 const (
-	testInitialDelay = 20 * time.Millisecond
+	testInitialDelay = 100 * time.Millisecond
 	testMaxDelay     = 4 * testInitialDelay
 )
 
