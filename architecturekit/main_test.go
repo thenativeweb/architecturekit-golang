@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdbtest"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdbtest"
 )
 
 // testStore is used by the integration tests and stays nil while they are

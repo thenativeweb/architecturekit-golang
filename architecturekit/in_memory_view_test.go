@@ -13,9 +13,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/query"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // book is an item with a key, a value to index, and a field for its revision.

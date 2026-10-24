@@ -9,8 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // readAll collects what Read hands out, and the errors separately.
@@ -82,10 +82,10 @@ func unaskedDatabase(t *testing.T) (*architecturekit.Store, *atomic.Bool) {
 	t.Helper()
 
 	asked := &atomic.Bool{}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		asked.Store(true)
 		writer.Header().Set("Server", "EventSourcingDB/test")
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	return architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io"), asked
@@ -169,7 +169,7 @@ func TestRead(t *testing.T) {
 	})
 
 	t.Run("sorts an unreachable database as transient", func(t *testing.T) {
-		server := httptest.NewServer(http.NotFoundHandler())
+		server := httptest.NewServer(speakingV1(http.NotFoundHandler()))
 		server.Close()
 		store := architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io")
 

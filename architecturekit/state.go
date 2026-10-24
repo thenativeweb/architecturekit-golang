@@ -9,7 +9,7 @@ import (
 	"reflect"
 	"sync"
 
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // Event binds a Go type to an event type of the EventSourcingDB, so that the

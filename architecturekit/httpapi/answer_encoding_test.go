@@ -17,7 +17,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/httpapi"
 )
 
 // An answer is encoded as encoding/json encodes it, except that a nil slice is

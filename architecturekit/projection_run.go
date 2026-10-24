@@ -34,9 +34,9 @@ type ProjectionStatus struct {
 	// long the projection has not been up to date.
 	Since time.Time
 
-	// Err is why the run is reconnecting or has stopped. It is nil if the
-	// database ended the stream, or if the run stopped because its context
-	// ended, and in every other phase.
+	// Err is why the run is reconnecting or has stopped, such as a stream that
+	// broke off (see Reconnect). It is nil if the run stopped because its
+	// context ended, and in every other phase.
 	Err error
 
 	// Attempts counts the attempts to read again within the current

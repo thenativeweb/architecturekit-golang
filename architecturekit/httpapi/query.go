@@ -10,7 +10,7 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
 )
 
 // ErrNotFound means the query asked for something that does not exist.

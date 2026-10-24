@@ -3,7 +3,7 @@ package architecturekit
 import (
 	"fmt"
 
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // Precondition is a condition that must hold for the events of a command to be

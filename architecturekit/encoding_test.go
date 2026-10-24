@@ -15,8 +15,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // The kit encodes the data of every event itself before it writes it, so that
@@ -165,7 +165,7 @@ func recordingDatabase(t *testing.T) (*eventsourcingdb.Client, func() []string) 
 	var mutex sync.Mutex
 	var writes []string
 
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Server", "EventSourcingDB/test")
 
 		if request.URL.Path != "/api/v1/write-events" {
@@ -183,7 +183,7 @@ func recordingDatabase(t *testing.T) (*eventsourcingdb.Client, func() []string) 
 		mutex.Unlock()
 
 		_, _ = fmt.Fprint(writer, "[]")
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	return clientFor(t, server), func() []string {

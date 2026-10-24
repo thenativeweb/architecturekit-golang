@@ -14,7 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/httpapi"
 )
 
 // A query takes its input from the body, which Query and Ask decode into the

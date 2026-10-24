@@ -16,9 +16,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/architecturekittest"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 func TestExecute(t *testing.T) {
@@ -507,27 +507,23 @@ func TestConflict(t *testing.T) {
 	})
 }
 
-// endsBeforeRegistering is a context that counts as ended to whoever asks
-// for its error, while its Done channel stays open. The client only watches
-// Done while it reads, so reading succeeds, and the first one to ask is the
-// check right before a schema would be registered.
-type endsBeforeRegistering struct {
+// endingContext counts as ended to whoever asks for its error once end has
+// been called, while its Done channel stays open. The client asks for the
+// error before it starts a request, and only watches Done while it reads, so
+// a request that is under way when the context ends goes on.
+type endingContext struct {
 	context.Context
+	isEnded atomic.Bool
 }
 
-func (endsBeforeRegistering) Err() error { return context.Canceled }
+func (c *endingContext) end() { c.isEnded.Store(true) }
 
-func registeredSchemaOf(t *testing.T, eventType string) bool {
-	t.Helper()
-
-	for registered, err := range rawClient(t).ReadEventTypes(context.Background()) {
-		require.NoError(t, err)
-		if registered.EventType == eventType && registered.Schema != nil {
-			return true
-		}
+func (c *endingContext) Err() error {
+	if c.isEnded.Load() {
+		return context.Canceled
 	}
 
-	return false
+	return nil
 }
 
 func TestRegisterSchemasWithAContextThatEnds(t *testing.T) {
@@ -548,17 +544,33 @@ func TestRegisterSchemasWithAContextThatEnds(t *testing.T) {
 	})
 
 	t.Run("registers nothing once the context has ended", func(t *testing.T) {
-		store := requireStore(t)
-		eventType := fmt.Sprintf("io.thenativeweb.test.never-registered-%d", time.Now().UnixNano())
+		// The context ends while the database answers the read of the
+		// registered schemas, so reading succeeds, and the first one to ask
+		// afterwards is the check right before a schema would be registered.
+		ctx := &endingContext{Context: context.Background()}
+		var registrations atomic.Int32
+		server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.Header().Set("Server", "EventSourcingDB/test")
 
-		err := architecturekit.RegisterSchemas(endsBeforeRegistering{context.Background()}, store, []architecturekit.EventSchema{{
+			switch request.URL.Path {
+			case "/api/v1/read-event-types":
+				ctx.end()
+			case "/api/v1/register-event-schema":
+				registrations.Add(1)
+			}
+		})))
+		t.Cleanup(server.Close)
+		store := architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io")
+		eventType := "io.thenativeweb.test.never-registered"
+
+		err := architecturekit.RegisterSchemas(ctx, store, []architecturekit.EventSchema{{
 			EventType: eventType,
 			Schema:    map[string]any{"type": "object"},
 		}})
 
 		assert.ErrorIs(t, err, context.Canceled)
 		assert.Contains(t, err.Error(), eventType, "the error names the schema it did not register")
-		assert.False(t, registeredSchemaOf(t, eventType), "a schema was registered after the context had ended")
+		assert.Zero(t, registrations.Load(), "a schema was registered after the context had ended")
 	})
 }
 
@@ -651,7 +663,7 @@ func TestRegisterSchemas(t *testing.T) {
 		// The database knows no schema at first, refuses to register one, and then
 		// fails when RegisterSchemas reads the schemas again to tell why.
 		var reads atomic.Int32
-		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			writer.Header().Set("Server", "EventSourcingDB/test")
 
 			switch request.URL.Path {
@@ -666,7 +678,7 @@ func TestRegisterSchemas(t *testing.T) {
 			default:
 				writer.WriteHeader(http.StatusNotFound)
 			}
-		}))
+		})))
 		defer server.Close()
 
 		serverURL, err := url.Parse(server.URL)
@@ -742,8 +754,8 @@ func TestRegisterSchemas(t *testing.T) {
 
 		refusal, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
 		require.True(t, isAnswer, "errors.As has to reach the answer of the database")
-		assert.Equal(t, http.StatusConflict, refusal.StatusCode)
-		assert.Contains(t, refusal.Reason, "additionalProperties 'other' not allowed")
+		assert.Equal(t, eventsourcingdb.CodeEventSchemaViolated, refusal.Code)
+		assert.Contains(t, refusal.Description, "additionalProperties 'other' not allowed")
 	})
 
 	t.Run("fails on a missing schema", func(t *testing.T) {

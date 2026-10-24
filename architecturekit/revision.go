@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // A revision says how far a read model has come: it is the ID of the last

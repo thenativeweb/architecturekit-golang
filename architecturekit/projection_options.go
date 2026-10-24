@@ -106,8 +106,10 @@ type Reconnect struct {
 	// Subject is the subject the projection reads from.
 	Subject string
 
-	// Err is why the projection reads again. It is nil if the database ended
-	// the stream.
+	// Err is why the projection reads again, such as a stream that broke off,
+	// which is what a stream that ended is, since the database never ends one
+	// on its own: a load balancer or a proxy in front of it ends it, or the
+	// database restarts.
 	Err error
 
 	// Delay is how long the projection waits before it reads again.

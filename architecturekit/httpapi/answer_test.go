@@ -20,10 +20,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/httpapi"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/query"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // writingStore is a store on a database without any events that accepts every
@@ -34,7 +34,7 @@ func writingStore(t *testing.T) *architecturekit.Store {
 	var mutex sync.Mutex
 	next := 0
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "EventSourcingDB/test")
 
 		if r.URL.Path != "/api/v1/write-events" {
@@ -75,7 +75,7 @@ func writingStore(t *testing.T) *architecturekit.Store {
 		}
 
 		_ = json.NewEncoder(w).Encode(written)
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	serverURL, err := url.Parse(server.URL)
@@ -100,7 +100,7 @@ func conflictingStore(t *testing.T) *architecturekit.Store {
 func refusingStore(t *testing.T, path string, status int, reason string) *architecturekit.Store {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "EventSourcingDB/test")
 
 		if r.URL.Path != path {
@@ -109,7 +109,7 @@ func refusingStore(t *testing.T, path string, status int, reason string) *archit
 
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, reason)
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	serverURL, err := url.Parse(server.URL)
@@ -126,14 +126,14 @@ func refusingStore(t *testing.T, path string, status int, reason string) *archit
 func hangingUpStore(t *testing.T) *architecturekit.Store {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "EventSourcingDB/test")
 
 		if r.URL.Path == "/api/v1/write-events" {
 			_, _ = io.ReadAll(r.Body)
 			panic(http.ErrAbortHandler)
 		}
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	serverURL, err := url.Parse(server.URL)

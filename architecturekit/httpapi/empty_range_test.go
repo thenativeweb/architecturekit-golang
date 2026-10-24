@@ -12,9 +12,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/httpapi"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/query"
 )
 
 // Read refuses bounds that leave no room for an event with an error that

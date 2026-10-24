@@ -14,8 +14,25 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
+
+// speakingV1 answers the request with which the client asks a database for its
+// API as a database that offers just the v1 API does, and hands every other
+// request to handler, so that a fake that answers as the v1 API does is asked
+// as one.
+func speakingV1(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.Path == "/api/v2/system/ping" {
+			writer.Header().Set("Server", "EventSourcingDB/test")
+			http.NotFound(writer, request)
+
+			return
+		}
+
+		handler.ServeHTTP(writer, request)
+	})
+}
 
 // fakeDatabase answers reading and observing events the way EventSourcingDB
 // does, but it can end an observed stream on purpose, which a real database
@@ -55,7 +72,7 @@ func (d *fakeDatabase) add(ids ...int) {
 func newFakeDatabase(t *testing.T, database *fakeDatabase) *eventsourcingdb.Client {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Server", "EventSourcingDB/test")
 
 		var body struct {
@@ -140,7 +157,7 @@ func newFakeDatabase(t *testing.T, database *fakeDatabase) *eventsourcingdb.Clie
 
 			writeLine(writer, `{"type":"heartbeat"}`)
 		}
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	return clientFor(t, server)
@@ -152,14 +169,14 @@ func newFakeDatabase(t *testing.T, database *fakeDatabase) *eventsourcingdb.Clie
 func refusingDatabase(t *testing.T, path string, status int, reason string) *eventsourcingdb.Client {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Server", "EventSourcingDB/test")
 
 		if request.URL.Path == path {
 			writer.WriteHeader(status)
 			_, _ = fmt.Fprint(writer, reason)
 		}
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	return clientFor(t, server)
@@ -172,14 +189,14 @@ func refusingDatabase(t *testing.T, path string, status int, reason string) *eve
 func writingDatabase(t *testing.T, path string, answer http.HandlerFunc, options ...eventsourcingdb.ClientOption) *eventsourcingdb.Client {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Server", "EventSourcingDB/test")
 
 		if request.URL.Path == path {
 			_, _ = io.ReadAll(request.Body)
 			answer(writer, request)
 		}
-	}))
+	})))
 	t.Cleanup(server.Close)
 
 	return clientFor(t, server, options...)
@@ -193,11 +210,11 @@ func vanishingDatabase(t *testing.T) *eventsourcingdb.Client {
 	t.Helper()
 
 	server := httptest.NewUnstartedServer(nil)
-	server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	server.Config.Handler = speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Server", "EventSourcingDB/test")
 		writer.Header().Set("Connection", "close")
 		_ = server.Listener.Close()
-	})
+	}))
 	server.Start()
 	t.Cleanup(server.Close)
 
@@ -210,11 +227,37 @@ func vanishingDatabase(t *testing.T) *eventsourcingdb.Client {
 func hangingUpDatabase(t *testing.T) *eventsourcingdb.Client {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Server", "EventSourcingDB/test")
 
 		if request.URL.Path == "/api/v1/write-events" {
 			panic(http.ErrAbortHandler)
+		}
+	})))
+	t.Cleanup(server.Close)
+
+	return clientFor(t, server)
+}
+
+// v2Database answers as a database that offers the v2 API does: the ping with
+// which the client asks for the API with the event of a ping, every request
+// to the given path, once it has read it completely, with the given item, such
+// as an error with a code, and every other request with a stream that ends at
+// once, as for a subject without events. It returns a client for it.
+func v2Database(t *testing.T, path string, item string) *eventsourcingdb.Client {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Server", "EventSourcingDB/test")
+		_, _ = io.ReadAll(request.Body)
+
+		switch request.URL.Path {
+		case "/api/v2/system/ping":
+			_, _ = fmt.Fprintln(writer, `{"type":"event","data":{"type":"io.eventsourcingdb.api.ping-received"}}`)
+		case path:
+			_, _ = fmt.Fprintln(writer, item)
+		default:
+			_, _ = fmt.Fprintln(writer, `{"type":"end","data":{}}`)
 		}
 	}))
 	t.Cleanup(server.Close)

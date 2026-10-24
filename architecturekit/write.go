@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // EventOn is an event together with the subject it is written to, for Write.

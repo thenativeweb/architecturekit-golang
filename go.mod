@@ -1,4 +1,4 @@
-module github.com/thenativeweb/architecturekit-golang
+module github.com/thenativeweb/architecturekit-golang/v2
 
 go 1.27.1
 
@@ -6,7 +6,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
-	github.com/thenativeweb/eventsourcingdb-client-golang v1.10.0
+	github.com/thenativeweb/eventsourcingdb-client-golang/v2 v2.1.1
 )
 
 require (

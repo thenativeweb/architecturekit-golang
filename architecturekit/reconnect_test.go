@@ -13,8 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // reconnects records what a store reports before it reads again.
@@ -146,7 +146,9 @@ func TestStartProjectionWithReconnects(t *testing.T) {
 		assert.Equal(t, []string{"0", "1", "2", "3"}, target.IDs(), "want every event exactly once")
 
 		errs, _ := observed.recorded()
-		assert.NoError(t, errs[0], "a stream that ended is reported without an error")
+		assert.ErrorIs(t, errs[0], architecturekit.ErrTransient,
+			"a stream that ended has broken off, since the database never ends one on its own")
+		assert.ErrorContains(t, errs[0], "the stream broke off")
 	})
 
 	t.Run("doubles the delay up to the maximum if the stream ends right after the projection has caught up", func(t *testing.T) {

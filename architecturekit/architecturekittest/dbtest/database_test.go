@@ -10,9 +10,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/architecturekittest/dbtest"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/architecturekittest/dbtest"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 func TestMain(m *testing.M) {
@@ -144,7 +144,7 @@ func TestSharedDatabase(t *testing.T) {
 		var schema *map[string]any
 		for eventType, err := range database.Client().ReadEventTypes(context.Background()) {
 			require.NoError(t, err)
-			if eventType.EventType == (entered{}).EventType() {
+			if eventType.Type == (entered{}).EventType() {
 				schema = eventType.Schema
 			}
 		}

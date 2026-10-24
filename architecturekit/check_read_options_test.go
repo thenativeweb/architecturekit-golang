@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
 )
 
 // CheckReadOptions makes the checks Read makes before it asks the database, so

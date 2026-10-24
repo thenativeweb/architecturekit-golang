@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // Envelope carries an event to a handler of a TypedProjection, or out of

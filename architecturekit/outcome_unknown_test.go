@@ -15,8 +15,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // Once the request of a write has left, the database may store the events at
@@ -89,40 +89,40 @@ func fromAProxy(status int) http.HandlerFunc {
 }
 
 func TestAFailedWrite(t *testing.T) {
-	t.Run("keeps its category if the request never left completely", func(t *testing.T) {
-		unsent := []struct {
-			name     string
-			database func(t *testing.T, write string) *eventsourcingdb.Client
-			event    architecturekit.Event
-			detail   string
-		}{
-			{"since the database can not be reached", func(t *testing.T, write string) *eventsourcingdb.Client {
+	t.Run("keeps its category if the database can not be reached", func(t *testing.T) {
+		for _, write := range kitWrites {
+			t.Run(write.name, func(t *testing.T) {
 				// Execute reads before it writes, so its database has to answer
 				// the read, and go away before the write.
-				if write == "Execute" {
-					return vanishingDatabase(t)
+				client := deadClient(t)
+				if write.name == "Execute" {
+					client = vanishingDatabase(t)
 				}
+				store := architecturekit.NewStore(client, "https://thenativeweb.io")
 
-				return deadClient(t)
-			}, incremented{By: 1}, "connection refused"},
-			{"since the database hung up while it was written", func(t *testing.T, _ string) *eventsourcingdb.Client {
-				return hangingUpDatabase(t)
-			}, remark{Text: strings.Repeat("x", 16<<20)}, ""},
+				err := write.write(context.Background(), store, incremented{By: 1})
+
+				assert.ErrorIs(t, err, architecturekit.ErrTransient, "trying again can not store the events twice")
+				assert.NotErrorIs(t, err, architecturekit.ErrOutcomeUnknown, "the database never got the request")
+				assert.ErrorContains(t, err, "transient failure: "+write.doing+": ")
+				assert.ErrorContains(t, err, "connection refused")
+			})
 		}
+	})
 
+	t.Run("leaves the outcome unknown if the database hung up while the request was sent, as the client does", func(t *testing.T) {
+		// The client reports a write as certainly not stored only if it could
+		// not connect, by the same rule in every SDK, so a request that was cut
+		// off after connecting, but before all of it was sent, leaves the
+		// outcome open, although the database can not have stored it.
 		for _, write := range kitWrites {
-			for _, failure := range unsent {
-				t.Run(write.name+" "+failure.name, func(t *testing.T) {
-					store := architecturekit.NewStore(failure.database(t, write.name), "https://thenativeweb.io")
+			t.Run(write.name, func(t *testing.T) {
+				store := architecturekit.NewStore(hangingUpDatabase(t), "https://thenativeweb.io")
 
-					err := write.write(context.Background(), store, failure.event)
+				err := write.write(context.Background(), store, remark{Text: strings.Repeat("x", 16<<20)})
 
-					assert.ErrorIs(t, err, architecturekit.ErrTransient, "trying again can not store the events twice")
-					assert.NotErrorIs(t, err, architecturekit.ErrOutcomeUnknown, "the database never got the whole request")
-					assert.ErrorContains(t, err, "transient failure: "+write.doing+": ")
-					assert.ErrorContains(t, err, failure.detail)
-				})
-			}
+				assertOutcomeUnknown(t, err)
+			})
 		}
 	})
 
@@ -161,8 +161,8 @@ func TestAFailedWrite(t *testing.T) {
 
 					answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
 					require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", err)
-					assert.Equal(t, refusal.status, answer.StatusCode)
-					assert.Equal(t, refusal.reason, answer.Reason)
+					assert.Equal(t, refusal.status, answer.Status)
+					assert.Equal(t, refusal.reason, answer.Description)
 				})
 			}
 		}
@@ -224,8 +224,8 @@ func TestAFailedWrite(t *testing.T) {
 				failed := write.write(context.Background(), refused, incremented{By: 1})
 				answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](failed)
 				require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", failed)
-				assert.Equal(t, http.StatusInternalServerError, answer.StatusCode)
-				assert.Equal(t, "failed", answer.Reason)
+				assert.Equal(t, http.StatusInternalServerError, answer.Status)
+				assert.Equal(t, "failed", answer.Description)
 
 				assert.ErrorIs(t, write.write(context.Background(), proxied, incremented{By: 1}), eventsourcingdb.ErrInvalidServerHeader)
 			})
@@ -234,8 +234,9 @@ func TestAFailedWrite(t *testing.T) {
 
 	t.Run("follows a redirect of a proxy as the client does", func(t *testing.T) {
 		// The client follows 301, 302, and 303 with a GET, which the database
-		// refuses before writing, but not 307 and 308, which would need the
-		// body once more, so it hands out the redirect of the proxy then.
+		// refuses before writing, and 307 and 308 with the body once more, so
+		// the answer of the database decides then, here a 500, which may
+		// follow storing the events.
 		redirects := []struct {
 			status    int
 			isUnknown bool
@@ -250,7 +251,7 @@ func TestAFailedWrite(t *testing.T) {
 		for _, write := range kitWrites {
 			for _, redirect := range redirects {
 				t.Run(write.name+": "+strconv.Itoa(redirect.status), func(t *testing.T) {
-					server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					server := httptest.NewServer(speakingV1(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 						switch request.URL.Path {
 						case "/api/v1/write-events":
 							_, _ = io.ReadAll(request.Body)
@@ -265,7 +266,7 @@ func TestAFailedWrite(t *testing.T) {
 						default:
 							writer.Header().Set("Server", "EventSourcingDB/test")
 						}
-					}))
+					})))
 					t.Cleanup(server.Close)
 					store := architecturekit.NewStore(clientFor(t, server), "https://thenativeweb.io")
 
@@ -273,7 +274,9 @@ func TestAFailedWrite(t *testing.T) {
 
 					if redirect.isUnknown {
 						assertOutcomeUnknown(t, err)
-						assert.ErrorIs(t, err, eventsourcingdb.ErrInvalidServerHeader)
+						answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
+						require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", err)
+						assert.Equal(t, http.StatusInternalServerError, answer.Status)
 						return
 					}
 
@@ -281,7 +284,7 @@ func TestAFailedWrite(t *testing.T) {
 					assert.NotErrorIs(t, err, architecturekit.ErrOutcomeUnknown)
 					answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
 					require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", err)
-					assert.Equal(t, http.StatusMethodNotAllowed, answer.StatusCode)
+					assert.Equal(t, http.StatusMethodNotAllowed, answer.Status)
 				})
 			}
 		}

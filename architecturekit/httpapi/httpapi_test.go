@@ -17,10 +17,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/httpapi"
-	"github.com/thenativeweb/architecturekit-golang/architecturekit/query"
-	"github.com/thenativeweb/eventsourcingdb-client-golang/eventsourcingdb"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/httpapi"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit/query"
+	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
 )
 
 // --- a domain just large enough to drive the HTTP layer ---
@@ -346,15 +346,15 @@ func TestStatusFor(t *testing.T) {
 
 				answer, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
 				require.True(t, isAnswer, "errors.As has to reach the answer of the database, got: %v", err)
-				assert.Equal(t, c.status, answer.StatusCode)
-				assert.Equal(t, c.reason, answer.Reason)
+				assert.Equal(t, c.status, answer.Status)
+				assert.Equal(t, c.reason, answer.Description)
 			})
 		}
 
 		t.Run("an answer that does not come from an EventSourcingDB", func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			server := httptest.NewServer(speakingV1(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusBadGateway)
-			}))
+			})))
 			t.Cleanup(server.Close)
 
 			serverURL, err := url.Parse(server.URL)

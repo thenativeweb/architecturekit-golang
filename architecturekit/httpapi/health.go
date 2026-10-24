@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/thenativeweb/architecturekit-golang/architecturekit"
+	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
 )
 
 // Readiness answers whether the application can serve requests, judged by its
