@@ -419,6 +419,21 @@ Preconditions can be combined, and all of them must hold. If a precondition does
 
 To find out what kind a precondition is, call its `IsOnStateRead` or `IsUnconditional` function. Its `Database` function returns the precondition of the client SDK that the database checks for it: the one `Require` made it from, which is how `OnPristineSubject` and `OnPopulatedSubject` make theirs, or the one of `NewIsSubjectOnEventIDPrecondition` for `OnEventID`. For any other, it returns `false`.
 
+`OnPristineSubject`, `OnPopulatedSubject`, and `OnEventID` check the subject alone. To check it together with every subject below it, take the function of the client SDK that does the same, such as `NewIsSubjectPristinePrecondition`, hand it `PreconditionOptions` with `Recursive` set to `true`, and wrap it with `Require`. For example, to acquire a book only if neither its subject nor any subject below it has events yet:
+
+```go
+func (c AcquireBook) Preconditions() []architecturekit.Precondition {
+  return []architecturekit.Precondition{
+    architecturekit.Require(eventsourcingdb.NewIsSubjectPristinePrecondition(
+      c.Subject(),
+      eventsourcingdb.PreconditionOptions{Recursive: true},
+    )),
+  }
+}
+```
+
+*Note that only a database that offers the v2 API checks a recursive precondition. Against a database that offers just the v1 API, such as EventSourcingDB 1.2, the client does not send the write at all, so that nothing is written, and `Execute` and `Write` fail with an error of the category `ErrPermanent`, since only upgrading the database helps (see [Handling Errors](#handling-errors)).*
+
 #### Guarding Against Concurrent Changes
 
 If a command may only write events in case nothing has been written to its subject since `Execute` read the state, use the `OnStateRead` function. This fits most commands, since the decider decides on exactly that state:
