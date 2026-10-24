@@ -198,46 +198,23 @@ func describePreconditions(preconditions []Precondition) string {
 // OnPristineSubject describes architecturekit.OnPristineSubject, a check that
 // the subject has no events yet, which is what a command that creates
 // something usually declares. It does not describe the recursive check, which
-// OnPristineSubjectRecursively does.
+// the kit has no function for either, so a test describes that one as a
+// Precondition with Recursive set as well.
 func OnPristineSubject(subject string) Precondition {
 	return Precondition{Subject: subject, Pristine: true}
 }
 
-// OnPristineSubjectRecursively describes a check that neither the subject nor
-// any subject below it has events yet, as built by Require with
-// eventsourcingdb.NewIsSubjectPristinePrecondition and
-// eventsourcingdb.PreconditionOptions{Recursive: true}.
-func OnPristineSubjectRecursively(subject string) Precondition {
-	return Precondition{Subject: subject, Pristine: true, Recursive: true}
-}
-
 // OnPopulatedSubject describes architecturekit.OnPopulatedSubject, a check that
-// the subject has events. It does not describe the recursive check, which
-// OnPopulatedSubjectRecursively does.
+// the subject has events. Like OnPristineSubject, it does not describe the
+// recursive check.
 func OnPopulatedSubject(subject string) Precondition {
 	return Precondition{Subject: subject, Populated: true}
 }
 
-// OnPopulatedSubjectRecursively describes a check that the subject or a
-// subject below it has events, as built by Require with
-// eventsourcingdb.NewIsSubjectPopulatedPrecondition and
-// eventsourcingdb.PreconditionOptions{Recursive: true}.
-func OnPopulatedSubjectRecursively(subject string) Precondition {
-	return Precondition{Subject: subject, Populated: true, Recursive: true}
-}
-
-// OnEventID describes architecturekit.OnEventID, a revision check. It does not
-// describe the recursive check, which OnEventIDRecursively does.
+// OnEventID describes architecturekit.OnEventID, a revision check. Like
+// OnPristineSubject, it does not describe the recursive check.
 func OnEventID(subject, eventID string) Precondition {
 	return Precondition{Subject: subject, EventID: eventID}
-}
-
-// OnEventIDRecursively describes a check that the last event among the subject
-// and all subjects below it has the given ID, as built by Require with
-// eventsourcingdb.NewIsSubjectOnEventIDPrecondition and
-// eventsourcingdb.PreconditionOptions{Recursive: true}.
-func OnEventIDRecursively(subject, eventID string) Precondition {
-	return Precondition{Subject: subject, EventID: eventID, Recursive: true}
 }
 
 // OnQuery describes an EventQL precondition.
