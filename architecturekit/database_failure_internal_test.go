@@ -38,6 +38,19 @@ func coded(code string) error {
 	}}
 }
 
+// stalled is a connection that stalled, as the client reports it: errors.Is
+// takes it for eventsourcingdb.ErrConnectionStalled, and for
+// context.DeadlineExceeded as well, as for a timeout of net/http.
+type stalled struct{}
+
+func (stalled) Error() string {
+	return "connection stalled, nothing arrived from the server for 30 seconds"
+}
+
+func (stalled) Is(target error) bool {
+	return target == eventsourcingdb.ErrConnectionStalled || target == context.DeadlineExceeded
+}
+
 // mayHaveBeenWritten is a failure of a write that the client reports as
 // leaving open whether the database stored it, wrapping its cause, as the
 // client does.
@@ -63,6 +76,8 @@ func TestDatabaseFailureByType(t *testing.T) {
 			{"a rejected API token is permanent", answered(http.StatusUnauthorized, "unauthorized"), ErrPermanent},
 			{"a bad request is permanent", answered(http.StatusBadRequest, "bad request"), ErrPermanent},
 			{"a failure without an answer is transient", worded{errors.New("connection refused")}, ErrTransient},
+			{"an error within a stream of the v1 API is transient", answered(http.StatusOK, "store is shutting down"), ErrTransient},
+			{"a request that did not arrive in time is transient", answered(http.StatusRequestTimeout, ""), ErrTransient},
 		}
 
 		for _, test := range tests {
@@ -102,6 +117,9 @@ func TestDatabaseFailureByType(t *testing.T) {
 				err := databaseFailure(coded(test.code), "writing")
 
 				assert.ErrorIs(t, err, test.want)
+				if test.want != ErrConflict {
+					assert.NotErrorIs(t, err, ErrConflict, "ErrConflict is transient as well, so only this tells them apart")
+				}
 			})
 		}
 	})
@@ -147,10 +165,12 @@ func TestDatabaseFailureByType(t *testing.T) {
 		assert.ErrorContains(t, err, "the answer does not come from an EventSourcingDB")
 	})
 
-	t.Run("sorts a connection that stalled as transient", func(t *testing.T) {
-		err := databaseFailure(worded{eventsourcingdb.ErrConnectionStalled}, "reading events")
+	t.Run("sorts a connection that stalled as transient, and keeps the stall reachable", func(t *testing.T) {
+		err := databaseFailure(stalled{}, "reading events")
 
 		assert.ErrorIs(t, err, ErrTransient)
+		assert.ErrorIs(t, err, eventsourcingdb.ErrConnectionStalled)
+		assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context is context.DeadlineExceeded")
 	})
 
 	t.Run("sorts a 409 without a code when writing by its description", func(t *testing.T) {
@@ -282,7 +302,7 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 			{"without an answer", refused, ErrTransient, "%v: %s: %v"},
 			{"from a server that is not an EventSourcingDB", eventsourcingdb.ErrInvalidServerHeader, ErrTransient,
 				"%v: %s: the answer does not come from an EventSourcingDB: %v"},
-			{"on a connection that stalled", eventsourcingdb.ErrConnectionStalled, ErrTransient, "%v: %s: %v"},
+			{"on a connection that stalled", stalled{}, ErrTransient, "%v: %s: %v"},
 			{"with a code of a conflict", &eventsourcingdb.DBAPIError{
 				Action: "write events", Status: http.StatusOK, Code: eventsourcingdb.CodePreconditionViolated,
 				Description: "/preconditions/0: precondition isSubjectPristine does not hold",
@@ -349,7 +369,7 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 		assert.EqualError(t, err, fmt.Sprintf("%v: reading events: %v", ErrPermanent, refusal))
 	})
 
-	t.Run("keeps a failure of the client that looks like the end of a context as text only", func(t *testing.T) {
+	t.Run("keeps a failure of the client that looks like the end of a context, but not as the end of the context", func(t *testing.T) {
 		// Only the end of the context the caller handed over is to match
 		// context.Canceled or context.DeadlineExceeded. The standard library
 		// reports a timeout while connecting as context.DeadlineExceeded as well,
@@ -387,6 +407,7 @@ func TestDatabaseFailureWrapsTheClientError(t *testing.T) {
 				err := databaseFailure(test.err, "writing")
 
 				assert.ErrorIs(t, err, test.category)
+				assert.ErrorIs(t, err, test.err, "errors.Is has to reach the failure of the client all the same")
 				assert.NotErrorIs(t, err, context.Canceled, "only the end of the context is context.Canceled")
 				assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context is context.DeadlineExceeded")
 				assert.EqualError(t, err, fmt.Sprintf(test.message, test.category, "writing", test.err),
@@ -463,7 +484,7 @@ func TestWriteFailure(t *testing.T) {
 			mayHaveBeenWritten{errors.New("read: connection reset by peer")},
 			mayHaveBeenWritten{io.ErrUnexpectedEOF},
 			mayHaveBeenWritten{eventsourcingdb.ErrInvalidServerHeader},
-			mayHaveBeenWritten{eventsourcingdb.ErrConnectionStalled},
+			mayHaveBeenWritten{stalled{}},
 			mayHaveBeenWritten{answer(http.StatusInternalServerError, "failed", nil)},
 			mayHaveBeenWritten{answer(http.StatusBadGateway, "bad gateway", nil)},
 			mayHaveBeenWritten{answer(http.StatusConflict, "state conflict: precondition failed", nil)},
@@ -509,7 +530,16 @@ func TestWriteFailure(t *testing.T) {
 		assert.EqualError(t, ErrOutcomeUnknown, "outcome unknown")
 	})
 
-	t.Run("keeps a failure of the client that looks like the end of a context as text only", func(t *testing.T) {
+	t.Run("keeps the unknown outcome and the stall reachable after a write that stalled", func(t *testing.T) {
+		err := writeFailure(mayHaveBeenWritten{stalled{}}, "writing")
+
+		assert.ErrorIs(t, err, ErrOutcomeUnknown)
+		assert.ErrorIs(t, err, eventsourcingdb.ErrOutcomeUnknown)
+		assert.ErrorIs(t, err, eventsourcingdb.ErrConnectionStalled)
+		assert.NotErrorIs(t, err, context.DeadlineExceeded, "only the end of the context is context.DeadlineExceeded")
+	})
+
+	t.Run("keeps a failure of the client that looks like the end of a context, but not as the end of the context", func(t *testing.T) {
 		// A timeout while connecting is reported as context.DeadlineExceeded,
 		// although the context of the caller has not ended, and
 		// httpapi.StatusFor would answer it with 503.

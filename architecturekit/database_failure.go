@@ -168,8 +168,13 @@ var transientCodes = []string{
 //     the client checks who answered before it checks the status. A wrong
 //     address fails on start anyway, so it is named rather than made
 //     permanent.
-//   - 429 asks to slow down, and 5xx means that the database is unable to
-//     answer for now, e.g. because it is shutting down. Both are transient.
+//   - An error within a stream, which a database that offers just the v1 API
+//     reports with the status 200 and without a code, is transient. It sends
+//     one only when reading is disturbed, e.g. because it is shutting down,
+//     rebuilds its indexes, or restores a backup.
+//   - 408 means that the request did not arrive in time, 429 asks to slow
+//     down, and 5xx means that the database is unable to answer for now, e.g.
+//     because it is shutting down. All of them are transient.
 //   - 409, which only a database that offers just the v1 API sends without a
 //     code, means, when writing, that a precondition did not hold, which is a
 //     conflict, or that an event does not match its schema, which is
@@ -203,7 +208,10 @@ func databaseFailure(err error, doing string) error {
 		}
 		return fmt.Errorf("%w: %s: %w", ErrTransient, doing, causeOf(err))
 
-	case status == http.StatusTooManyRequests, status >= http.StatusInternalServerError:
+	case status == http.StatusOK,
+		status == http.StatusRequestTimeout,
+		status == http.StatusTooManyRequests,
+		status >= http.StatusInternalServerError:
 		return fmt.Errorf("%w: %s: %w", ErrTransient, doing, causeOf(err))
 
 	case status == http.StatusConflict:
@@ -254,20 +262,48 @@ func schemaRefusal(eventType string, refusal error) error {
 // category that decides what the failure means.
 //
 // A failure of the client that errors.Is takes for context.Canceled or
-// context.DeadlineExceeded is kept as text only, with the same message. Both
+// context.DeadlineExceeded keeps its message, and errors.Is and errors.As still
+// reach whatever it holds, apart from those two (see withoutContextEnd). Both
 // mean that the context ended (see contextEnded), which a read checks before
 // it gets here, and which neither a write nor the registration of a schema
 // can run into, since the client gets their context without its end (see
-// Store.write). So such a failure comes from the network, as when connecting
-// to the database times out, which the standard library reports as
-// context.DeadlineExceeded. Wrapped, it would make a failure of the database
-// look like the end of the context, and httpapi.StatusFor, which asks for the
-// end of the context before it asks for ErrPermanent, would answer a
-// permanent failure with 499 or 503 rather than 500.
+// Store.write). So such a failure comes from the client or the network: a
+// connection that stalled, which the client reports as
+// context.DeadlineExceeded as well, or connecting to the database that timed
+// out, which the standard library reports so. Reaching them, it would make a
+// failure of the database look like the end of the context, and
+// httpapi.StatusFor, which asks for the end of the context before it asks for
+// ErrPermanent, would answer a permanent failure with 499 or 503 rather than
+// 500.
 func causeOf(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return errors.New(err.Error())
+		return withoutContextEnd{err: err}
 	}
 
 	return err
+}
+
+// withoutContextEnd keeps a failure of the client, with its message, for
+// errors.Is and errors.As, apart from context.Canceled and
+// context.DeadlineExceeded, which only the end of the context is to match (see
+// causeOf). It has no Unwrap, so that errors.Is can not reach either of them
+// through it.
+type withoutContextEnd struct {
+	err error
+}
+
+func (w withoutContextEnd) Error() string {
+	return w.err.Error()
+}
+
+func (w withoutContextEnd) Is(target error) bool {
+	if target == context.Canceled || target == context.DeadlineExceeded {
+		return false
+	}
+
+	return errors.Is(w.err, target)
+}
+
+func (w withoutContextEnd) As(target any) bool {
+	return errors.As(w.err, target)
 }

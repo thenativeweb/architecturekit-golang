@@ -3,6 +3,7 @@ package architecturekit_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -300,6 +301,25 @@ func TestDatabaseFailures(t *testing.T) {
 		assert.ErrorIs(t, err, architecturekit.ErrTransient, "an unavailable database is transient")
 		assert.NotErrorIs(t, err, architecturekit.ErrPermanent)
 	})
+}
+
+func TestAnErrorWithinAStreamOfTheV1API(t *testing.T) {
+	// A database that offers just the v1 API reports an error within a stream
+	// without a code, and only when reading is disturbed, e.g. because it is
+	// shutting down, so trying again may help.
+	store := architecturekit.NewStore(writingDatabase(t, "/api/v1/read-events",
+		func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = fmt.Fprintln(writer, `{"type":"error","payload":{"error":"store is shutting down"}}`)
+		}), "https://thenativeweb.io")
+
+	var err error
+	for _, readErr := range architecturekit.Read(context.Background(), store, architecturekit.ExactSubject("/test")) {
+		err = readErr
+	}
+
+	assert.ErrorIs(t, err, architecturekit.ErrTransient)
+	assert.NotErrorIs(t, err, architecturekit.ErrConflict)
+	assert.ErrorContains(t, err, "store is shutting down")
 }
 
 func TestDatabaseFailuresOfTheV2API(t *testing.T) {

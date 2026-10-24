@@ -96,7 +96,7 @@ func projectionSettingsOf(function string, options []ProjectionOption) projectio
 }
 
 // Reconnect describes an attempt of a projection to read again, after reading
-// failed or the database ended the stream. The observer set with
+// failed, which includes a stream that broke off. The observer set with
 // WithReconnectObserver receives one for every attempt.
 type Reconnect struct {
 	// Projection is the name the projection was given with Named, or empty if

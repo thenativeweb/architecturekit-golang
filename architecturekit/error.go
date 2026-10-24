@@ -17,8 +17,8 @@ import (
 //
 // A failure of the database wraps the error of the client after its category,
 // or after ErrOutcomeUnknown, so that errors.As finds an
-// *eventsourcingdb.DBAPIError with the status code and the reason the
-// database gave. It is the category, though, that tells what the failure
+// *eventsourcingdb.DBAPIError with the status, the code, and the description
+// the database gave. It is the category, though, that tells what the failure
 // means.
 //
 // The texts of the categories leave out the name of the package, since an
@@ -43,9 +43,9 @@ var (
 // ErrConflict means a precondition of the write did not hold. It is transient,
 // because the state it disagreed with has moved on.
 //
-// An event that does not match its schema is not a conflict, although the
-// EventSourcingDB answers it with the same status. Writing it again yields the
-// same result, so it is reported as ErrPermanent.
+// An event that does not match its schema is not a conflict, although
+// EventSourcingDB refuses the write for it as well. Writing it again yields
+// the same result, so it is reported as ErrPermanent.
 var ErrConflict = fmt.Errorf("%w: a precondition did not hold", ErrTransient)
 
 // ErrUnverified means that an event the store has read failed its
@@ -57,12 +57,13 @@ var ErrConflict = fmt.Errorf("%w: a precondition did not hold", ErrTransient)
 var ErrUnverified = fmt.Errorf("%w: an event could not be verified", ErrPermanent)
 
 // ErrOutcomeUnknown means that a write failed in a way that leaves open
-// whether the database stored the events: the request had left, but no
-// complete answer arrived, since the connection broke, the answer was cut off
-// or could not be decoded, or a timeout of the client ran out, or the answer
-// was one that may come after the events were stored, such as 500, or one
-// that does not come from an EventSourcingDB, such as a 502 or 504 of a proxy
-// in front of it.
+// whether the database stored the events, which the client decides and
+// reports with eventsourcingdb.ErrOutcomeUnknown: the client had connected,
+// but no answer arrived that says that nothing was stored, since the request
+// or the answer was cut off, the answer could not be decoded, or the database
+// stalled, or the answer was one that may come after the events were stored,
+// such as 500 or store-failed, or one that does not come from an
+// EventSourcingDB, such as a 502 or 504 of a proxy in front of it.
 //
 // It belongs to no category. It is not ErrTransient, since trying again may
 // store the events twice, and not ErrPermanent, since trying again may be

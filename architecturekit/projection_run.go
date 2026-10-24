@@ -79,10 +79,10 @@ type ProjectionRun struct {
 //	  return err
 //	}
 //
-// If reading fails, or if the database ends the stream, for example on a
-// restart, it waits and catches up again from where it stopped, with a delay
-// that grows with every attempt in a row (see WithReconnectDelays and
-// WithReconnectObserver). An error of Apply of the category ErrTransient is
+// If reading fails, which includes a stream that ends, for example on a
+// restart, since the client reports that it broke off, it waits and catches
+// up again from where it stopped, with a delay that grows with every attempt
+// in a row (see WithReconnectDelays and WithReconnectObserver). An error of Apply of the category ErrTransient is
 // handled the same way, so the event is tried again. Only a failure that
 // trying again will not fix, such as any other error of Apply, ends the run,
 // and Err returns it. Ending the context is how a projection is stopped, so

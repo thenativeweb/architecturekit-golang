@@ -326,6 +326,8 @@ func TestAStallWhileWaitingForTheAnswer(t *testing.T) {
 
 			assertOutcomeUnknown(t, err)
 			assert.ErrorContains(t, err, "connection stalled")
+			assert.ErrorIs(t, err, eventsourcingdb.ErrConnectionStalled, "errors.Is has to reach the stall")
+			assert.ErrorIs(t, err, eventsourcingdb.ErrOutcomeUnknown, "errors.Is has to reach the unknown outcome of the client")
 		})
 	}
 }
