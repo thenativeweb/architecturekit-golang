@@ -184,10 +184,12 @@ func TestInMemoryViewRevision(t *testing.T) {
 		require.Equal(t, "5", currentRevision(t, view))
 
 		// An event that arrives twice, or out of order after a restart, must not
-		// pull the revision back.
+		// pull the revision back. Each is checked on its own, since the event that
+		// arrives twice would move a revision that went back forward again.
 		view.Seen("3")
+		assert.Equal(t, "5", currentRevision(t, view), "an older event")
 		view.Seen("5")
-		assert.Equal(t, "5", currentRevision(t, view))
+		assert.Equal(t, "5", currentRevision(t, view), "the same event")
 
 		view.Seen("12")
 		assert.Equal(t, "12", currentRevision(t, view))
