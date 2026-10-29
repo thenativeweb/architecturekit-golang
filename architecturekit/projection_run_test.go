@@ -233,7 +233,7 @@ func TestProjectionRun(t *testing.T) {
 
 		waitForClosed(t, run.Done(), "Done")
 
-		assert.ErrorContains(t, run.Err(), "the view is broken", "expected the failure of Apply")
+		assert.EqualError(t, run.Err(), "applying event 0: the view is broken", "expected the failure of Apply, naming the event")
 
 		status := run.Status()
 		assert.Equal(t, architecturekit.PhaseStopped, status.Phase)
@@ -395,8 +395,9 @@ func TestWaitCaughtUp(t *testing.T) {
 		err := architecturekit.WaitCaughtUp(waitingContext(t), run)
 
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "the view is broken", "expected the failure of Apply")
-		assert.Equal(t, run.Err(), err)
+		assert.EqualError(t, err, `projection of "/test": applying event 0: the view is broken`,
+			"a run without a name is named by its subject")
+		assert.ErrorIs(t, err, run.Err())
 		assert.False(t, isClosed(run.CaughtUp()))
 	})
 
@@ -427,7 +428,8 @@ func TestWaitCaughtUp(t *testing.T) {
 
 		require.Error(t, err, "a run that has not caught up must never look like one that has")
 		assert.ErrorIs(t, err, context.Canceled)
-		assert.EqualError(t, err, "architecturekit: the projection stopped before it caught up: context canceled")
+		assert.EqualError(t, err, `architecturekit: the projection of "/test" stopped before it caught up: context canceled`,
+			"a run without a name is named by its subject")
 		assert.NoError(t, run.Err(), "ending through the context is not a failure")
 		assert.False(t, isClosed(run.CaughtUp()))
 	})

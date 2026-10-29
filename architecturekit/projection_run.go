@@ -58,6 +58,7 @@ type ProjectionStatus struct {
 // projection has caught up, when it has ended, and where it stands.
 type ProjectionRun struct {
 	name         string
+	subject      string
 	caughtUp     chan struct{}
 	caughtUpOnce sync.Once
 	done         chan struct{}
@@ -98,6 +99,18 @@ type ProjectionRun struct {
 // that trying again will not fix. Its message holds the value and the stack of
 // the panic.
 //
+// An error of Apply, or a panic in it, names the event that the projection
+// failed at by its ID, as in applying event 42: ..., so that a log tells which
+// event to look at. The kit words a failure of a category with the text of
+// the category first, so the event follows that text for an error that starts
+// with it, as in permanent failure: applying event 42: ..., and the name of
+// the package for a panic, as in architecturekit: applying event 42: panic
+// while running the projection: ..., followed by its value and its stack.
+// Either way, errors.Is and errors.As find what they find in the error of
+// Apply, its category included. A failure outside of Apply, such as one of
+// Checkpoint, or of beginning, committing, or rolling back a transaction,
+// names no event.
+//
 // To wait for the run to end, as a process does that does nothing else:
 //
 //	<-run.Done()
@@ -118,7 +131,7 @@ func StartProjection(
 	requireProjection("StartProjection", projection)
 	refuseTransactional(projection)
 
-	return start(projectionSettingsOf("StartProjection", options), func(progress *ProjectionRun) error {
+	return start(projectionSettingsOf("StartProjection", options), subjects, func(progress *ProjectionRun) error {
 		return run(ctx, store, subjects, writerFor(projection), projection, progress)
 	})
 }
@@ -140,17 +153,19 @@ func StartTransactionalProjection(
 	requireSubjects(subjects)
 	requireProjection("StartTransactionalProjection", projection)
 
-	return start(projectionSettingsOf("StartTransactionalProjection", options), func(progress *ProjectionRun) error {
+	return start(projectionSettingsOf("StartTransactionalProjection", options), subjects, func(progress *ProjectionRun) error {
 		return run(ctx, store, subjects,
 			&transactionalWriter{projection: projection}, projection, progress)
 	})
 }
 
 // start runs a projection in a goroutine of its own, reporting to the returned
-// run.
-func start(settings projectionSettings, runProjection func(progress *ProjectionRun) error) *ProjectionRun {
+// run. The run keeps the subject the projection reads, so that it can be told
+// apart by it without a name (see title).
+func start(settings projectionSettings, subjects Subjects, runProjection func(progress *ProjectionRun) error) *ProjectionRun {
 	progress := &ProjectionRun{
 		name:     settings.name,
+		subject:  subjects.subject,
 		caughtUp: make(chan struct{}),
 		done:     make(chan struct{}),
 		status:   ProjectionStatus{Phase: PhaseCatchingUp, Since: time.Now()},
@@ -205,13 +220,16 @@ func (r *ProjectionRun) Err() error {
 // as soon as one of them ends before it has caught up, or ctx ends:
 //
 //   - If a run ends before it catches up, it returns the error the run ended
-//     with (see Err). If the run has a name (see Named), the error names it,
-//     as in projection "catalog": ..., and wraps the error of the run, so that
-//     errors.Is still finds what that wraps.
+//     with (see Err), which names the run, and wraps the error of the run, so
+//     that errors.Is and errors.As still find what that wraps. A run with a
+//     name (see Named) is named by it, as in projection "catalog": ..., and a
+//     run without one by the subject it reads, as in projection of
+//     "/books": ..., so that the error tells which run it is either way.
 //   - If a run ends without an error before it catches up, because its own
 //     context ended, it returns an error that wraps context.Canceled and says
-//     that the projection stopped before it caught up, naming it if it has a
-//     name.
+//     that the projection stopped before it caught up, naming it the same way,
+//     as in the projection "catalog" stopped before it caught up, or the
+//     projection of "/books" stopped before it caught up.
 //   - If ctx ends first, it returns the error of ctx.
 //
 // A run that has caught up counts as caught up, even if it has ended since, or
@@ -297,25 +315,28 @@ func caughtUpVerdict(ctx context.Context, runs []*ProjectionRun) (bool, error) {
 	case ctx.Err() != nil:
 		return true, ctx.Err()
 	case stopped != nil:
-		projection := "the projection"
-		if stopped.name != "" {
-			projection = fmt.Sprintf("the projection %q", stopped.name)
-		}
-
-		return true, fmt.Errorf("architecturekit: %s stopped before it caught up: %w", projection, context.Canceled)
+		return true, fmt.Errorf("architecturekit: the %s stopped before it caught up: %w", stopped.title(), context.Canceled)
 	default:
 		return false, nil
 	}
 }
 
-// named wraps the error a run ended with so that it names the projection, if
-// it has a name, and leaves it as it is otherwise.
+// named wraps the error a run ended with so that it names the projection (see
+// title).
 func (r *ProjectionRun) named(err error) error {
+	return fmt.Errorf("%s: %w", r.title(), err)
+}
+
+// title names the projection of the run, by the name it was given with Named,
+// as in projection "catalog", or, without one, by the subject it reads, as in
+// projection of "/books", so that an error tells which of several runs it is
+// about either way.
+func (r *ProjectionRun) title() string {
 	if r.name == "" {
-		return err
+		return fmt.Sprintf("projection of %q", r.subject)
 	}
 
-	return fmt.Errorf("projection %q: %w", r.name, err)
+	return fmt.Sprintf("projection %q", r.name)
 }
 
 // Status returns where the run stands. It is safe to call from any goroutine.

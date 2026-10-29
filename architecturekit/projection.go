@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/thenativeweb/eventsourcingdb-client-golang/v2/eventsourcingdb"
@@ -153,7 +154,8 @@ func batchSizeOf(projection any) int {
 //
 // If the projection panics, it returns an error of the category ErrPermanent
 // that holds the value and the stack of the panic, as a run ends with (see
-// StartProjection).
+// StartProjection). An error of Apply, or a panic in it, names the event that
+// the projection failed at, as for a run.
 //
 // A nil projection, or one that is transactional as well, is a programming
 // error and panics; use CatchUpTransactionalProjection for the latter. A nil
@@ -407,9 +409,10 @@ func drive(
 			open = true
 		}
 
-		if err := writer.apply(ctx, event); err != nil {
+		if err := applyTo(ctx, writer, event); err != nil {
 			// A failing rollback is reported alongside, never instead of, the
-			// failure that caused it.
+			// failure that caused it. It concerns the batch, not the event, so
+			// it does not name the event.
 			return lastEventID, errors.Join(err, writer.rollback(ctx))
 		}
 
@@ -440,6 +443,83 @@ func drive(
 	}
 
 	return lastEventID, nil
+}
+
+// applyTo hands an event to the writer, and names the event in what fails,
+// whether the projection returns an error or panics (see applyFailure). It
+// turns a panic into an error right where it happens, for every kind of
+// projection, so that drive rolls the transaction of a transactional one back,
+// as for an error, instead of leaving it open. The run ends with it all the
+// same, as with a panic anywhere else (see run).
+func applyTo(ctx context.Context, writer projectionWriter, event eventsourcingdb.Event) (err error) {
+	defer func() {
+		if err != nil {
+			err = &applyFailure{eventID: event.ID, err: err}
+		}
+	}()
+	defer recoverInto(&err)
+
+	return writer.apply(ctx, event)
+}
+
+// applyFailure is what a projection fails with when it applies an event,
+// whether it returns an error or panics. It names the event by its ID, so
+// that the error a run ends with tells which event to look at. It wraps the
+// failure unchanged, so that errors.Is and errors.As find what they find in
+// it: its category, a panic, and the error of the projection itself.
+//
+// The kit words a failure of a category with the text of the category first,
+// and what it was doing after it, as in permanent failure: reading events: ...
+// (see databaseFailure), and a failure of its own that belongs to no category
+// with the name of the package first, as in architecturekit: reading events: ...
+// (see contextEnded). So the event follows such a lead, as in permanent
+// failure: applying event 42: ..., and comes first otherwise, as in applying
+// event 42: ... for an error of the projection without a category.
+type applyFailure struct {
+	eventID string
+	err     error
+}
+
+func (failure *applyFailure) Error() string {
+	applying := "applying event " + failure.eventID
+	message := failure.err.Error()
+
+	lead := leadOf(failure.err, message)
+	if lead == "" {
+		return applying + ": " + message
+	}
+
+	return lead + ": " + applying + strings.TrimPrefix(message, lead)
+}
+
+// Unwrap hands out the failure, so that errors.Is and errors.As find what it
+// wraps.
+func (failure *applyFailure) Unwrap() error { return failure.err }
+
+// categories are the categories whose text a failure starts with, the
+// narrower ones first, since their texts start with the ones of the broader
+// categories they belong to.
+var categories = []error{ErrConflict, ErrUnverified, ErrTransient, ErrPermanent, ErrDomain}
+
+// leadOf returns what the message of a failure starts with, before it says
+// what went wrong: the text of a category the failure belongs to, or the name
+// of the package for a failure of the kit that starts with it instead, such as
+// a panic or the end of the context. It returns an empty string for any other
+// failure, such as an error of the projection that says what went wrong right
+// away.
+func leadOf(failure error, message string) string {
+	for _, category := range categories {
+		text := category.Error()
+		if errors.Is(failure, category) && (message == text || strings.HasPrefix(message, text+": ")) {
+			return text
+		}
+	}
+
+	if strings.HasPrefix(message, "architecturekit: ") {
+		return "architecturekit"
+	}
+
+	return ""
 }
 
 // projectionWriter hides the three kinds of projection behind one shape, so
@@ -549,11 +629,9 @@ func (w *transactionalWriter) begin(ctx context.Context) error {
 	return nil
 }
 
-// apply turns a panic into an error right where it happens, so that drive
-// rolls the transaction back, as for an error, instead of leaving it open.
-func (w *transactionalWriter) apply(ctx context.Context, event eventsourcingdb.Event) (err error) {
-	defer recoverInto(&err)
-
+// apply leaves a panic to applyTo, which turns it into an error right where it
+// happens, so that drive rolls the transaction back, as for an error.
+func (w *transactionalWriter) apply(ctx context.Context, event eventsourcingdb.Event) error {
 	return w.tx.Apply(ctx, event)
 }
 
@@ -563,8 +641,9 @@ func (w *transactionalWriter) commit(ctx context.Context, lastEventID string) er
 	return err
 }
 
-// rollback turns a panic into an error as well, so that drive reports it
-// alongside the failure that made it roll back, never instead of it.
+// rollback turns a panic into an error, as applyTo does for apply, so that
+// drive reports it alongside the failure that made it roll back, never instead
+// of it.
 func (w *transactionalWriter) rollback(ctx context.Context) (err error) {
 	if w.tx == nil {
 		return nil

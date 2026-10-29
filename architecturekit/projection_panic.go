@@ -12,7 +12,8 @@ import (
 // and trying again would only panic again.
 //
 // Its message holds the value and the stack of the panic, so that logging the
-// error of the run shows where it happened.
+// error of the run shows where it happened. A panic in Apply comes wrapped, so
+// that the message names the event as well (see applyFailure).
 //
 // It does not unwrap to the value, even if that is an error, since the value
 // says nothing about whether trying again helps: a panic with an error of the

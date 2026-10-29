@@ -187,7 +187,7 @@ func TestWaitCaughtUpForSeveralRuns(t *testing.T) {
 		err := receive(t, waited)
 
 		require.ErrorIs(t, err, errAnchorsBroken)
-		assert.EqualError(t, err, `projection "anchors": the anchors are broken`)
+		assert.EqualError(t, err, `projection "anchors": applying event 0: the anchors are broken`)
 		assert.False(t, isClosed(behind.Done()), "only waiting has ended, not the other run")
 	})
 
@@ -198,13 +198,29 @@ func TestWaitCaughtUpForSeveralRuns(t *testing.T) {
 
 		require.ErrorIs(t, err, errAnchorsBroken, "errors.Is has to find what the error of the run wraps")
 		assert.ErrorIs(t, err, run.Err())
-		assert.EqualError(t, err, `projection "anchors": the anchors are broken`)
+		assert.EqualError(t, err, `projection "anchors": applying event 0: the anchors are broken`)
 	})
 
-	t.Run("leaves the error of a run without a name as it is", func(t *testing.T) {
+	t.Run("names a run without a name by its subject, wrapping its error", func(t *testing.T) {
 		run := failedRun(t)
 
-		assert.Equal(t, run.Err(), architecturekit.WaitCaughtUp(waitingContext(t), caughtUpRun(t), run))
+		err := architecturekit.WaitCaughtUp(waitingContext(t), caughtUpRun(t), run)
+
+		require.ErrorIs(t, err, errAnchorsBroken, "errors.Is has to find what the error of the run wraps")
+		assert.ErrorIs(t, err, run.Err())
+		assert.EqualError(t, err, `projection of "/test": applying event 0: the anchors are broken`)
+	})
+
+	t.Run("names a run by its subject, also when it reads the subjects below it", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		run := architecturekit.StartProjection(ctx, storedEvents(t), architecturekit.SubjectTree("/"),
+			failingWith{err: errAnchorsBroken})
+		waitForClosed(t, run.Done(), "Done")
+
+		assert.EqualError(t, architecturekit.WaitCaughtUp(waitingContext(t), run),
+			`projection of "/": applying event 0: the anchors are broken`)
 	})
 
 	t.Run("names a run that stopped before it caught up only once", func(t *testing.T) {
@@ -216,15 +232,24 @@ func TestWaitCaughtUpForSeveralRuns(t *testing.T) {
 		assert.EqualError(t, err, `architecturekit: the projection "readers" stopped before it caught up: context canceled`)
 	})
 
+	t.Run("names a run without a name that stopped before it caught up by its subject", func(t *testing.T) {
+		run := stoppedRun(t)
+
+		err := architecturekit.WaitCaughtUp(waitingContext(t), caughtUpRun(t), run)
+
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.EqualError(t, err, `architecturekit: the projection of "/test" stopped before it caught up: context canceled`)
+	})
+
 	t.Run("returns the error of the first run among the given ones that ended with one", func(t *testing.T) {
 		catalog := failedRun(t, architecturekit.Named("catalog"))
 		anchors := failedRun(t, architecturekit.Named("anchors"))
 
 		for range 100 {
 			assert.EqualError(t, architecturekit.WaitCaughtUp(waitingContext(t), catalog, anchors),
-				`projection "catalog": the anchors are broken`)
+				`projection "catalog": applying event 0: the anchors are broken`)
 			assert.EqualError(t, architecturekit.WaitCaughtUp(waitingContext(t), anchors, catalog),
-				`projection "anchors": the anchors are broken`)
+				`projection "anchors": applying event 0: the anchors are broken`)
 		}
 	})
 

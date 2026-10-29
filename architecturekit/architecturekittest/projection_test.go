@@ -3,6 +3,7 @@ package architecturekittest_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"testing"
 	"time"
@@ -160,7 +161,74 @@ func TestProject(t *testing.T) {
 			Data:    []byte(`{"owner":42}`),
 		})
 
-		recorder.expectFailure(t, "projecting event 0")
+		recorder.expectFailure(t, "applying event 0: json: ")
+	})
+
+	t.Run("names the event it fails at by its ID, rather than by its position", func(t *testing.T) {
+		recorder := &spy{}
+		refusing := architecturekit.ProjectionFunc(func(_ context.Context, event eventsourcingdb.Event) error {
+			if event.Type == (closed{}).EventType() {
+				return errors.New("closing is not supported")
+			}
+
+			return nil
+		})
+
+		architecturekittest.Project(recorder, refusing,
+			architecturekittest.StoredEventsAt("/account/1", 41, time.Now(), opened{Owner: "golo"}, closed{})...)
+
+		require.Len(t, recorder.failures, 1)
+		assert.Equal(t, "applying event 42: closing is not supported", recorder.firstFailure())
+	})
+
+	t.Run("names the event before the error, also before the text of a category", func(t *testing.T) {
+		recorder := &spy{}
+		refusing := architecturekit.ProjectionFunc(func(context.Context, eventsourcingdb.Event) error {
+			return fmt.Errorf("%w: the shelf is full", architecturekit.ErrPermanent)
+		})
+
+		architecturekittest.Project(recorder, refusing, architecturekittest.StoredEvent("/account/1", "42", opened{Owner: "golo"}))
+
+		require.Len(t, recorder.failures, 1)
+		assert.Equal(t, "applying event 42: permanent failure: the shelf is full", recorder.firstFailure())
+	})
+
+	t.Run("reports a panic, naming the event, rather than panicking", func(t *testing.T) {
+		recorder := &spy{}
+		var books map[string]string
+		unprepared := architecturekit.ProjectionFunc(func(_ context.Context, event eventsourcingdb.Event) error {
+			books[event.ID] = event.Subject
+			return nil
+		})
+
+		require.NotPanics(t, func() {
+			architecturekittest.Project(recorder, unprepared,
+				architecturekittest.StoredEventsAt("/account/1", 42, time.Now(), opened{Owner: "golo"})...)
+		})
+
+		require.Len(t, recorder.failures, 1)
+		recorder.expectFailure(t, "applying event 42: panic: assignment to entry in nil map\n\ngoroutine ")
+		recorder.expectFailure(t, "architecturekittest_test.TestProject.")
+	})
+
+	t.Run("stops at the first event it fails at", func(t *testing.T) {
+		recorder := &spy{}
+		var applied []string
+		refusing := architecturekit.ProjectionFunc(func(_ context.Context, event eventsourcingdb.Event) error {
+			applied = append(applied, event.ID)
+			if event.ID == "1" {
+				panic("the view is broken")
+			}
+
+			return nil
+		})
+
+		architecturekittest.Project(recorder, refusing,
+			architecturekittest.StoredEvents("/account/1", opened{Owner: "golo"}, closed{}, opened{Owner: "jane"})...)
+
+		require.Len(t, recorder.failures, 1)
+		recorder.expectFailure(t, "applying event 1: panic: the view is broken")
+		assert.Equal(t, []string{"0", "1"}, applied)
 	})
 
 	t.Run("refuses a projection that is transactional as well", func(t *testing.T) {
@@ -389,6 +457,27 @@ func (tx *ownerTx) Rollback(context.Context) error {
 	return tx.owner.rollbackErr
 }
 
+// panickyOwnerTable is an ownerTable whose transactions panic where the ones
+// of ownerTable refuse an event, as a transaction with a bug does.
+type panickyOwnerTable struct {
+	ownerTable
+}
+
+func (o *panickyOwnerTable) Begin(context.Context) (architecturekit.Tx, error) {
+	o.log = append(o.log, "begin")
+	return &panickyOwnerTx{ownerTx{owner: &o.ownerTable}}, nil
+}
+
+type panickyOwnerTx struct{ ownerTx }
+
+func (tx *panickyOwnerTx) Apply(ctx context.Context, event eventsourcingdb.Event) error {
+	if err := tx.ownerTx.Apply(ctx, event); err != nil {
+		panic(err.Error())
+	}
+
+	return nil
+}
+
 // ownerTableWithApply is transactional, but has an Apply as well, which is
 // not what runs in production.
 type ownerTableWithApply struct {
@@ -432,9 +521,35 @@ func TestProjectTransactional(t *testing.T) {
 		architecturekittest.ProjectTransactional(recorder, table,
 			architecturekittest.StoredEvents("/account/1", opened{Owner: "golo"}, closed{})...)
 
-		recorder.expectFailure(t, "projecting event 1")
-		recorder.expectFailure(t, "rollback did not work either")
+		recorder.expectFailure(t, "applying event 1: only openings, please\nrollback did not work either")
 		expectLog(t, table.log, "begin", "apply 0", "rollback")
+	})
+
+	t.Run("names the event it fails at by its ID, rather than by its position", func(t *testing.T) {
+		recorder := &spy{}
+		table := &ownerTable{}
+
+		architecturekittest.ProjectTransactional(recorder, table,
+			architecturekittest.StoredEventsAt("/account/1", 41, time.Now(), opened{Owner: "golo"}, closed{})...)
+
+		require.Len(t, recorder.failures, 1)
+		assert.Equal(t, "applying event 42: only openings, please", recorder.firstFailure())
+		expectLog(t, table.log, "begin", "apply 41", "rollback")
+	})
+
+	t.Run("rolls back on a panic, and reports it, naming the event, rather than panicking", func(t *testing.T) {
+		recorder := &spy{}
+		table := &panickyOwnerTable{}
+
+		require.NotPanics(t, func() {
+			architecturekittest.ProjectTransactional(recorder, table,
+				architecturekittest.StoredEventsAt("/account/1", 41, time.Now(), opened{Owner: "golo"}, closed{})...)
+		})
+
+		require.Len(t, recorder.failures, 1)
+		recorder.expectFailure(t, "applying event 42: panic: only openings, please\n\ngoroutine ")
+		recorder.expectFailure(t, "architecturekittest_test.(*panickyOwnerTx).Apply")
+		expectLog(t, table.log, "begin", "apply 41", "rollback")
 	})
 
 	t.Run("reports a failing begin", func(t *testing.T) {
