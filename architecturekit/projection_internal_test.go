@@ -437,6 +437,141 @@ func TestProjectionFunc(t *testing.T) {
 	})
 }
 
+func TestApplyFailureMessage(t *testing.T) {
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// The event goes where the kit says what it was doing, after the lead of
+	// the failure, if it has one, and first otherwise.
+	for _, test := range []struct {
+		name    string
+		failure error
+		message string
+	}{
+		{
+			"puts the event first for an error without a category",
+			errors.New("the shelf is full"),
+			"applying event 42: the shelf is full",
+		},
+		{
+			"puts the event after the text of the category",
+			fmt.Errorf("%w: the shelf is full", ErrPermanent),
+			"permanent failure: applying event 42: the shelf is full",
+		},
+		{
+			"puts the event after the text of the category, if that is all there is",
+			ErrTransient,
+			"transient failure: applying event 42",
+		},
+		{
+			"puts the event after the whole text of a narrower category",
+			fmt.Errorf("%w: writing events: refused", ErrConflict),
+			"transient failure: a precondition did not hold: applying event 42: writing events: refused",
+		},
+		{
+			"puts the event after the whole text of a narrower category of permanent failures",
+			fmt.Errorf("%w: event 7 on %q: the hash does not match", ErrUnverified, "/books/42"),
+			`permanent failure: an event could not be verified: applying event 42: event 7 on "/books/42": the hash does not match`,
+		},
+		{
+			"puts the event after the text of a domain error that starts with the one of its category",
+			fmt.Errorf("%w: the shelf is full", ErrDomain),
+			"domain rule violated: applying event 42: the shelf is full",
+		},
+		{
+			"puts the event first for a domain error that does not start with the text of its category",
+			NewDomainError("the shelf is full"),
+			"applying event 42: the shelf is full",
+		},
+		{
+			"puts the event first for an error that starts with the text of a category it does not belong to",
+			errors.New("permanent failure: the shelf is full"),
+			"applying event 42: permanent failure: the shelf is full",
+		},
+		{
+			"puts the event first for an error that wraps one of a category after a text of its own",
+			fmt.Errorf("updating the shelf: %w", fmt.Errorf("%w: it is full", ErrPermanent)),
+			"applying event 42: updating the shelf: permanent failure: it is full",
+		},
+		{
+			"puts the event after the name of the package for a panic",
+			&panicError{value: "the shelf is on fire", stack: []byte("the stack")},
+			"architecturekit: applying event 42: panic while running the projection: the shelf is on fire\n\nthe stack",
+		},
+		{
+			"puts the event after the name of the package for a failure of the kit without a category",
+			contextEnded(ended, "reading events"),
+			"architecturekit: applying event 42: reading events: context canceled",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := &applyFailure{eventID: "42", err: test.failure}
+
+			assert.EqualError(t, err, test.message)
+			assert.ErrorIs(t, err, test.failure, "errors.Is has to find the failure itself")
+		})
+	}
+
+	t.Run("finds what the failure wraps", func(t *testing.T) {
+		panicked := &panicError{value: "the shelf is on fire", stack: []byte("the stack")}
+		err := error(&applyFailure{eventID: "42", err: panicked})
+
+		found, isPanic := errors.AsType[*panicError](err)
+		require.True(t, isPanic, "errors.As has to find the panic, by which a run tells to end")
+		assert.Same(t, panicked, found)
+		assert.ErrorIs(t, err, ErrPermanent)
+
+		err = &applyFailure{eventID: "42", err: fmt.Errorf("%w: the row is locked", ErrTransient)}
+
+		assert.ErrorIs(t, err, ErrTransient, "a run tries a failure that may pass again")
+		assert.NotErrorIs(t, err, ErrPermanent)
+	})
+}
+
+func TestDriveNamesTheEvent(t *testing.T) {
+	// Every writer, with a projection behind it that refuses event 1.
+	writers := map[string]func() projectionWriter{
+		"rebuild": func() projectionWriter {
+			return writerFor(&recorder{journal: journal{failOn: "1"}})
+		},
+		"resumable": func() projectionWriter {
+			return writerFor(&resumableRecorder{recorder: recorder{journal: journal{failOn: "1"}}})
+		},
+		"transactional": func() projectionWriter {
+			return inTransactions(&transactionalRecorder{journal: journal{failOn: "1"}})
+		},
+	}
+
+	for name, writer := range writers {
+		t.Run("names the event a "+name+" projection refused", func(t *testing.T) {
+			lastEventID, err := drive(context.Background(), writer(), events("0", "1", "2"), unverified, nil, 10)
+
+			assert.Equal(t, "0", lastEventID)
+			assert.EqualError(t, err, "permanent failure: applying event 1: refusing 1")
+			assert.ErrorIs(t, err, ErrPermanent)
+		})
+	}
+
+	t.Run("names the event a projection panicked at, and returns the panic as an error", func(t *testing.T) {
+		panicking := ProjectionFunc(func(_ context.Context, event eventsourcingdb.Event) error {
+			if event.ID == "1" {
+				panic("the shelf is on fire")
+			}
+
+			return nil
+		})
+
+		var err error
+		require.NotPanics(t, func() {
+			_, err = drive(context.Background(), writerFor(panicking), events("0", "1", "2"), unverified, nil, 10)
+		})
+
+		assert.ErrorContains(t, err, "architecturekit: applying event 1: panic while running the projection: the shelf is on fire\n\n")
+		_, isPanic := errors.AsType[*panicError](err)
+		assert.True(t, isPanic, "errors.As has to find the panic, by which a run tells to end")
+	})
+}
+
 func TestIsNil(t *testing.T) {
 	// Every kind that can be nil, once nil and once not, and kinds that can not
 	// be nil at all, which reflect would panic on if asked.

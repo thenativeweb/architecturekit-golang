@@ -134,26 +134,38 @@ func storeWithOneEvent(t *testing.T) *architecturekit.Store {
 	return architecturekit.NewStore(newFakeDatabase(t, database), "https://thenativeweb.io")
 }
 
+// panickedWith is how the message of a panic with the given value in the given
+// function starts. A panic in Apply names the event that the projection failed
+// at, which is event 0 of storeWithOneEvent, while a panic anywhere else
+// concerns no single event, and names none.
+func panickedWith(function, value string) string {
+	if function == "Apply" {
+		return "architecturekit: applying event 0: panic while running the projection: " + value
+	}
+
+	return "architecturekit: panic while running the projection: " + value
+}
+
 // assertPanicked asserts that err is what a panic ends a run with: a failure
-// of the category ErrPermanent that names the value of the panic, and holds
-// the stack it happened on.
-func assertPanicked(t *testing.T, err error, value, frame string) {
+// of the category ErrPermanent with the given message, which names the value
+// of the panic, and that holds the stack it happened on.
+func assertPanicked(t *testing.T, err error, message, frame string) {
 	t.Helper()
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, architecturekit.ErrPermanent)
-	assert.ErrorContains(t, err, "architecturekit: panic while running the projection: "+value)
+	assert.ErrorContains(t, err, message)
 	assert.Contains(t, err.Error(), "goroutine ", "the error has to hold the stack")
 	assert.Contains(t, err.Error(), frame, "the stack has to show where the panic happened")
 }
 
 // assertStoppedOnPanic waits for the run to end, and asserts that it has
 // stopped on the panic.
-func assertStoppedOnPanic(t *testing.T, run *architecturekit.ProjectionRun, value, frame string) {
+func assertStoppedOnPanic(t *testing.T, run *architecturekit.ProjectionRun, message, frame string) {
 	t.Helper()
 
 	waitForClosed(t, run.Done(), "Done")
-	assertPanicked(t, run.Err(), value, frame)
+	assertPanicked(t, run.Err(), message, frame)
 
 	status := run.Status()
 	assert.Equal(t, architecturekit.PhaseStopped, status.Phase)
@@ -164,7 +176,7 @@ func TestPanickingProjection(t *testing.T) {
 	t.Run("ends the run rather than the process", func(t *testing.T) {
 		run := architecturekit.StartProjection(t.Context(), storeWithOneEvent(t), architecturekit.ExactSubject("/test"), unprepared())
 
-		assertStoppedOnPanic(t, run, "assignment to entry in nil map", "architecturekit_test.unprepared.")
+		assertStoppedOnPanic(t, run, panickedWith("Apply", "assignment to entry in nil map"), "architecturekit_test.unprepared.")
 	})
 
 	t.Run("comes back from catching up as an error rather than a panic", func(t *testing.T) {
@@ -173,7 +185,7 @@ func TestPanickingProjection(t *testing.T) {
 			err = architecturekit.CatchUpProjection(t.Context(), storeWithOneEvent(t), architecturekit.ExactSubject("/test"), unprepared())
 		})
 
-		assertPanicked(t, err, "assignment to entry in nil map", "architecturekit_test.unprepared.")
+		assertPanicked(t, err, panickedWith("Apply", "assignment to entry in nil map"), "architecturekit_test.unprepared.")
 	})
 
 	// Every function of a projection that the kit calls, with the frame the
@@ -198,7 +210,7 @@ func TestPanickingProjection(t *testing.T) {
 				run := architecturekit.StartProjection(t.Context(), storeWithOneEvent(t), architecturekit.ExactSubject("/test"),
 					&panicky{panicsIn: panicsIn(function)})
 
-				assertStoppedOnPanic(t, run, function+" is broken", frame)
+				assertStoppedOnPanic(t, run, panickedWith(function, function+" is broken"), frame)
 			})
 		}
 
@@ -207,7 +219,7 @@ func TestPanickingProjection(t *testing.T) {
 				run := architecturekit.StartTransactionalProjection(t.Context(), storeWithOneEvent(t), architecturekit.ExactSubject("/test"),
 					&panickyTransactional{panicsIn: panicsIn(function)})
 
-				assertStoppedOnPanic(t, run, function+" is broken", frame)
+				assertStoppedOnPanic(t, run, panickedWith(function, function+" is broken"), frame)
 			})
 		}
 	})
@@ -218,7 +230,7 @@ func TestPanickingProjection(t *testing.T) {
 				err := architecturekit.CatchUpProjection(t.Context(), storeWithOneEvent(t), architecturekit.ExactSubject("/test"),
 					&panicky{panicsIn: panicsIn(function)})
 
-				assertPanicked(t, err, function+" is broken", frame)
+				assertPanicked(t, err, panickedWith(function, function+" is broken"), frame)
 			})
 		}
 
@@ -227,7 +239,7 @@ func TestPanickingProjection(t *testing.T) {
 				err := architecturekit.CatchUpTransactionalProjection(t.Context(), storeWithOneEvent(t), architecturekit.ExactSubject("/test"),
 					&panickyTransactional{panicsIn: panicsIn(function)})
 
-				assertPanicked(t, err, function+" is broken", frame)
+				assertPanicked(t, err, panickedWith(function, function+" is broken"), frame)
 			})
 		}
 	})
@@ -239,7 +251,7 @@ func TestPanickingProjection(t *testing.T) {
 
 		run := architecturekit.StartProjection(t.Context(), storeWithOneEvent(t), architecturekit.ExactSubject("/test"), transient)
 
-		assertStoppedOnPanic(t, run, "transient failure: the index is down", "architecturekit_test.TestPanickingProjection")
+		assertStoppedOnPanic(t, run, panickedWith("Apply", "transient failure: the index is down"), "architecturekit_test.TestPanickingProjection")
 		assert.NotErrorIs(t, run.Err(), architecturekit.ErrTransient, "a panic is a mistake in the code, whatever it panicked with")
 	})
 
@@ -248,7 +260,7 @@ func TestPanickingProjection(t *testing.T) {
 
 		run := architecturekit.StartTransactionalProjection(t.Context(), storeWithOneEvent(t), architecturekit.ExactSubject("/test"), projection)
 
-		assertStoppedOnPanic(t, run, "Apply is broken", "architecturekit_test.(*panickyTx).Apply")
+		assertStoppedOnPanic(t, run, panickedWith("Apply", "Apply is broken"), "architecturekit_test.(*panickyTx).Apply")
 		assert.True(t, projection.hasRolledBack(), "the transaction must not be left open")
 	})
 
@@ -263,8 +275,9 @@ func TestPanickingProjection(t *testing.T) {
 			reconnectingStore(newFakeDatabase(t, &fakeDatabase{events: []int{0}, endObserving: func(int) bool { return false }}), observed),
 			architecturekit.ExactSubject("/test"), projection)
 
-		assertStoppedOnPanic(t, run, "Rollback is broken", "architecturekit_test.(*panickyTx).Rollback")
-		assert.ErrorContains(t, run.Err(), "the row is locked", "the cause of the rollback must not get lost")
+		assertStoppedOnPanic(t, run, panickedWith("Rollback", "Rollback is broken"), "architecturekit_test.(*panickyTx).Rollback")
+		assert.ErrorContains(t, run.Err(), "transient failure: applying event 0: the row is locked",
+			"the cause of the rollback must not get lost, and names the event, while the rollback concerns the batch")
 		assert.Zero(t, observed.count(), "trying again would only panic again")
 	})
 
@@ -281,6 +294,6 @@ func TestPanickingProjection(t *testing.T) {
 
 		run := architecturekit.StartProjection(t.Context(), store, architecturekit.ExactSubject("/test"), &collector{})
 
-		assertStoppedOnPanic(t, run, "the log is broken", "architecturekit_test.TestPanickingProjection")
+		assertStoppedOnPanic(t, run, panickedWith("the observer", "the log is broken"), "architecturekit_test.TestPanickingProjection")
 	})
 }

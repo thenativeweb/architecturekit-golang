@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime/debug"
 	"strconv"
 	"testing"
 	"time"
@@ -62,7 +63,10 @@ func StoredEventsAt(subject string, firstID int, at time.Time, events ...archite
 }
 
 // Project hands the events to the projection, one after another, and fails the
-// test on the first refusal.
+// test on the first refusal, naming the event by its ID, as in applying event
+// 42: ..., rather than by its position. A panic of the projection fails the
+// test the same way, with the value and the stack of the panic, rather than
+// taking the other tests of the package down with it.
 //
 // A projection that is transactional as well fails the test, because its Apply
 // is not what runs in production; use ProjectTransactional for it.
@@ -74,9 +78,11 @@ func Project(t testing.TB, projection architecturekit.Projection, events ...even
 		return
 	}
 
-	for i, event := range events {
-		if err := projection.Apply(context.Background(), event); err != nil {
-			t.Fatalf("projecting event %d of type %q: %v", i, event.Type, err)
+	ctx := context.Background()
+
+	for _, event := range events {
+		if err := applying(func() error { return projection.Apply(ctx, event) }); err != nil {
+			t.Fatalf("applying event %s: %v", event.ID, err)
 			return
 		}
 	}
@@ -85,7 +91,8 @@ func Project(t testing.TB, projection architecturekit.Projection, events ...even
 // ProjectTransactional hands the events to a transactional projection within
 // one transaction, the way StartTransactionalProjection does for a batch. It
 // commits with the ID of the last event, and rolls back and fails the test on
-// the first refusal. Without events, no transaction is begun.
+// the first refusal, naming the event as Project does, also for a panic.
+// Without events, no transaction is begun.
 func ProjectTransactional(t testing.TB, projection architecturekit.Transactional, events ...eventsourcingdb.Event) {
 	t.Helper()
 
@@ -101,12 +108,11 @@ func ProjectTransactional(t testing.TB, projection architecturekit.Transactional
 		return
 	}
 
-	for i, event := range events {
-		if err := tx.Apply(ctx, event); err != nil {
+	for _, event := range events {
+		if err := applying(func() error { return tx.Apply(ctx, event) }); err != nil {
 			// A failing rollback is reported alongside, never instead of, the
 			// failure that caused it.
-			t.Fatalf("projecting event %d of type %q: %v",
-				i, event.Type, errors.Join(err, tx.Rollback(ctx)))
+			t.Fatalf("applying event %s: %v", event.ID, errors.Join(err, tx.Rollback(ctx)))
 			return
 		}
 	}
@@ -114,6 +120,21 @@ func ProjectTransactional(t testing.TB, projection architecturekit.Transactional
 	if err := tx.Commit(ctx, events[len(events)-1].ID); err != nil {
 		t.Fatalf("committing the transaction: %v", err)
 	}
+}
+
+// applying calls apply, and turns a panic in it into an error that holds the
+// value and the stack of the panic, as StartProjection does. So a test fails,
+// naming the event, rather than taking the other tests of the package down
+// with it, and a transaction is rolled back first, as
+// StartTransactionalProjection does.
+func applying(apply func() error) (err error) {
+	defer func() {
+		if value := recover(); value != nil {
+			err = fmt.Errorf("panic: %v\n\n%s", value, debug.Stack())
+		}
+	}()
+
+	return apply()
 }
 
 // ItemsOf reads a view, which is what a query would do before filtering. A
