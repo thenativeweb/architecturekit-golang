@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/thenativeweb/architecturekit-golang/v2/architecturekit"
@@ -70,11 +71,13 @@ func healthHandler(
 	verdict string,
 	isHealthy func(architecturekit.ProjectionStatus) bool,
 ) http.Handler {
-	// The handler keeps a map of its own, so that changing the given slice later
-	// on does not change what it watches.
-	projections := make(map[string]*architecturekit.ProjectionRun, len(runs))
+	// The handler keeps a slice of its own, so that changing the given slice
+	// later on does not change what it watches, and judges the runs in the
+	// order they were handed over.
+	projections := slices.Clone(runs)
+	names := make(map[string]struct{}, len(projections))
 
-	for i, run := range runs {
+	for i, run := range projections {
 		if run == nil {
 			panic(fmt.Sprintf("architecturekit/httpapi: projection %d has no run", i))
 		}
@@ -83,22 +86,22 @@ func healthHandler(
 		if name == "" {
 			panic(fmt.Sprintf("architecturekit/httpapi: projection %d has no name, give it one with architecturekit.Named", i))
 		}
-		if _, exists := projections[name]; exists {
+		if _, exists := names[name]; exists {
 			panic(fmt.Sprintf("architecturekit/httpapi: two projections are named %q", name))
 		}
 
-		projections[name] = run
+		names[name] = struct{}{}
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		isHealthyOverall := true
 		details := make(map[string]projectionHealth, len(projections))
 
-		for name, run := range projections {
+		for _, run := range projections {
 			status := run.Status()
 			isHealthyOverall = isHealthyOverall && isHealthy(status)
 
-			details[name] = projectionHealth{
+			details[run.Name()] = projectionHealth{
 				Phase:       status.Phase,
 				Since:       status.Since,
 				HasCaughtUp: status.HasCaughtUp,

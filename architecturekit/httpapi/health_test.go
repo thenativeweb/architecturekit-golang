@@ -219,15 +219,26 @@ func TestHealth(t *testing.T) {
 		<-stopped.CaughtUp()
 		cancel()
 		<-stopped.Done()
-		projections := []*architecturekit.ProjectionRun{live, stopped}
 
-		code, body, _, _ := askHealth(t, httpapi.Readiness(projections...))
-		assert.Equal(t, http.StatusServiceUnavailable, code)
-		assert.Equal(t, "live", body.Projections["catalog"]["phase"])
-		assert.Equal(t, "stopped", body.Projections["loans"]["phase"])
+		// The stopped run stands last and first, so that judging by either end
+		// of the list alone fails.
+		for _, test := range []struct {
+			name        string
+			projections []*architecturekit.ProjectionRun
+		}{
+			{"with the stopped one last", []*architecturekit.ProjectionRun{live, stopped}},
+			{"with the stopped one first", []*architecturekit.ProjectionRun{stopped, live}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				code, body, _, _ := askHealth(t, httpapi.Readiness(test.projections...))
+				assert.Equal(t, http.StatusServiceUnavailable, code)
+				assert.Equal(t, "live", body.Projections["catalog"]["phase"])
+				assert.Equal(t, "stopped", body.Projections["loans"]["phase"])
 
-		code, _, _, _ = askHealth(t, httpapi.Liveness(projections...))
-		assert.Equal(t, http.StatusServiceUnavailable, code)
+				code, _, _, _ = askHealth(t, httpapi.Liveness(test.projections...))
+				assert.Equal(t, http.StatusServiceUnavailable, code)
+			})
+		}
 	})
 
 	t.Run("is ready and alive without any projection", func(t *testing.T) {
