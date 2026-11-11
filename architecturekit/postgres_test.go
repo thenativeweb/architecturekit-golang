@@ -19,7 +19,7 @@ import (
 )
 
 // These tests run a transactional projection against a real PostgreSQL, built
-// the way the README shows: Begin starts a database transaction and builds the
+// the way the documentation shows: Begin starts a database transaction and builds the
 // handlers on it, and Commit writes the checkpoint into the same transaction.
 // The primary key of the table refuses an event that is applied twice, so a
 // repetition does not go unnoticed.
