@@ -4,7 +4,7 @@ Building blocks for DDD-based applications with CQRS and event sourcing in Go, o
 
 ArchitectureKit covers both sides of an event-sourced application: commands, events, and the state to decide on for writing, and projections, views, and queries for reading. An optional package exposes commands and queries over HTTP.
 
-The complete documentation of ArchitectureKit, including preconditions, views, projections, queries, handling errors, testing, HTTP, and upgrading, is available at **[https://www.eventfoundation.io/docs/architecturekit](https://www.eventfoundation.io/docs/architecturekit)**.
+The complete documentation of ArchitectureKit, including preconditions, views, projections, queries, handling errors, testing, HTTP, and upgrading, is available at **[https://www.eventfoundation.io/docs/architecturekit/go](https://www.eventfoundation.io/docs/architecturekit/go)**.
 
 ## Getting Started
 
@@ -134,4 +134,4 @@ if err != nil {
 }
 ```
 
-For everything else, see the **[complete documentation](https://www.eventfoundation.io/docs/architecturekit)**.
+For everything else, see the **[complete documentation](https://www.eventfoundation.io/docs/architecturekit/go)**.
