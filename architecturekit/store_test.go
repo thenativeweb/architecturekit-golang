@@ -751,14 +751,16 @@ func TestRegisterSchemas(t *testing.T) {
 
 		assert.ErrorIs(t, err, architecturekit.ErrPermanent, "a refused schema is permanent")
 		assert.ErrorContains(t, err, "refused the schema of \""+eventType+"\"")
-		// The reason from the database names what does not match.
-		assert.ErrorContains(t, err, "additionalProperties 'other' not allowed",
+		// The reason from the database names what does not match. The database
+		// words it itself, and the wording differs between its versions, but
+		// each of them names the property that is not allowed.
+		assert.ErrorContains(t, err, "'other'",
 			"error should carry the reason from the database")
 
 		refusal, isAnswer := errors.AsType[*eventsourcingdb.DBAPIError](err)
 		require.True(t, isAnswer, "errors.As has to reach the answer of the database")
 		assert.Equal(t, eventsourcingdb.CodeEventSchemaViolated, refusal.Code)
-		assert.Contains(t, refusal.Description, "additionalProperties 'other' not allowed")
+		assert.Contains(t, refusal.Description, "'other'")
 	})
 
 	t.Run("fails on a missing schema", func(t *testing.T) {
