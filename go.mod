@@ -3,7 +3,7 @@ module github.com/thenativeweb/architecturekit-golang/v2
 go 1.27.1
 
 require (
-	github.com/jackc/pgx/v5 v5.12.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0
 	github.com/thenativeweb/eventsourcingdb-client-golang/v2 v2.3.2
